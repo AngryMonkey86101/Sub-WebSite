@@ -118,7 +118,9 @@ async function check({ config, amnezia, withKeys, out }) {
   await amnezia.health();
   out(`amnezia-api отвечает: ${config.amneziaApiUrl}`);
   const server = await amnezia.serverInfo();
-  out(`Протоколы на сервере: ${server.protocols.join(', ')}; клиентов: ${server.totalPeers} из ${server.maxPeers}`);
+  // maxPeers = 0 — лимит в amnezia-api не задан (SERVER_MAX_PEERS), а не «ноль клиентов»
+  const peerLimit = server.maxPeers > 0 ? ` из ${server.maxPeers}` : ' (лимита нет)';
+  out(`Протоколы на сервере: ${server.protocols.join(', ')}; клиентов: ${server.totalPeers}${peerLimit}`);
   const missing = config.protocols.filter((p) => !server.protocols.includes(p));
   if (missing.length) out(`⚠️ В PROTOCOLS есть протоколы, которых нет на сервере: ${missing.join(', ')}`);
   if (!withKeys) return;

@@ -162,7 +162,7 @@ test('CLI: приглашение админа, список, проверка �
     lines.length = 0;
     await main(['check', '--keys'], { out, dns: healthy, publicIp: async () => '198.51.100.20' });
     const keysText = lines.join('\n');
-    assert.match(keysText, /Протоколы на сервере: amneziawg3, xray/);
+    assert.match(keysText, /Протоколы на сервере: amneziawg3, xray; клиентов: 0 из 200/);
     assert.match(keysText, /AmneziaWG: ключ собирается с адресом k4tq9v\.duckdns\.org/);
     assert.match(keysText, /Xray \(VLESS \+ REALITY\): ключ собирается с адресом k4tq9v\.duckdns\.org/);
     assert.equal(fake.state.clients.size, 0, 'пробные ключи удалены');
