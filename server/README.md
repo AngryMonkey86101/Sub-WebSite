@@ -74,20 +74,44 @@ docker ps --format '{{.Names}}\t{{.Ports}}'
 mkdir ~/family-vpn && cd ~/family-vpn
 ```
 
-Положите сюда содержимое каталога `server/` (вручную или первой выкладкой из GitHub Actions, шаг 7), затем:
+Положите сюда содержимое каталога `server/` (вручную или первой выкладкой из GitHub Actions, шаг 7). Рядом с `docker-compose.yml` должен оказаться `.env.example`.
+
+`.env` — файл настроек и секретов. `docker compose` читает его сам из той же папки, в репозиторий он не попадает. Создайте его одной командой: подставьте свои имена DuckDNS в первые две строки `sed`, остальное она сгенерирует и определит сама. Если `.env` уже есть, команда его не тронет — иначе новые секреты затёрли бы старые.
 
 ```bash
-cp .env.example .env && chmod 600 .env
-openssl rand -hex 32                                  # → AMNEZIA_API_KEY
-openssl rand -base64 32                               # → KEY_ENCRYPTION_KEY
-cat /proc/sys/kernel/random/uuid                      # → SERVER_ID
-stat -c '%g' /var/run/docker.sock                     # → DOCKER_GID
-docker version --format '{{.Server.APIVersion}}'      # → DOCKER_API_VERSION
+cd ~/family-vpn
+if [ -e .env ]; then echo "Файл .env уже есть — не перезаписываю"; else
+cp .env.example .env && chmod 600 .env && sed -i \
+  -e "s|^PORTAL_HOST=.*|PORTAL_HOST=<имя-портала>.duckdns.org|" \
+  -e "s|^VPN_HOST=.*|VPN_HOST=<имя-vpn>.duckdns.org|" \
+  -e "s|^AMNEZIA_API_KEY=.*|AMNEZIA_API_KEY=$(openssl rand -hex 32)|" \
+  -e "s|^SERVER_ID=.*|SERVER_ID=$(cat /proc/sys/kernel/random/uuid)|" \
+  -e "s|^DOCKER_GID=.*|DOCKER_GID=$(stat -c '%g' /var/run/docker.sock)|" \
+  -e "s|^DOCKER_API_VERSION=.*|DOCKER_API_VERSION=$(docker version --format '{{.Server.APIVersion}}')|" \
+  -e "s|^KEY_ENCRYPTION_KEY=.*|KEY_ENCRYPTION_KEY=$(openssl rand -base64 32)|" \
+  .env && echo "Готово"; fi
 ```
 
-Впишите значения в `.env`, а также `PORTAL_HOST` и `VPN_HOST` (имена DuckDNS из шага 1).
+Проверьте результат: `grep -v '^#' .env`. Ни одна строка, кроме `TELEGRAM_*`, не должна быть пустой.
 
-> **Сохраните `.env` в менеджер паролей.** Без `KEY_ENCRYPTION_KEY` портал не сможет снова показать выданные ключи (VPN при этом продолжит работать). Полный бэкап — этап 4 плана.
+| Строка | Что это | Откуда |
+|---|---|---|
+| `PORTAL_HOST` | Имя сайта портала | Второе имя DuckDNS. Можно то же, что `VPN_HOST`: всё заработает, но имя VPN попадёт в публичный журнал сертификатов |
+| `VPN_HOST` | Адрес сервера в ключах семьи | Имя DuckDNS из шага 1 |
+| `PROTOCOLS`, `DEFAULT_DEVICE_LIMIT` | Протоколы и лимит устройств | Оставить как есть |
+| `AMNEZIA_API_KEY` | Пароль, с которым портал обращается к amnezia-api; вводить его никуда не нужно | `openssl rand -hex 32` — 64 символа |
+| `AMNEZIA_API_VERSION` | Версия amnezia-api | Оставить `2.0.0` |
+| `SERVER_ID` | Идентификатор сервера для amnezia-api | Случайный UUID |
+| `DOCKER_GID` | Группа файла `docker.sock`: без неё amnezia-api не управляет контейнерами Amnezia | `stat`, обычно число вроде `988` или `999` |
+| `DOCKER_API_VERSION` | Версия Docker на сервере | `docker version`, вроде `1.51` |
+| `KEY_ENCRYPTION_KEY` | Ключ, которым портал шифрует выданные ключи VPN в своей базе | `openssl rand -base64 32` — 44 символа, на конце `=` |
+| `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` | Уведомления | Пока пусто, шаг 6 |
+
+**Сохраните `.env` в менеджер паролей** (KeePassXC, Bitwarden и т. п.) как защищённую заметку «Семейный VPN — .env»: выведите файл командой `cat .env` и скопируйте текст. Почему это важно:
+
+- **`KEY_ENCRYPTION_KEY` — единственное, что нельзя восстановить.** Ключи VPN портал хранит только зашифрованными этим ключом. Если ключ потерян или заменён, кнопка «Показать ключ» перестанет работать у всех устройств. VPN на устройствах при этом продолжит работать, но для нового телефона или переустановки приложения придётся отзывать ключ и выдавать новый. Поэтому `KEY_ENCRYPTION_KEY` после выдачи первых ключей не меняют.
+- **Остальное заменимо:** `AMNEZIA_API_KEY` и `SERVER_ID` можно сгенерировать заново, `DOCKER_*` — определить заново, токен бота — перевыпустить у @BotFather. После замены — `docker compose up -d`.
+- **Никому не пересылайте `.env`**, не вставляйте в чаты и не добавляйте в репозиторий. Полный бэкап сервера — этап 4 плана.
 
 ### 5. Запуск и проверка
 
