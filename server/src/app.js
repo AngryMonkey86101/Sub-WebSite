@@ -109,11 +109,11 @@ function createApp({ portal, config, now = () => Date.now() }) {
     return id;
   }
 
-  async function statusesOrError() {
+  async function serverKeysOrError() {
     try {
-      return { statuses: await portal.peerStatuses(), statusError: null };
+      return { ...(await portal.serverKeys()), statusError: null };
     } catch (err) {
-      return { statuses: null, statusError: err.message };
+      return { statuses: null, foreign: null, statusError: err.message };
     }
   }
 
@@ -123,7 +123,7 @@ function createApp({ portal, config, now = () => Date.now() }) {
     ['GET', /^\/$/, async ({ member }) => {
       if (!member) return page(200, landingPage());
       const devices = portal.devicesOf(member.id);
-      const { statuses } = devices.length ? await statusesOrError() : { statuses: null };
+      const { statuses } = devices.length ? await serverKeysOrError() : { statuses: null };
       return page(200, cabinetPage({ member, devices, statuses, protocols: config.protocols, nowMs: now() }));
     }],
 
@@ -187,11 +187,12 @@ function createApp({ portal, config, now = () => Date.now() }) {
 
     ['GET', /^\/admin$/, async ({ member }) => {
       const admin = requireAdmin(member);
-      const { statuses, statusError } = await statusesOrError();
+      const { statuses, foreign, statusError } = await serverKeysOrError();
       return page(200, adminPage({
         admin,
         members: portal.listMembers(),
         statuses,
+        foreign,
         statusError,
         ipHosts: portal.ipHosts(),
         events: portal.recentEvents(),

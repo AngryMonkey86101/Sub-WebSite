@@ -48,6 +48,9 @@ function createPortal({ db, config, amnezia, notify, now = () => Date.now() }) {
     deleteDevice: db.prepare('DELETE FROM devices WHERE id = ?'),
     stalePending: db.prepare('SELECT * FROM devices WHERE client_id IS NULL AND revoked_at IS NULL AND created_at <= ?'),
     ipHosts: db.prepare('SELECT DISTINCT host FROM devices WHERE revoked_at IS NULL AND host IS NOT NULL'),
+    activeClientIds: db.prepare('SELECT client_id FROM devices WHERE client_id IS NOT NULL AND revoked_at IS NULL'),
+    pendingNames: db.prepare(`SELECT m.code, d.number FROM devices d JOIN members m ON m.id = d.member_id
+      WHERE d.client_id IS NULL AND d.revoked_at IS NULL`),
 
     insertEvent: db.prepare('INSERT INTO events (at, type, member_code, details) VALUES (?, ?, ?, ?)'),
     recentEvents: db.prepare('SELECT * FROM events ORDER BY id DESC LIMIT ?')
@@ -290,13 +293,22 @@ function createPortal({ db, config, amnezia, notify, now = () => Date.now() }) {
     });
   }
 
-  // Состояние ключей на сервере: client_id → { online, lastHandshake, traffic, status }
-  async function peerStatuses() {
+  // Все ключи на сервере. statuses — состояние каждого ключа по client_id: { online, lastHandshake,
+  // traffic, status }. foreign — ключи, выданные мимо портала (в приложении Amnezia): их имена
+  // показываются только админу и в базе портала не сохраняются. Ключ, который портал прямо сейчас
+  // создаёт, своего client_id ещё не получил — его узнаём по имени «код-номер».
+  async function serverKeys() {
+    const known = new Set(q.activeClientIds.all().map((row) => row.client_id));
+    const pending = new Set(q.pendingNames.all().map((row) => `${row.code}-${row.number}`));
     const statuses = new Map();
+    const foreign = [];
     for (const client of await amnezia.listClients()) {
-      for (const peer of client.peers) statuses.set(peer.id, peer);
+      for (const peer of client.peers) {
+        statuses.set(peer.id, peer);
+        if (!known.has(peer.id) && !pending.has(client.name)) foreign.push({ ...peer, name: client.name });
+      }
     }
-    return statuses;
+    return { statuses, foreign };
   }
 
   // Адреса в действующих ключах, которые выглядят как IP: ключи перестанут работать при смене IP
@@ -347,7 +359,7 @@ function createPortal({ db, config, amnezia, notify, now = () => Date.now() }) {
     deleteMember,
     setDeviceLimit,
     listMembers,
-    peerStatuses,
+    serverKeys,
     ipHosts,
     recentEvents,
     qrCodes,

@@ -261,6 +261,41 @@ test('админ выдаёт ключи из админки: с меткой, �
   assert.equal(db.prepare('SELECT label FROM devices WHERE id = ?').get(ownId).label, null, 'участник метку не задаёт');
 });
 
+test('админка показывает ключи вне портала: из приложения Amnezia, без ключей портала и IP', async () => {
+  const admin = await joinedMember({ role: 'admin' });
+  const regular = await joinedMember();
+  await addDevice(regular.browser);
+  const amnezia = createAmneziaClient({ baseUrl: fake.url, apiKey: API_KEY });
+  const manual = await amnezia.createClient({ name: 'Ручной ключ', protocol: 'amneziawg3' });
+  fake.state.clients.get(manual.id).online = true;
+
+  // ключ, который портал прямо сейчас создаёт: на сервере уже есть, client_id в базе ещё нет
+  db.prepare("INSERT INTO devices (member_id, number, platform, protocol, created_at) VALUES (?, 9, 'ios', 'amneziawg3', ?)").run(regular.member.id, clock);
+  const creating = await amnezia.createClient({ name: `${regular.member.code}-9`, protocol: 'amneziawg3' });
+
+  try {
+    const page = (await admin.browser.get('/admin')).text;
+    const section = page.split('<h2>Ключи вне портала</h2>')[1]?.split('<h2>')[0] ?? '';
+    assert.match(section, /<b>Ручной ключ<\/b> · AmneziaWG <span class="status">в сети/);
+    assert.ok(!section.includes(`${regular.member.code}-`), 'ключи портала, в том числе создаваемый, сюда не попадают');
+    assert.ok(!page.includes(DEVICE_IP));
+
+    const portalIds = new Set(db.prepare('SELECT client_id FROM devices WHERE client_id IS NOT NULL AND revoked_at IS NULL').all().map((r) => r.client_id));
+    const total = fake.state.clients.size;
+    const outside = [...fake.state.clients.values()].filter((c) => !portalIds.has(c.id) && c.id !== creating.id).length;
+    assert.match(page, new RegExp(`Всего ключей на сервере: ${total}: через портал — ${total - outside}, вне портала — ${outside}\\.`));
+
+    fake.state.failNext = 500;
+    const offline = (await admin.browser.get('/admin')).text;
+    assert.match(offline, /Нет связи с amnezia-api/);
+    assert.ok(!offline.includes('Ключи вне портала'));
+  } finally {
+    db.prepare('DELETE FROM devices WHERE member_id = ? AND number = 9').run(regular.member.id);
+    await amnezia.deleteClient({ id: creating.id, protocol: 'amneziawg3' });
+    await amnezia.deleteClient({ id: manual.id, protocol: 'amneziawg3' });
+  }
+});
+
 test('пауза, возобновление и удаление участника', async () => {
   const admin = await joinedMember({ role: 'admin' });
   const { member, browser: b } = await joinedMember();

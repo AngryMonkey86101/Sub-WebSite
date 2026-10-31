@@ -254,7 +254,7 @@ function memberState(member) {
   return STATUS_LABELS[member.status];
 }
 
-function adminPage({ admin, members, statuses, statusError, ipHosts, events, protocols, defaultDeviceLimit, nowMs }) {
+function adminPage({ admin, members, statuses, foreign, statusError, ipHosts, events, protocols, defaultDeviceLimit, nowMs }) {
   return layout({
     title: 'Админка',
     member: admin,
@@ -313,6 +313,16 @@ function adminPage({ admin, members, statuses, statusError, ipHosts, events, pro
             </form>`}
           </div>
         </li>`)}</ul>
+
+      ${foreign
+        ? html`
+      <h2>Ключи вне портала</h2>
+      <p class="muted">Всего ключей на сервере: ${statuses.size}: через портал — ${statuses.size - foreign.length}, вне портала — ${foreign.length}. Вне портала — ключи из приложения Amnezia: выданные вручную и подключение самого приложения. Портал ими не управляет: пауза и отзыв — в приложении Amnezia (настройки сервера → пользователи).</p>
+      ${foreign.length
+        ? html`<ul class="devices compact">${foreign.map((peer) => html`
+        <li><b>${peer.name || 'без имени'}</b> · ${PROTOCOLS[peer.protocol] ?? peer.protocol} <span class="status">${deviceStatus(peer, peer, nowMs)}</span></li>`)}</ul>`
+        : html`<p>Таких ключей нет.</p>`}`
+        : ''}
 
       <h2>Журнал</h2>
       <ul class="events">${events.map((event) => html`
