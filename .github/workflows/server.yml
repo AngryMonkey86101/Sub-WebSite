@@ -1,0 +1,85 @@
+# Портал: тесты и сборка Docker-образа на каждый пуш и пул-реквест с изменениями в server/.
+# Выкладка на VPS — только если в Settings → Secrets → Actions заданы:
+#   SERVER_HOST        — имя портала в DuckDNS (не IP: IP может смениться)
+#   SERVER_USER        — пользователь SSH (с правом запускать docker)
+#   SERVER_SSH_KEY     — закрытый SSH-ключ для этого пользователя
+#   SERVER_KNOWN_HOSTS — строка из `ssh-keyscan <имя портала>` (защита от подмены сервера)
+# Без секретов шаг выкладки пропускается, а не падает. Выкладывается только из main.
+# Файл .env на сервере не перезаписывается: секреты живут только там.
+name: Server
+
+on:
+  push:
+    branches: [main]
+    paths: ['server/**', '.github/workflows/server.yml']
+  pull_request:
+    paths: ['server/**', '.github/workflows/server.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+      - name: Тесты портала
+        working-directory: server
+        run: npm test
+      - name: Сборка Docker-образа
+        working-directory: server
+        run: docker build -t family-vpn-portal .
+      - name: Проверка образа
+        run: |
+          docker run -d --name portal -p 8080:8080 \
+            -e PUBLIC_URL=https://portal.example \
+            -e AMNEZIA_API_KEY="$(openssl rand -hex 32)" \
+            -e KEY_ENCRYPTION_KEY="$(openssl rand -base64 32)" \
+            family-vpn-portal
+          for i in $(seq 1 20); do curl -fsS http://127.0.0.1:8080/healthz && exit 0; sleep 1; done
+          docker logs portal; exit 1
+      - name: Проверка docker compose
+        working-directory: server
+        run: |
+          cp .env.example .env
+          sed -i -e 's/^AMNEZIA_API_KEY=$/AMNEZIA_API_KEY=x/' -e 's/^SERVER_ID=$/SERVER_ID=x/' \
+            -e 's/^DOCKER_GID=$/DOCKER_GID=999/' -e 's/^DOCKER_API_VERSION=$/DOCKER_API_VERSION=1.44/' \
+            -e 's/^KEY_ENCRYPTION_KEY=$/KEY_ENCRYPTION_KEY=x/' .env
+          docker compose config -q
+
+  deploy:
+    needs: test
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      SERVER_HOST: ${{ secrets.SERVER_HOST }}
+    steps:
+      - uses: actions/checkout@v7
+        if: env.SERVER_HOST != ''
+      - name: SSH-ключ
+        if: env.SERVER_HOST != ''
+        env:
+          SSH_KEY: ${{ secrets.SERVER_SSH_KEY }}
+          KNOWN_HOSTS: ${{ secrets.SERVER_KNOWN_HOSTS }}
+        run: |
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/id_deploy && chmod 600 ~/.ssh/id_deploy
+          printf '%s\n' "$KNOWN_HOSTS" > ~/.ssh/known_hosts
+      - name: Выкладка
+        if: env.SERVER_HOST != ''
+        env:
+          SERVER_USER: ${{ secrets.SERVER_USER }}
+        run: |
+          rsync -az --delete --exclude .env --exclude data -e "ssh -i ~/.ssh/id_deploy" \
+            server/ "$SERVER_USER@$SERVER_HOST:family-vpn/"
+          ssh -i ~/.ssh/id_deploy "$SERVER_USER@$SERVER_HOST" \
+            'cd family-vpn && docker compose up -d --build --remove-orphans && docker image prune -f'
+      - name: Выкладка пропущена
+        if: env.SERVER_HOST == ''
+        run: echo "Секреты SERVER_* не заданы — выкладка на сервер пропущена"

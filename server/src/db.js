@@ -1,0 +1,71 @@
+import { DatabaseSync } from 'node:sqlite';
+
+// Хранилище портала. Персональных данных нет: участник — это случайный код, устройство —
+// платформа из списка и номер. Токены — только хэши, ключи VPN — зашифрованы.
+const SCHEMA = `
+  CREATE TABLE IF NOT EXISTS members (
+    id INTEGER PRIMARY KEY,
+    code TEXT NOT NULL UNIQUE,
+    role TEXT NOT NULL,
+    device_limit INTEGER NOT NULL,
+    status TEXT NOT NULL,
+    created_at INTEGER NOT NULL
+  );
+  CREATE TABLE IF NOT EXISTS invites (
+    token_hash TEXT PRIMARY KEY,
+    member_id INTEGER NOT NULL REFERENCES members(id) ON DELETE CASCADE,
+    created_at INTEGER NOT NULL,
+    expires_at INTEGER NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS invites_member ON invites(member_id);
+  CREATE TABLE IF NOT EXISTS access_tokens (
+    token_hash TEXT PRIMARY KEY,
+    member_id INTEGER NOT NULL REFERENCES members(id) ON DELETE CASCADE,
+    created_at INTEGER NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS access_tokens_member ON access_tokens(member_id);
+  CREATE TABLE IF NOT EXISTS devices (
+    id INTEGER PRIMARY KEY,
+    member_id INTEGER NOT NULL REFERENCES members(id) ON DELETE CASCADE,
+    number INTEGER NOT NULL,
+    platform TEXT NOT NULL,
+    protocol TEXT NOT NULL,
+    client_id TEXT,
+    host TEXT,
+    key_enc TEXT,
+    created_at INTEGER NOT NULL,
+    revoked_at INTEGER,
+    UNIQUE (member_id, number)
+  );
+  CREATE TABLE IF NOT EXISTS events (
+    id INTEGER PRIMARY KEY,
+    at INTEGER NOT NULL,
+    type TEXT NOT NULL,
+    member_code TEXT,
+    details TEXT
+  );
+`;
+
+function openDatabase(path) {
+  const db = new DatabaseSync(path);
+  db.exec('PRAGMA foreign_keys = ON;');
+  // WAL: команды CLI (docker compose exec portal …) работают с базой параллельно с сервером
+  if (path !== ':memory:') db.exec('PRAGMA journal_mode = WAL; PRAGMA busy_timeout = 5000;');
+  db.exec(SCHEMA);
+  return db;
+}
+
+// Несколько изменений как одно целое: либо все, либо ни одного
+function transaction(db, fn) {
+  db.exec('BEGIN IMMEDIATE');
+  try {
+    const result = fn();
+    db.exec('COMMIT');
+    return result;
+  } catch (err) {
+    db.exec('ROLLBACK');
+    throw err;
+  }
+}
+
+export { openDatabase, transaction };

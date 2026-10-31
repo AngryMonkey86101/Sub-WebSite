@@ -1,0 +1,79 @@
+# Запуск на сервере: docker compose up -d --build  (настройки — в файле .env рядом, образец .env.example)
+#
+# Контейнеры VPN (amnezia-awg2, amnezia-xray) сюда не входят: их ставит приложение Amnezia
+# или amnezia-protocols. amnezia-api управляет ими через Docker.
+services:
+  portal:
+    build: .
+    restart: unless-stopped
+    depends_on:
+      - amnezia-api
+    environment:
+      PUBLIC_URL: https://${PORTAL_HOST:?Укажите PORTAL_HOST в .env}
+      AMNEZIA_API_URL: http://amnezia-api:4001
+      AMNEZIA_API_KEY: ${AMNEZIA_API_KEY:?Укажите AMNEZIA_API_KEY в .env}
+      KEY_ENCRYPTION_KEY: ${KEY_ENCRYPTION_KEY:?Укажите KEY_ENCRYPTION_KEY в .env}
+      PROTOCOLS: ${PROTOCOLS:-amneziawg3,xray}
+      DEFAULT_DEVICE_LIMIT: ${DEFAULT_DEVICE_LIMIT:-4}
+      APP_DOWNLOAD_URL: ${APP_DOWNLOAD_URL:-}
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+      TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID:-}
+    volumes:
+      - data:/data
+    # Порт наружу не открыт: к порталу ходит только Caddy. Поэтому порталу можно доверять
+    # заголовку X-Forwarded-For (TRUST_PROXY=1 в образе)
+    expose:
+      - "8080"
+    logging: &logging
+      driver: json-file
+      options:
+        max-size: "1m"
+        max-file: "3"
+
+  # REST поверх контейнеров Amnezia (github.com/kyoresuas/amnezia-api). Порт наружу не открыт:
+  # к нему ходит только портал по внутренней сети. Доступ к docker.sock — это права root
+  # на хосте, поэтому версия образа зафиксирована; обновлять — только прочитав изменения.
+  amnezia-api:
+    image: ghcr.io/kyoresuas/amnezia-api:${AMNEZIA_API_VERSION:-2.0.0}
+    init: true
+    restart: unless-stopped
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    group_add:
+      - "${DOCKER_GID:?Укажите DOCKER_GID в .env}"
+    environment:
+      FASTIFY_ROUTES: "0.0.0.0:4001"
+      ENV: production
+      FASTIFY_API_KEY: ${AMNEZIA_API_KEY:?Укажите AMNEZIA_API_KEY в .env}
+      # Адрес сервера в выдаваемых ключах — имя DuckDNS, а не IP: ключи переживают смену IP
+      SERVER_PUBLIC_HOST: ${VPN_HOST:?Укажите VPN_HOST в .env}
+      PROTOCOLS_ENABLED: ${PROTOCOLS:-amneziawg3,xray}
+      SERVER_ID: ${SERVER_ID:?Укажите SERVER_ID в .env}
+      SERVER_NAME: family
+      CORS_ORIGINS: ""
+      DOCKER_API_VERSION: ${DOCKER_API_VERSION:?Укажите DOCKER_API_VERSION в .env}
+    expose:
+      - "4001"
+    logging: *logging
+
+  caddy:
+    image: caddy:2.11.7-alpine
+    restart: unless-stopped
+    depends_on:
+      - portal
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    environment:
+      PORTAL_HOST: ${PORTAL_HOST:?Укажите PORTAL_HOST в .env}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    logging: *logging
+
+volumes:
+  data:
+  caddy_data:
+  caddy_config:

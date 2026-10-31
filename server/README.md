@@ -1,0 +1,188 @@
+# Портал семейного VPN
+
+Члены семьи сами получают ключи AmneziaVPN для своих устройств по личной ссылке. Портал работает поверх [amnezia-api](https://github.com/kyoresuas/amnezia-api) — REST-доступа к контейнерам Amnezia на том же VPS. Общий план — в [docs/PLAN.md](../docs/PLAN.md).
+
+- **Технологии:** Node.js 22.13+ без внешних зависимостей (`node:http`, `node:sqlite`, `node:crypto`, `node:zlib`). Данные — SQLite на томе Docker. HTTPS — Caddy, сертификат выпускается и продлевается сам.
+- **Обезличенность:**
+  - участник — случайный код (`K7M2`), имён и контактов нет;
+  - ключ на сервере Amnezia называется «код-номер» (`K7M2-2`);
+  - IP-адреса устройств портал отбрасывает сразу при получении от amnezia-api;
+  - журналы запросов не ведутся.
+- **Ключи VPN** в базе зашифрованы AES-256-GCM ключом из `.env`.
+- **Протоколы:** AmneziaWG (основной) и Xray VLESS + REALITY (запасной, на порту 8443: 443 занят порталом).
+- **Уведомления** админу — в Telegram, в текстах только коды участников.
+
+## Как это устроено для семьи
+
+1. Админ создаёт приглашение (в админке или командой CLI) и передаёт ссылку лично.
+2. Человек открывает ссылку и нажимает «Получить доступ». Он получает личную ссылку, её нужно сохранить.
+3. В кабинете человек выбирает платформу и получает ключ `vpn://` и QR-код для приложения AmneziaVPN. Лимит по умолчанию — 4 устройства.
+4. Ненужное устройство человек отзывает сам. Админ может поставить участника на паузу (ключи выключаются, но не меняются), удалить его или выдать новую ссылку взамен потерянной.
+
+## Установка на VPS (этап 1)
+
+Пример для VPS AmneziaHost с Ubuntu. Команды выполняются под root, если не сказано иное.
+
+### 1. Имена DuckDNS
+
+1. На [duckdns.org](https://www.duckdns.org) заведите отдельный аккаунт и два случайных имени, без слов «vpn» и «family»:
+   - `<имя-vpn>` — адрес сервера в ключах;
+   - `<имя-портала>` — сайт.
+2. Укажите для обоих IP сервера. Пока вручную; автоматическое обновление — этап 3 плана.
+3. Проверьте: обе записи отдают IP сервера, а записи AAAA (IPv6) нет. Заодно посмотрите TTL.
+   ```bash
+   nslookup -debug <имя-vpn>.duckdns.org
+   ```
+
+### 2. Протоколы VPN
+
+Нужны контейнеры `amnezia-awg2` (AmneziaWG) и `amnezia-xray` (Xray) — те же, что ставит приложение Amnezia.
+
+- **Через приложение Amnezia:** добавьте сервер **по имени `<имя-vpn>.duckdns.org`, а не по IP** и установите AmneziaWG.
+- **Без приложения:** [amnezia-protocols](https://github.com/kyoresuas/amnezia-protocols).
+  ```bash
+  curl -fsSL https://raw.githubusercontent.com/kyoresuas/amnezia-protocols/main/install.sh | bash -s -- awg
+  ```
+
+Xray должен слушать **не 443**: этот порт нужен порталу. Если Xray ещё не стоит или стоит на 443, а ключей Xray никому не выдано, поставьте его заново на 8443:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/kyoresuas/amnezia-protocols/main/install.sh | bash -s -- xray --port 8443 --force
+```
+
+`--force` создаёт новые ключи сервера Xray — после выдачи ключей семье так делать нельзя.
+
+Проверьте, что порты 80 и 443 свободны и какие порты у VPN:
+
+```bash
+ss -ltnup | grep -E ':(80|443)\b'      # должно быть пусто
+docker ps --format '{{.Names}}\t{{.Ports}}'
+```
+
+### 3. Пользователь для выкладки и фаервол
+
+1. Пользователь `deploy` с правом запускать Docker:
+   ```bash
+   adduser --disabled-password deploy && usermod -aG docker deploy
+   ```
+2. На своём компьютере: `ssh-keygen -t ed25519 -f family-vpn-deploy -C github-actions`. Содержимое `family-vpn-deploy.pub` добавьте в `/home/deploy/.ssh/authorized_keys`.
+3. Фаервол: SSH, HTTP/HTTPS портала, UDP-порт AWG (по умолчанию 55424, смотрите вывод `docker ps`) и TCP 8443 для Xray.
+   ```bash
+   ufw allow 22/tcp && ufw allow 80,443/tcp && ufw allow 443/udp && ufw allow 55424/udp && ufw allow 8443/tcp && ufw enable
+   ```
+
+### 4. Настройки портала
+
+На сервере под `deploy`:
+
+```bash
+mkdir ~/family-vpn && cd ~/family-vpn
+```
+
+Положите сюда содержимое каталога `server/` (вручную или первой выкладкой из GitHub Actions, шаг 7), затем:
+
+```bash
+cp .env.example .env && chmod 600 .env
+openssl rand -hex 32                                  # → AMNEZIA_API_KEY
+openssl rand -base64 32                               # → KEY_ENCRYPTION_KEY
+cat /proc/sys/kernel/random/uuid                      # → SERVER_ID
+stat -c '%g' /var/run/docker.sock                     # → DOCKER_GID
+docker version --format '{{.Server.APIVersion}}'      # → DOCKER_API_VERSION
+```
+
+Впишите значения в `.env`, а также `PORTAL_HOST` и `VPN_HOST` (имена DuckDNS из шага 1).
+
+> **Сохраните `.env` в менеджер паролей.** Без `KEY_ENCRYPTION_KEY` портал не сможет снова показать выданные ключи (VPN при этом продолжит работать). Полный бэкап — этап 4 плана.
+
+### 5. Запуск и проверка
+
+```bash
+docker compose up -d --build
+docker compose ps
+docker compose exec portal npm run -s cli -- check --keys
+```
+
+`check --keys` проверяет связь с amnezia-api и список протоколов. Затем для каждого протокола создаёт пробный ключ, показывает, с каким адресом он собран, и сразу удаляет. Должно быть имя `<имя-vpn>.duckdns.org`, а не IP.
+
+Первый админ:
+
+```bash
+docker compose exec portal npm run -s cli -- invite --admin
+```
+
+Откройте ссылку на телефоне, нажмите «Получить доступ», сохраните личную ссылку. Добавьте своё устройство и проверьте подключение в AmneziaVPN по AmneziaWG и по Xray. Админка — по ссылке «админка» в шапке.
+
+### 6. Уведомления в Telegram
+
+1. Создайте бота у [@BotFather](https://t.me/BotFather) и скопируйте токен.
+2. Напишите боту любое сообщение и узнайте id чата:
+   ```bash
+   curl -s "https://api.telegram.org/bot<ТОКЕН>/getUpdates" | grep -o '"chat":{"id":-\?[0-9]*'
+   ```
+3. Впишите `TELEGRAM_BOT_TOKEN` и `TELEGRAM_CHAT_ID` в `.env`, затем выполните `docker compose up -d`.
+
+Портал сообщает:
+- о приглашении, которое открыли;
+- о выданных и отозванных ключах;
+- о паузе и удалении участников;
+- о сбоях amnezia-api;
+- о ключе, который собран с IP вместо имени DuckDNS.
+
+### 7. Выкладка из GitHub Actions
+
+Settings → Secrets and variables → Actions:
+
+- `SERVER_HOST` — `<имя-портала>.duckdns.org` (имя, а не IP: IP может смениться);
+- `SERVER_USER` — `deploy`;
+- `SERVER_SSH_KEY` — содержимое закрытого ключа `family-vpn-deploy`;
+- `SERVER_KNOWN_HOSTS` — вывод `ssh-keyscan <имя-портала>.duckdns.org`.
+
+После этого каждый пуш с изменениями в `server/` проверяется тестами и сборкой образа. Пуш в `main` ещё и выкладывается на сервер (workflow `.github/workflows/server.yml`). Файл `.env` и база на сервере при выкладке не трогаются.
+
+### Трафик Xray в админке (необязательно)
+
+Xray не сообщает о рукопожатиях, а трафик amnezia-api видит только при включённой статистике Xray. Включить её можно скриптом из amnezia-api. Скрипт меняет `server.json` и сохраняет прежний как `server.json.bak`; контейнер перезапускается, клиенты Xray отключаются на несколько секунд.
+
+```bash
+git clone --depth 1 --branch v2.0.0 https://github.com/kyoresuas/amnezia-api.git /tmp/amnezia-api
+docker exec amnezia-xray cat /opt/amnezia/xray/server.json > /tmp/server.json
+python3 /tmp/amnezia-api/scripts/xray/setup_xray_stats.py /tmp/server.json   # changed или unchanged
+docker exec amnezia-xray cp /opt/amnezia/xray/server.json /opt/amnezia/xray/server.json.bak
+docker cp /tmp/server.json amnezia-xray:/opt/amnezia/xray/server.json && docker restart amnezia-xray
+```
+
+Последние две команды нужны, только если скрипт ответил `changed`.
+
+## Команды CLI
+
+На сервере запускаются в контейнере портала: `docker compose exec portal npm run -s cli -- <команда>`.
+
+| Команда | Что делает |
+|---|---|
+| `invite [--admin] [--devices N]` | Новый участник и приглашение на 3 дня |
+| `relink КОД` | Новое приглашение взамен потерянной ссылки; прежние ссылки перестают работать, ключи остаются |
+| `list` | Участники и их устройства |
+| `check [--keys]` | Связь с amnezia-api; с `--keys` — пробный ключ каждого протокола |
+
+## Локальный запуск и тесты
+
+```bash
+cd server
+npm test        # тесты (node:test) с поддельным amnezia-api, без зависимостей
+PUBLIC_URL=http://localhost:8080 COOKIE_SECURE=0 DB_PATH=:memory: \
+AMNEZIA_API_URL=http://127.0.0.1:4001 AMNEZIA_API_KEY=… KEY_ENCRYPTION_KEY="$(openssl rand -base64 32)" \
+npm start       # портал на http://localhost:8080
+```
+
+## Устройство
+
+| Файл | Что внутри |
+|---|---|
+| `src/portal.js` | Логика: участники, приглашения, устройства, пауза, уборка брошенных ключей |
+| `src/app.js` | HTTP: маршруты, cookie, проверка Origin, заголовки безопасности |
+| `src/pages.js` | HTML-страницы с экранированием |
+| `src/amnezia.js` | Адаптер к amnezia-api; единственное место, которое знает его контракт |
+| `src/vpnKey.js` | Формат `vpn://` (как `qCompress` в клиенте Amnezia) |
+| `src/crypto.js` | Токены, коды участников, AES-256-GCM |
+| `src/telegram.js` | Уведомления |
+| `src/cli.js` | Команды админа |
