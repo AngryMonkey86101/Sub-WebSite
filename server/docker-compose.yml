@@ -1,6 +1,6 @@
 # Запуск на сервере: docker compose up -d --build  (настройки — в файле .env рядом, образец .env.example)
 #
-# Контейнеры VPN (amnezia-awg2, amnezia-xray) сюда не входят: их ставит приложение Amnezia
+# Контейнеры VPN (amnezia-awg2, позже amnezia-xray) сюда не входят: их ставит приложение Amnezia
 # или amnezia-protocols. amnezia-api управляет ими через Docker.
 services:
   portal:
@@ -10,10 +10,11 @@ services:
       - amnezia-api
     environment:
       PUBLIC_URL: https://${PORTAL_HOST:?Укажите PORTAL_HOST в .env}
+      VPN_HOST: ${VPN_HOST:?Укажите VPN_HOST в .env}
       AMNEZIA_API_URL: http://amnezia-api:4001
       AMNEZIA_API_KEY: ${AMNEZIA_API_KEY:?Укажите AMNEZIA_API_KEY в .env}
       KEY_ENCRYPTION_KEY: ${KEY_ENCRYPTION_KEY:?Укажите KEY_ENCRYPTION_KEY в .env}
-      PROTOCOLS: ${PROTOCOLS:-amneziawg3,xray}
+      PROTOCOLS: ${PROTOCOLS:-amneziawg3}
       DEFAULT_DEVICE_LIMIT: ${DEFAULT_DEVICE_LIMIT:-4}
       APP_DOWNLOAD_URL: ${APP_DOWNLOAD_URL:-}
       TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
@@ -47,7 +48,7 @@ services:
       FASTIFY_API_KEY: ${AMNEZIA_API_KEY:?Укажите AMNEZIA_API_KEY в .env}
       # Адрес сервера в выдаваемых ключах — имя DuckDNS, а не IP: ключи переживают смену IP
       SERVER_PUBLIC_HOST: ${VPN_HOST:?Укажите VPN_HOST в .env}
-      PROTOCOLS_ENABLED: ${PROTOCOLS:-amneziawg3,xray}
+      PROTOCOLS_ENABLED: ${PROTOCOLS:-amneziawg3}
       SERVER_ID: ${SERVER_ID:?Укажите SERVER_ID в .env}
       SERVER_NAME: family
       CORS_ORIGINS: ""

@@ -1,6 +1,7 @@
 import { parseArgs } from 'node:util';
 import { pathToFileURL } from 'node:url';
 import { randomBytes } from 'node:crypto';
+import * as systemDns from 'node:dns/promises';
 import { openDatabase } from './db.js';
 import { loadConfig, ConfigError, PROTOCOLS } from './config.js';
 import { createAmneziaClient } from './amnezia.js';
@@ -14,10 +15,21 @@ const USAGE = `Команды:
   invite [--admin] [--devices N]  новый участник и ссылка-приглашение
   relink КОД                      новое приглашение взамен потерянной ссылки
   list                            участники и устройства
-  check [--keys]                  связь с amnezia-api; с --keys — пробный ключ
-                                  каждого протокола (создаётся и сразу удаляется)`;
+  check [--keys]                  имена DuckDNS и связь с amnezia-api; с --keys —
+                                  пробный ключ каждого протокола (создаётся и сразу удаляется)`;
 
-async function main(argv, { out = console.log } = {}) {
+// Внешний IPv4 сервера — чтобы сверить с ним записи DuckDNS
+async function fetchPublicIp() {
+  try {
+    const res = await fetch('https://api.ipify.org', { signal: AbortSignal.timeout(5000) });
+    const ip = (await res.text()).trim();
+    return isIpAddress(ip) && !ip.includes(':') ? ip : null;
+  } catch {
+    return null;
+  }
+}
+
+async function main(argv, { out = console.log, dns = systemDns, publicIp = fetchPublicIp } = {}) {
   const { positionals, values } = parseArgs({
     args: argv,
     allowPositionals: true,
@@ -63,12 +75,41 @@ async function main(argv, { out = console.log } = {}) {
         return;
       }
       case 'check':
+        await checkNames({ config, dns, publicIp, out });
         return await check({ config, amnezia, withKeys: values.keys, out });
       default:
         throw new PortalError(400, `Неизвестная команда ${command}\n\n${USAGE}`);
     }
   } finally {
     db.close();
+  }
+}
+
+// Имена DuckDNS должны вести на этот сервер и не иметь записи AAAA: приложение на компьютере
+// берёт первый адрес из ответа DNS, и устройство без IPv6 с IPv6-адресом не подключится.
+// Проверка — глазами сервера; что видят DNS провайдеров в России, проверяется с устройства
+// (server/README.md, «Не подключается по имени DuckDNS»).
+async function checkNames({ config, dns, publicIp, out }) {
+  const ip = await publicIp();
+  out(ip ? `Внешний IP сервера: ${ip}` : '⚠️ Не удалось узнать внешний IP сервера');
+  const names = [['VPN', config.vpnHost], ['Портал', new URL(config.publicUrl).hostname]];
+  for (const [label, host] of names) {
+    if (!host) {
+      out(`⚠️ ${label}: имя не задано — укажите VPN_HOST в .env`);
+      continue;
+    }
+    if (isIpAddress(host)) continue;
+    let addresses;
+    try {
+      addresses = await dns.resolve4(host);
+    } catch (err) {
+      out(`⚠️ ${label}: ${host} не находится в DNS (${err.code ?? err.message})`);
+      continue;
+    }
+    out(`${label}: ${host} → ${addresses.join(', ')}`);
+    if (ip && !addresses.includes(ip)) out(`⚠️ ${label}: ${host} ведёт не на этот сервер — укажите на duckdns.org IP ${ip}`);
+    const ipv6 = await dns.resolve6(host).catch(() => []);
+    if (ipv6.length) out(`⚠️ ${label}: у ${host} есть IPv6 (${ipv6.join(', ')}) — очистите поле ipv6 на duckdns.org`);
   }
 }
 

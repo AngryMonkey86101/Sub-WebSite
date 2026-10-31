@@ -39,7 +39,8 @@ function loadConfig(env = process.env) {
   };
 
   const publicUrl = new URL(required('PUBLIC_URL'));
-  const protocols = (env.PROTOCOLS || 'amneziawg3,xray')
+  // Xray отложен: поддержка в коде есть, включается так: PROTOCOLS=amneziawg3,xray
+  const protocols = (env.PROTOCOLS || 'amneziawg3')
     .split(',')
     .map((s) => s.trim())
     .filter(Boolean);
@@ -57,6 +58,8 @@ function loadConfig(env = process.env) {
     port: Number(env.PORT) || 8080,
     dbPath: env.DB_PATH || './data/portal.sqlite',
     publicUrl: publicUrl.origin,
+    // Имя DuckDNS в ключах VPN; портал его только проверяет (команда check), ключи собирает amnezia-api
+    vpnHost: env.VPN_HOST?.trim() || null,
     // Cookie с флагом Secure браузер отдаёт только по HTTPS; для локального запуска по HTTP — COOKIE_SECURE=0
     cookieSecure: env.COOKIE_SECURE !== '0',
     trustProxy: env.TRUST_PROXY === '1',

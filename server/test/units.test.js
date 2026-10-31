@@ -8,7 +8,7 @@ import { decodeVpnKey, encodeVpnKey, hostOfKey, isIpAddress } from '../src/vpnKe
 import { encryptSecret, decryptSecret, newMemberCode, CODE } from '../src/crypto.js';
 import { loadConfig, ConfigError } from '../src/config.js';
 import { createAmneziaClient } from '../src/amnezia.js';
-import { html } from '../src/pages.js';
+import { html, cabinetPage } from '../src/pages.js';
 import { main } from '../src/cli.js';
 import { startFakeAmnezia } from './fakeAmnezia.js';
 
@@ -55,7 +55,9 @@ test('настройки: обязательные переменные и пр�
   };
   const config = loadConfig(env);
   assert.equal(config.publicUrl, 'https://m2pr7x.duckdns.org');
-  assert.deepEqual(config.protocols, ['amneziawg3', 'xray']);
+  assert.deepEqual(config.protocols, ['amneziawg3'], 'Xray отложен и по умолчанию выключен');
+  assert.deepEqual(loadConfig({ ...env, PROTOCOLS: 'amneziawg3,xray' }).protocols, ['amneziawg3', 'xray']);
+  assert.equal(config.vpnHost, null);
   assert.equal(config.telegram, null);
   assert.equal(loadConfig({ ...env, KEY_ENCRYPTION_KEY: randomBytes(32).toString('hex') }).keyEncryptionKey.length, 32);
   assert.deepEqual(loadConfig({ ...env, TELEGRAM_BOT_TOKEN: 't', TELEGRAM_CHAT_ID: '1' }).telegram, { token: 't', chatId: '1' });
@@ -70,6 +72,15 @@ test('шаблоны экранируют подстановки', () => {
   const evil = '<script>alert("x")</script>';
   assert.equal(html`<p>${evil}</p>`.value, '<p>&lt;script&gt;alert(&quot;x&quot;)&lt;/script&gt;</p>');
   assert.equal(html`<p>${html`<b>${'&'}</b>`}</p>`.value, '<p><b>&amp;</b></p>');
+});
+
+test('кабинет с одним протоколом (Xray отложен): выбора протокола нет', () => {
+  const member = { code: 'K7M2', role: 'member', status: 'active', device_limit: 4 };
+  const one = cabinetPage({ member, devices: [], statuses: null, protocols: ['amneziawg3'], nowMs: 0 }).value;
+  assert.ok(!one.includes('name="protocol">'));
+  assert.match(one, /<input type="hidden" name="protocol" value="amneziawg3">/);
+  const two = cabinetPage({ member, devices: [], statuses: null, protocols: ['amneziawg3', 'xray'], nowMs: 0 }).value;
+  assert.match(two, /<select name="protocol">/);
 });
 
 test('адаптер: постраничный список без адресов устройств, понятные ошибки', async () => {
@@ -106,7 +117,8 @@ test('CLI: приглашение админа, список, проверка �
     AMNEZIA_API_KEY: apiKey,
     KEY_ENCRYPTION_KEY: randomBytes(32).toString('base64'),
     DB_PATH: join(dir, 'portal.sqlite'),
-    PROTOCOLS: 'amneziawg3,xray'
+    PROTOCOLS: 'amneziawg3,xray',
+    VPN_HOST: 'k4tq9v.duckdns.org'
   });
   delete process.env.TELEGRAM_BOT_TOKEN;
   try {
@@ -125,12 +137,34 @@ test('CLI: приглашение админа, список, проверка �
     await main(['relink', code.toLowerCase()], { out });
     assert.match(lines[0], new RegExp(`Новое приглашение для ${code}`));
 
+    // DNS глазами сервера: имя VPN ведёт на другой IP и у него есть IPv6, имя портала не находится
+    const dns = {
+      resolve4: async (host) => {
+        if (host === 'k4tq9v.duckdns.org') return ['192.0.2.10'];
+        throw Object.assign(new Error('not found'), { code: 'ENOTFOUND' });
+      },
+      resolve6: async () => ['2001:db8::10']
+    };
     lines.length = 0;
-    await main(['check', '--keys'], { out });
+    await main(['check', '--keys'], { out, dns, publicIp: async () => '198.51.100.20' });
     const text = lines.join('\n');
-    assert.match(text, /Протоколы на сервере: amneziawg3, xray/);
-    assert.match(text, /AmneziaWG: ключ собирается с адресом k4tq9v\.duckdns\.org/);
-    assert.match(text, /Xray \(VLESS \+ REALITY\): ключ собирается с адресом k4tq9v\.duckdns\.org/);
+    assert.match(text, /Внешний IP сервера: 198\.51\.100\.20/);
+    assert.match(text, /VPN: k4tq9v\.duckdns\.org → 192\.0\.2\.10/);
+    assert.match(text, /ведёт не на этот сервер — укажите на duckdns\.org IP 198\.51\.100\.20/);
+    assert.match(text, /есть IPv6 \(2001:db8::10\)/);
+    assert.match(text, /Портал: m2pr7x\.duckdns\.org не находится в DNS \(ENOTFOUND\)/);
+
+    lines.length = 0;
+    const healthy = { resolve4: async () => ['198.51.100.20'], resolve6: async () => [] };
+    await main(['check'], { out, dns: healthy, publicIp: async () => '198.51.100.20' });
+    assert.ok(!lines.some((line) => line.startsWith('⚠️')), lines.join('\n'));
+
+    lines.length = 0;
+    await main(['check', '--keys'], { out, dns: healthy, publicIp: async () => '198.51.100.20' });
+    const keysText = lines.join('\n');
+    assert.match(keysText, /Протоколы на сервере: amneziawg3, xray/);
+    assert.match(keysText, /AmneziaWG: ключ собирается с адресом k4tq9v\.duckdns\.org/);
+    assert.match(keysText, /Xray \(VLESS \+ REALITY\): ключ собирается с адресом k4tq9v\.duckdns\.org/);
     assert.equal(fake.state.clients.size, 0, 'пробные ключи удалены');
   } finally {
     process.env = saved;
