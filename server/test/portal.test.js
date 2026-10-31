@@ -223,6 +223,44 @@ test('админка: только для админа, без IP-адресов
   assert.equal((await regular.browser.post('/admin/invites', { devices: '2' })).status, 404);
 });
 
+test('админ выдаёт ключи из админки: с меткой, без лимита, ключи хранятся у него', async () => {
+  const admin = await joinedMember({ role: 'admin', deviceLimit: 1 });
+  const ids = [];
+  for (const label of ['кухня-планшет', 'М-телефон', '']) {
+    const res = await admin.browser.post('/admin/devices', { label, platform: 'android', protocol: 'amneziawg3' });
+    assert.equal(res.status, 303);
+    ids.push(Number(res.headers.get('location').split('/').pop()));
+  }
+  assert.equal(fake.byName(`${admin.member.code}-3`).length, 1, 'лимит 1 админу не мешает');
+
+  const device = await admin.browser.get(`/devices/${ids[0]}`);
+  assert.match(device.text, /«кухня-планшет»/);
+  assert.match(device.text, /vpn:\/\/[A-Za-z0-9_-]+/);
+  assert.match(device.text, /Передайте ключ лично/);
+
+  const cabinet = await admin.browser.get('/');
+  assert.match(cabinet.text, /«М-телефон»/);
+  assert.match(cabinet.text, /Устройств: 3\./);
+  assert.match(cabinet.text, /Новое устройство/, 'лимит не исчерпан');
+  assert.match((await admin.browser.get('/admin')).text, /«кухня-планшет»/);
+
+  // метка не уходит ни на сервер VPN, ни в Telegram, ни в журнал
+  assert.ok(![...fake.state.clients.values()].some((c) => c.name.includes('кухня')));
+  assert.ok(!notifications.some((n) => n.includes('кухня')));
+  assert.ok(!db.prepare('SELECT details FROM events').all().some((e) => e.details?.includes('кухня')));
+
+  assert.equal((await admin.browser.post(`/devices/${ids[1]}/revoke`)).status, 303);
+  assert.equal(fake.byName(`${admin.member.code}-2`).length, 0);
+
+  const tooLong = await admin.browser.post('/admin/devices', { label: 'x'.repeat(41), platform: 'ios', protocol: 'amneziawg3' });
+  assert.equal(tooLong.status, 400);
+  const regular = await joinedMember();
+  assert.equal((await regular.browser.post('/admin/devices', { label: 'x', platform: 'ios', protocol: 'amneziawg3' })).status, 404);
+  const own = await regular.browser.post('/devices', { label: 'чужая метка', platform: 'ios', protocol: 'amneziawg3' });
+  const ownId = Number(own.headers.get('location').split('/').pop());
+  assert.equal(db.prepare('SELECT label FROM devices WHERE id = ?').get(ownId).label, null, 'участник метку не задаёт');
+});
+
 test('пауза, возобновление и удаление участника', async () => {
   const admin = await joinedMember({ role: 'admin' });
   const { member, browser: b } = await joinedMember();

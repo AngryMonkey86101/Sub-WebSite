@@ -128,39 +128,17 @@ function personalLinkPage({ member, personalUrl, rotated }) {
   });
 }
 
-function cabinetPage({ member, devices, statuses, protocols, nowMs }) {
-  const full = devices.length >= member.device_limit;
-  return layout({
-    title: 'Кабинет',
-    member,
-    body: html`
-      <h1>Мои устройства</h1>
-      ${member.status === 'paused' ? html`<p class="warning">Доступ приостановлен админом. Ключи сейчас не работают.</p>` : ''}
-      ${devices.length
-        ? html`<ul class="devices">${devices.map((device) => html`
-          <li>
-            <div>
-              <b>№${device.number} · ${PLATFORMS[device.platform]}</b>
-              <span class="muted">${PROTOCOLS[device.protocol]} · с ${formatDate(device.created_at)}</span>
-              <span class="status">${deviceStatus(device, statuses?.get(device.client_id), nowMs)}</span>
-            </div>
-            <div class="actions">
-              ${device.key_enc ? html`<a class="button" href="/devices/${device.id}">Показать ключ</a>` : html`<span class="muted">ключ создаётся…</span>`}
-              <form method="post" action="/devices/${device.id}/revoke" data-confirm="Отозвать ключ устройства №${device.number}? VPN на нём перестанет работать.">
-                <button type="submit">Отозвать</button>
-              </form>
-            </div>
-          </li>`)}</ul>`
-        : html`<p>Устройств пока нет.</p>`}
-      <p class="muted">Устройств: ${devices.length} из ${member.device_limit}.</p>
+// Название устройства в списках: номер, платформа и метка, если ключ выдан из админки
+const deviceName = (device) =>
+  html`№${device.number} · ${PLATFORMS[device.platform]}${device.label ? html` · «${device.label}»` : ''}`;
 
-      ${member.status !== 'active'
-        ? ''
-        : full
-          ? html`<p>Лимит устройств исчерпан. Отзовите ненужное устройство или попросите админа увеличить лимит.</p>`
-          : html`
-      <h2>Новое устройство</h2>
-      <form method="post" action="/devices" class="stack">
+// Лимит устройств — только для участников: админ выдаёт ключи и за других
+const deviceCount = (member, count) =>
+  member.role === 'admin' ? `${count}` : `${count} из ${member.device_limit}`;
+
+// Поля «платформа» и «протокол» — общие для кабинета и админки
+function deviceFields(protocols) {
+  return html`
         <label>Платформа
           <select name="platform" required>
             ${Object.entries(PLATFORMS).map(([value, label]) => html`<option value="${value}">${label}</option>`)}
@@ -172,7 +150,43 @@ function cabinetPage({ member, devices, statuses, protocols, nowMs }) {
             ${protocols.map((p, i) => html`<option value="${p}">${PROTOCOLS[p]}${i === 0 ? ' — основной' : ' — если основной не подключается'}</option>`)}
           </select>
         </label>`
-          : html`<input type="hidden" name="protocol" value="${protocols[0]}">`}
+          : html`<input type="hidden" name="protocol" value="${protocols[0]}">`}`;
+}
+
+function cabinetPage({ member, devices, statuses, protocols, nowMs }) {
+  const full = member.role !== 'admin' && devices.length >= member.device_limit;
+  return layout({
+    title: 'Кабинет',
+    member,
+    body: html`
+      <h1>Мои устройства</h1>
+      ${member.status === 'paused' ? html`<p class="warning">Доступ приостановлен админом. Ключи сейчас не работают.</p>` : ''}
+      ${devices.length
+        ? html`<ul class="devices">${devices.map((device) => html`
+          <li>
+            <div>
+              <b>${deviceName(device)}</b>
+              <span class="muted">${PROTOCOLS[device.protocol]} · с ${formatDate(device.created_at)}</span>
+              <span class="status">${deviceStatus(device, statuses?.get(device.client_id), nowMs)}</span>
+            </div>
+            <div class="actions">
+              ${device.key_enc ? html`<a class="button" href="/devices/${device.id}">Показать ключ</a>` : html`<span class="muted">ключ создаётся…</span>`}
+              <form method="post" action="/devices/${device.id}/revoke" data-confirm="Отозвать ключ устройства №${device.number}? VPN на нём перестанет работать.">
+                <button type="submit">Отозвать</button>
+              </form>
+            </div>
+          </li>`)}</ul>`
+        : html`<p>Устройств пока нет.</p>`}
+      <p class="muted">Устройств: ${deviceCount(member, devices.length)}.</p>
+
+      ${member.status !== 'active'
+        ? ''
+        : full
+          ? html`<p>Лимит устройств исчерпан. Отзовите ненужное устройство или попросите админа увеличить лимит.</p>`
+          : html`
+      <h2>Новое устройство</h2>
+      <form method="post" action="/devices" class="stack">
+        ${deviceFields(protocols)}
         <button type="submit" class="primary">Получить ключ</button>
       </form>`}
 
@@ -200,8 +214,10 @@ function devicePage({ member, device, key, qrCodes, appDownloadUrl }) {
     member,
     body: html`
       <p><a href="/">← Мои устройства</a></p>
-      <h1>№${device.number} · ${PLATFORMS[device.platform]}</h1>
-      <p class="muted">${PROTOCOLS[device.protocol]}. Ключ только для этого устройства — не пересылайте его другим людям.</p>
+      <h1>${deviceName(device)}</h1>
+      <p class="muted">${PROTOCOLS[device.protocol]}. ${device.label
+        ? 'Передайте ключ лично: скопируйте его или дайте отсканировать QR-код с экрана. Ключ хранится у вас — его можно показать снова или отозвать.'
+        : 'Ключ только для этого устройства — не пересылайте его другим людям.'}</p>
       ${instructions(device.platform, appDownloadUrl)}
       <h2>Ключ</h2>
       ${copyField('vpn-key', key, 6)}
@@ -256,29 +272,39 @@ function adminPage({ admin, members, statuses, statusError, ipHosts, events, pro
         <button type="submit" class="primary">Создать приглашение</button>
       </form>
 
+      <h2>Выдать ключ</h2>
+      <p class="muted">Для тех, кому неудобно заходить на портал самим. Ключ сохранится у вас в «Моих устройствах»: его можно показать снова или отозвать. Метка видна только вам — на сервер VPN и в Telegram она не уходит. Имена писать не обязательно, хватит условного обозначения.</p>
+      <form method="post" action="/admin/devices" class="stack">
+        <label>Метка
+          <input type="text" name="label" maxlength="40" placeholder="например, кухня-планшет">
+        </label>
+        ${deviceFields(protocols)}
+        <button type="submit" class="primary">Выдать ключ</button>
+      </form>
+
       <h2>Участники</h2>
       <p class="muted">Кому выдан какой код, портал не знает — это знаете только вы. Протоколы: ${protocols.map((p) => PROTOCOLS[p]).join(', ')}.</p>
       <ul class="members">${members.map((member) => html`
         <li>
           <div class="member-head">
             <b>${member.code}</b>${member.role === 'admin' ? ' · админ' : ''}
-            <span class="muted">${memberState(member)} · устройств ${member.devices.length} из ${member.device_limit}</span>
+            <span class="muted">${memberState(member)} · устройств ${deviceCount(member, member.devices.length)}</span>
           </div>
           ${member.devices.length
             ? html`<ul class="devices compact">${member.devices.map((device) => html`
-            <li>№${device.number} · ${PLATFORMS[device.platform]} · ${PROTOCOLS[device.protocol]} <span class="status">${deviceStatus(device, statuses?.get(device.client_id), nowMs)}</span></li>`)}</ul>`
+            <li>${deviceName(device)} · ${PROTOCOLS[device.protocol]} <span class="status">${deviceStatus(device, statuses?.get(device.client_id), nowMs)}</span></li>`)}</ul>`
             : ''}
           <div class="actions">
             <form method="post" action="/admin/members/${member.id}/relink" data-confirm="Выдать ${member.code} новое приглашение? Прежняя личная ссылка перестанет работать.">
               <button type="submit">Новая ссылка</button>
             </form>
+            ${member.role === 'admin'
+              ? ''
+              : html`
             <form method="post" action="/admin/members/${member.id}/limit" class="inline">
               <input type="number" name="devices" min="1" max="20" value="${member.device_limit}" aria-label="Лимит устройств">
               <button type="submit">Лимит</button>
             </form>
-            ${member.role === 'admin'
-              ? ''
-              : html`
             ${member.status === 'paused'
               ? html`<form method="post" action="/admin/members/${member.id}/resume"><button type="submit">Возобновить</button></form>`
               : html`<form method="post" action="/admin/members/${member.id}/pause"><button type="submit">Пауза</button></form>`}

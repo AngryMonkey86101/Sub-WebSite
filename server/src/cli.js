@@ -67,9 +67,11 @@ async function main(argv, { out = console.log, dns = systemDns, publicIp = fetch
       }
       case 'list': {
         for (const member of portal.listMembers()) {
-          out(`${member.code}  ${member.role.padEnd(6)}  ${member.status.padEnd(7)}  устройств ${member.devices.length}/${member.device_limit}`);
+          const limit = member.role === 'admin' ? '' : `/${member.device_limit}`;
+          out(`${member.code}  ${member.role.padEnd(6)}  ${member.status.padEnd(7)}  устройств ${member.devices.length}${limit}`);
           for (const device of member.devices) {
-            out(`    ${portal.clientName(member, device.number)}  ${device.platform}  ${device.protocol}  ${device.host ?? 'ключ создаётся'}`);
+            const label = device.label ? `  «${device.label}»` : '';
+            out(`    ${portal.clientName(member, device.number)}  ${device.platform}  ${device.protocol}  ${device.host ?? 'ключ создаётся'}${label}`);
           }
         }
         return;

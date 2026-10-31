@@ -108,7 +108,7 @@ textarea {
 form { margin: 0; }
 form.stack { display: grid; grid-template-columns: minmax(0, 1fr); gap: 12px; max-width: 420px; }
 form.stack label { display: grid; grid-template-columns: minmax(0, 1fr); gap: 4px; }
-form.stack select { width: 100%; }
+form.stack select, form.stack input[type="text"] { width: 100%; }
 form.inline { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
 form.inline input[type="number"] { width: 5em; }
 

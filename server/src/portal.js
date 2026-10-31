@@ -42,7 +42,7 @@ function createPortal({ db, config, amnezia, notify, now = () => Date.now() }) {
     devicesOf: db.prepare('SELECT * FROM devices WHERE member_id = ? AND revoked_at IS NULL ORDER BY number'),
     countDevicesOf: db.prepare('SELECT COUNT(*) AS n FROM devices WHERE member_id = ? AND revoked_at IS NULL'),
     maxNumberOf: db.prepare('SELECT COALESCE(MAX(number), 0) AS n FROM devices WHERE member_id = ?'),
-    insertDevice: db.prepare('INSERT INTO devices (member_id, number, platform, protocol, created_at) VALUES (?, ?, ?, ?, ?)'),
+    insertDevice: db.prepare('INSERT INTO devices (member_id, number, platform, protocol, label, created_at) VALUES (?, ?, ?, ?, ?, ?)'),
     fillDevice: db.prepare('UPDATE devices SET client_id = ?, host = ?, key_enc = ? WHERE id = ? AND revoked_at IS NULL'),
     revokeDevice: db.prepare('UPDATE devices SET revoked_at = ?, key_enc = NULL WHERE id = ?'),
     deleteDevice: db.prepare('DELETE FROM devices WHERE id = ?'),
@@ -148,20 +148,31 @@ function createPortal({ db, config, amnezia, notify, now = () => Date.now() }) {
 
   const devicesOf = (memberId) => q.devicesOf.all(memberId);
 
-  async function addDevice(memberId, { platform, protocol }) {
+  // Метка ключа, который админ выдаёт из админки («кухня-планшет»): видна только в портале,
+  // на сервер VPN и в Telegram не уходит — там по-прежнему «код-номер»
+  function checkLabel(value) {
+    const label = (value ?? '').trim();
+    if (!label) return null;
+    if (label.length > 40 || /[\u0000-\u001f\u007f]/.test(label)) throw new PortalError(400, 'Метка — до 40 символов');
+    return label;
+  }
+
+  // Лимит устройств — только для участников: админ выдаёт ключи и за других
+  async function addDevice(memberId, { platform, protocol, label = null }) {
     if (!PLATFORMS[platform]) throw new PortalError(400, 'Выберите платформу из списка');
     if (!config.protocols.includes(protocol)) throw new PortalError(400, 'Этот протокол на сервере не включён');
+    const note = checkLabel(label);
 
     // Сначала место в базе (лимит проверяется в той же транзакции), потом ключ на сервере:
     // два одновременных нажатия не обойдут лимит
     const { member, device } = transaction(db, () => {
       const member = requireMember(memberId);
       if (member.status !== 'active') throw new PortalError(403, 'Доступ приостановлен');
-      if (q.countDevicesOf.get(member.id).n >= member.device_limit) {
+      if (member.role !== 'admin' && q.countDevicesOf.get(member.id).n >= member.device_limit) {
         throw new PortalError(409, `Лимит устройств: ${member.device_limit}. Отзовите ненужное устройство или попросите админа увеличить лимит.`);
       }
       const number = q.maxNumberOf.get(member.id).n + 1;
-      const id = Number(q.insertDevice.run(member.id, number, platform, protocol, now()).lastInsertRowid);
+      const id = Number(q.insertDevice.run(member.id, number, platform, protocol, note, now()).lastInsertRowid);
       return { member, device: q.deviceById.get(id) };
     });
     const name = clientName(member, device.number);

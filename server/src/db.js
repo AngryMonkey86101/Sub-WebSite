@@ -30,6 +30,7 @@ const SCHEMA = `
     number INTEGER NOT NULL,
     platform TEXT NOT NULL,
     protocol TEXT NOT NULL,
+    label TEXT,
     client_id TEXT,
     host TEXT,
     key_enc TEXT,
@@ -46,12 +47,20 @@ const SCHEMA = `
   );
 `;
 
+// Колонки, добавленные после первой выкладки: в уже созданную базу их дописывает ALTER TABLE,
+// в новой они есть сразу (SCHEMA)
+const ADDED_COLUMNS = [['devices', 'label', 'TEXT']];
+
 function openDatabase(path) {
   const db = new DatabaseSync(path);
   db.exec('PRAGMA foreign_keys = ON;');
   // WAL: команды CLI (docker compose exec portal …) работают с базой параллельно с сервером
   if (path !== ':memory:') db.exec('PRAGMA journal_mode = WAL; PRAGMA busy_timeout = 5000;');
   db.exec(SCHEMA);
+  for (const [table, column, type] of ADDED_COLUMNS) {
+    const exists = db.prepare(`PRAGMA table_info(${table})`).all().some((c) => c.name === column);
+    if (!exists) db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${type}`);
+  }
   return db;
 }
 

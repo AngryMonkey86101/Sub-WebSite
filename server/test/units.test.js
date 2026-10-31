@@ -4,7 +4,9 @@ import { randomBytes } from 'node:crypto';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import { decodeVpnKey, encodeVpnKey, hostOfKey, isIpAddress } from '../src/vpnKey.js';
+import { openDatabase } from '../src/db.js';
 import { encryptSecret, decryptSecret, newMemberCode, CODE } from '../src/crypto.js';
 import { loadConfig, ConfigError } from '../src/config.js';
 import { createAmneziaClient } from '../src/amnezia.js';
@@ -24,6 +26,29 @@ test('vpn://: кодирование и разбор, как в клиенте A
   raw.writeUInt32BE(1, 0);
   assert.throws(() => decodeVpnKey(`vpn://${raw.toString('base64url')}`), /Длина/);
   assert.throws(() => decodeVpnKey('vless://abc'), /vpn:\/\//);
+});
+
+test('база с прошлой выкладки получает колонку label, данные сохраняются', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'portal-db-'));
+  const path = join(dir, 'portal.sqlite');
+  try {
+    const old = new DatabaseSync(path);
+    old.exec(`CREATE TABLE devices (
+      id INTEGER PRIMARY KEY, member_id INTEGER NOT NULL, number INTEGER NOT NULL, platform TEXT NOT NULL,
+      protocol TEXT NOT NULL, client_id TEXT, host TEXT, key_enc TEXT, created_at INTEGER NOT NULL,
+      revoked_at INTEGER, UNIQUE (member_id, number))`);
+    old.prepare("INSERT INTO devices (member_id, number, platform, protocol, created_at) VALUES (1, 1, 'ios', 'amneziawg3', 0)").run();
+    old.close();
+
+    for (let i = 0; i < 2; i++) {
+      const db = openDatabase(path);
+      assert.ok(db.prepare('PRAGMA table_info(devices)').all().some((c) => c.name === 'label'));
+      assert.equal(db.prepare('SELECT COUNT(*) AS n FROM devices').get().n, 1);
+      db.close();
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test('IP или имя', () => {
@@ -131,7 +156,7 @@ test('CLI: приглашение админа, список, проверка �
 
     lines.length = 0;
     await main(['list'], { out });
-    assert.match(lines[0], new RegExp(`^${code}\\s+admin\\s+invited\\s+устройств 0/5`));
+    assert.match(lines[0], new RegExp(`^${code}\\s+admin\\s+invited\\s+устройств 0$`), 'у админа лимита нет');
 
     lines.length = 0;
     await main(['relink', code.toLowerCase()], { out });

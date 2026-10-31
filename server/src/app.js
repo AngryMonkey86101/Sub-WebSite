@@ -201,6 +201,18 @@ function createApp({ portal, config, now = () => Date.now() }) {
       }));
     }],
 
+    // Ключ, который админ выдаёт сам: хранится у него, с меткой «для кого»
+    ['POST', /^\/admin\/devices$/, async ({ member, form }) => {
+      const admin = requireAdmin(member);
+      limit(`add-admin:${admin.id}`, 60, HOUR);
+      const device = await portal.addDevice(admin.id, {
+        platform: form.get('platform'),
+        protocol: form.get('protocol'),
+        label: form.get('label')
+      });
+      return redirect(`/devices/${device.id}`);
+    }],
+
     ['POST', /^\/admin\/invites$/, ({ member, form }) => {
       const admin = requireAdmin(member);
       const created = portal.createMember({ role: form.get('role') || 'member', deviceLimit: form.get('devices') });
