@@ -68,13 +68,25 @@ docker ps --format '{{.Names}}\t{{.Ports}}'
 
 ### 4. Настройки портала
 
-На сервере под `deploy`:
+На сервере под `deploy` (из-под root: `su - deploy`) скачайте репозиторий и скопируйте файлы портала в `~/family-vpn`:
 
 ```bash
-mkdir ~/family-vpn && cd ~/family-vpn
+git clone --depth 1 --branch main https://github.com/AngryMonkey86101/Sub-WebSite.git ~/sub-website
+mkdir -p ~/family-vpn && cp -r ~/sub-website/server/. ~/family-vpn/
+ls -a ~/family-vpn
 ```
 
-Положите сюда содержимое каталога `server/` (вручную или первой выкладкой из GitHub Actions, шаг 7). Рядом с `docker-compose.yml` должен оказаться `.env.example`.
+- Пока портал не слит в `main`, вместо `main` укажите ветку `claude/trusting-cerf-yjx7u4`.
+- В выводе `ls` должны быть `docker-compose.yml` и `.env.example`.
+- Если `git` не установлен — под root: `apt install -y git`.
+
+Обновить файлы позже, пока не настроена выкладка из GitHub Actions (шаг 7):
+
+```bash
+git -C ~/sub-website pull && cp -r ~/sub-website/server/. ~/family-vpn/
+```
+
+Файл `.env` при этом не затрагивается.
 
 `.env` — файл настроек и секретов. `docker compose` читает его сам из той же папки, в репозиторий он не попадает. Создайте его одной командой: подставьте свои имена DuckDNS в первые две строки `sed`, остальное она сгенерирует и определит сама. Если `.env` уже есть, команда его не тронет — иначе новые секреты затёрли бы старые.
 
