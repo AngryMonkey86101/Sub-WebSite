@@ -1,0 +1,295 @@
+import { test, before, after } from 'node:test';
+import assert from 'node:assert/strict';
+import { randomBytes } from 'node:crypto';
+import { spawnSync } from 'node:child_process';
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync, existsSync, statSync, chmodSync } from 'node:fs';
+import { gzipSync } from 'node:zlib';
+import { tmpdir } from 'node:os';
+import { join, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { Readable } from 'node:stream';
+import { createTar } from '../src/tar.js';
+import { openDatabase } from '../src/db.js';
+import { main } from '../src/cli.js';
+import { startFakeAmnezia } from './fakeAmnezia.js';
+
+// Переезд: команды CLI restored и restore-vpn поверх поддельного amnezia-api и сам
+// scripts/restore.sh — настоящий bash, настоящие age и tar, а apt-get, docker, ufw, git и chown —
+// заглушки, которые записывают свои вызовы. Так проверяются расшифровка, разбор бэкапа, порядок
+// шагов и то, что расшифрованное не остаётся на диске.
+
+const SCRIPT = join(dirname(fileURLToPath(import.meta.url)), '..', 'scripts', 'restore.sh');
+const HAS_AGE = spawnSync('age', ['--version']).status === 0;
+const API_KEY = randomBytes(24).toString('hex');
+const SERVER_KEY = 'c2VydmVyLXB1YmxpYy1rZXktZnJvbS1iYWNrdXAtMDA=';
+
+let dir;
+let fake;
+
+before(async () => {
+  dir = mkdtempSync(join(tmpdir(), 'portal-restore-'));
+  fake = await startFakeAmnezia({ apiKey: API_KEY });
+});
+
+after(async () => {
+  rmSync(dir, { recursive: true, force: true });
+  await fake.close();
+});
+
+const AMNEZIA_JSON = {
+  generatedAt: '2026-11-01T03:30:00.000Z',
+  serverId: 'srv-uuid',
+  protocols: ['amneziawg3', 'xray'],
+  amneziaWg3: {
+    wgConfig: '[Interface]\nPrivateKey = server-private-key\nAddress = 10.8.1.0/24\nListenPort = 51234\nJc = 4\n\n[Peer]\nPublicKey = a\n\n[Peer]\nPublicKey = b\n',
+    presharedKey: 'psk',
+    serverPublicKey: SERVER_KEY,
+    clients: [
+      { clientId: 'peer-a', userData: { clientName: 'K7M2-1' } },
+      { clientId: 'peer-b', userData: { clientName: 'K7M2-2' } }
+    ]
+  },
+  xray: { serverConfig: '{}' }
+};
+
+// --- CLI ---
+
+test('CLI restore-vpn: ключи сервера из бэкапа — в amnezia-api, сверка числа клиентов', async () => {
+  const saved = { ...process.env };
+  Object.assign(process.env, {
+    PUBLIC_URL: 'https://m2pr7x.duckdns.org',
+    AMNEZIA_API_URL: fake.url,
+    AMNEZIA_API_KEY: API_KEY,
+    KEY_ENCRYPTION_KEY: randomBytes(32).toString('base64'),
+    DB_PATH: join(dir, 'cli.sqlite')
+  });
+  delete process.env.TELEGRAM_BOT_TOKEN;
+  delete process.env.DUCKDNS_TOKEN;
+  const lines = [];
+  const run = (args, input) => main(args, {
+    out: (line) => lines.push(line),
+    stdin: Readable.from([Buffer.from(input ?? '')]),
+    wait: { attempts: 2, delayMs: 1 }
+  });
+  try {
+    // перенесённая база: сторож и бэкап помнят старый сервер
+    const db = openDatabase(process.env.DB_PATH);
+    const put = db.prepare('INSERT INTO settings (key, value) VALUES (?, ?)');
+    for (const [key, value] of [['duckdns_ip', '198.51.100.20'], ['duckdns_prev_ip', '198.51.100.10'], ['backup_last_at', '1'], ['telegram_chat', '42']]) put.run(key, value);
+    db.close();
+
+    await run(['restored']);
+    assert.match(lines.at(-1), /База перенесена: участников 0, ключей 0\. Сторож DuckDNS не тронет записи до команды duckdns --takeover/);
+    const after = openDatabase(process.env.DB_PATH);
+    const value = (key) => after.prepare('SELECT value FROM settings WHERE key = ?').get(key)?.value ?? null;
+    assert.equal(value('duckdns_ip'), null, 'сторож не считает имена своими и ждёт --takeover');
+    assert.equal(value('duckdns_prev_ip'), null);
+    assert.ok(Number(value('backup_last_at')) > 1, 'бэкап отложен до восстановления ключей');
+    assert.equal(value('telegram_chat'), '42', 'бот остаётся подключённым');
+
+    await assert.rejects(run(['restore-vpn'], 'не json'), /amnezia\.json из бэкапа/);
+    await assert.rejects(run(['restore-vpn'], '{"protocols":["xray"]}'), /нет ключей AmneziaWG/);
+
+    lines.length = 0;
+    await run(['restore-vpn'], JSON.stringify({ ...AMNEZIA_JSON, protocols: ['amneziawg3', 'amneziawg'] }));
+    // AWG 1.5 на этом сервере нет — восстанавливается только то, что есть
+    assert.deepEqual(fake.state.imported.protocols, ['amneziawg3']);
+    assert.equal(fake.state.imported.amneziaWg3.serverPublicKey, SERVER_KEY);
+    assert.match(lines.join('\n'), /⚠️ Не восстановлены — их нет на этом сервере: amneziawg/);
+    assert.match(lines.join('\n'), /Ключи сервера VPN восстановлены: клиентов 2 из 2 в бэкапе/);
+    assert.equal(value('backup_last_at'), null, 'ключи прежние — бэкап можно делать');
+    after.close();
+
+    // amnezia-api не поднялся — понятная ошибка после ожидания
+    process.env.AMNEZIA_API_URL = 'http://127.0.0.1:9';
+    await assert.rejects(run(['restore-vpn'], JSON.stringify(AMNEZIA_JSON)), /недоступен/);
+  } finally {
+    process.env = saved;
+  }
+});
+
+// --- scripts/restore.sh ---
+
+const STUB = (body) => `#!/usr/bin/env bash\necho "$(basename "$0") $*" >> "$CALLS"\n${body}\nexit 0\n`;
+
+function prepare(name, { publicKey = SERVER_KEY } = {}) {
+  const root = join(dir, name);
+  const bin = join(root, 'bin');
+  mkdirSync(bin, { recursive: true });
+
+  // пара ключей age и зашифрованный бэкап — как его присылает бот
+  const keyFile = join(root, 'key.txt');
+  spawnSync('age-keygen', ['-o', keyFile]);
+  const keyText = readFileSync(keyFile, 'utf8');
+  const recipient = keyText.match(/public key: (age1\w+)/)[1];
+  const secret = keyText.match(/AGE-SECRET-KEY-1\w+/)[0];
+  const sqlite = randomBytes(4096);
+  const env = 'PORTAL_HOST=m2pr7x.duckdns.org\nVPN_HOST=k4tq9v.duckdns.org\nKEY_ENCRYPTION_KEY=kek\nSERVER_ID=srv-uuid\nTELEGRAM_BOT_TOKEN=7000000001:bot\nDUCKDNS_TOKEN=duck\nDOCKER_GID=\nDOCKER_API_VERSION=\n';
+  const archive = gzipSync(createTar([
+    { name: 'README.txt', data: 'бэкап' },
+    { name: 'env', data: env },
+    { name: 'amnezia.json', data: JSON.stringify(AMNEZIA_JSON) },
+    { name: 'portal.sqlite', data: sqlite }
+  ]));
+  const encrypted = spawnSync('age', ['-r', recipient], { input: archive });
+  const backup = join(root, 'family-vpn-2026-11-01.tar.gz.age');
+  writeFileSync(backup, encrypted.stdout);
+
+  const write = (file, body) => {
+    writeFileSync(join(bin, file), STUB(body));
+    chmodSync(join(bin, file), 0o755);
+  };
+  for (const file of ['apt-get', 'curl', 'ufw', 'adduser', 'usermod', 'chown', 'sleep']) write(file, '');
+  write('id', '[ "$1" = "-u" ] && echo 0');
+  // клон установщика AmneziaWG: вместо него — запись аргументов
+  write('git', `if [ "$1" = clone ]; then mkdir -p "$4/.git"; printf '#!/usr/bin/env bash\\necho "install.sh $*" >> "$CALLS"\\n' > "$4/install.sh"; fi`);
+  write('docker', `
+case "$*" in
+  "compose version") echo "Docker Compose version v2.30.0" ;;
+  "--version") echo "Docker version 27.3.1" ;;
+  "version --format {{.Server.APIVersion}}") echo "1.47" ;;
+  "compose exec -T portal npm run -s cli -- restore-vpn") cat > "$OUT/restore-input.json"; echo "Ключи сервера VPN восстановлены: клиентов 2 из 2 в бэкапе" ;;
+  "compose exec -T portal npm run -s cli -- duckdns") echo "⚠️ Имя DuckDNS указывает не на этот сервер" ;;
+  "exec amnezia-awg2 awg show awg0 public-key") echo "$FAKE_PUBLIC_KEY" ;;
+  "exec amnezia-awg2 awg show awg0 peers") printf 'a\\nb\\n' ;;
+  "compose run --rm --no-deps -u root"*)
+    # база из бэкапа: что именно увидит контейнер в /restore
+    while [ $# -gt 0 ]; do [ "$1" = "-v" ] && cp "\${2%%:*}/portal.sqlite" "$OUT/restored.sqlite"; shift; done ;;
+esac`);
+
+  const sock = join(root, 'docker.sock');
+  writeFileSync(sock, '');
+  const out = join(root, 'out');
+  mkdirSync(out);
+  const calls = join(root, 'calls.log');
+  writeFileSync(calls, '');
+
+  function run(input, flags = []) {
+    const res = spawnSync('bash', [SCRIPT, ...flags, backup], {
+      input,
+      env: {
+        ...process.env,
+        PATH: `${bin}:${process.env.PATH}`,
+        CALLS: calls,
+        OUT: out,
+        FAKE_PUBLIC_KEY: publicKey,
+        DEPLOY_HOME: join(root, 'home', 'deploy'),
+        WORK_DIR: join(root, 'work'),
+        PROTOCOLS_DIR: join(root, 'opt', 'amnezia-protocols'),
+        DOCKER_SOCK: sock,
+        SSH_CONNECTION: '203.0.113.9 51515 198.51.100.30 2222',
+        NO_COLOR: '1'
+      },
+      timeout: 60000
+    });
+    return {
+      status: res.status,
+      stdout: res.stdout.toString(),
+      stderr: res.stderr.toString(),
+      calls: readFileSync(calls, 'utf8').split('\n').filter(Boolean)
+    };
+  }
+  return { root, secret, sqlite, sock, out, run, app: join(root, 'home', 'deploy', 'family-vpn'), work: join(root, 'work') };
+}
+
+const indexOf = (calls, pattern) => calls.findIndex((line) => pattern.test(line));
+
+test('restore.sh: бэкап расшифрован, AmneziaWG с прежними портом и подсетью, ключи и база возвращены', { skip: !HAS_AGE && 'нет программы age' }, () => {
+  const t = prepare('full');
+  const res = t.run(`${t.secret}\ny\n`);
+  assert.equal(res.status, 0, res.stderr + res.stdout);
+  const { calls } = res;
+
+  // фаервол: порт SSH текущего подключения, сайт и порт AmneziWG из awg0.conf бэкапа
+  for (const line of ['ufw allow 2222/tcp', 'ufw allow 80,443/tcp', 'ufw allow 443/udp', 'ufw allow 51234/udp', 'ufw --force enable']) {
+    assert.ok(calls.includes(line), line);
+  }
+  assert.ok(calls.includes('git -C ' + join(t.root, 'opt', 'amnezia-protocols') + ' checkout -q --detach 9c6e9b6198b9a844682615e79f401f7ac327134e'), 'установщик — проверенной версии');
+  assert.ok(calls.includes('install.sh awg --port 51234 --subnet 10.8.1.0 --cidr 24'));
+  assert.match(res.stdout, /AmneziaWG: порт 51234\/udp, подсеть 10\.8\.1\.0\/24, клиентов 2/);
+  assert.match(res.stdout, /В бэкапе есть ещё xray — скрипт восстанавливает только AmneziaWG/);
+
+  // .env — из бэкапа, со своими DOCKER_GID и DOCKER_API_VERSION, только для владельца
+  const env = readFileSync(join(t.app, '.env'), 'utf8');
+  assert.match(env, new RegExp(`^DOCKER_GID=${statSync(t.sock).gid}$`, 'm'));
+  assert.match(env, /^DOCKER_API_VERSION=1\.47$/m);
+  assert.match(env, /^KEY_ENCRYPTION_KEY=kek$/m);
+  assert.match(env, /^TELEGRAM_BOT_TOKEN=7000000001:bot$/m, 'бот переезжает вместе с сервером');
+  assert.equal(statSync(join(t.app, '.env')).mode & 0o777, 0o600);
+  assert.ok(existsSync(join(t.app, 'docker-compose.yml')), 'файлы портала скопированы');
+  assert.ok(existsSync(join(t.root, 'home', 'deploy', 'sub-website', 'server', 'scripts', 'restore.sh')), 'клон для обновлений у deploy');
+
+  // база и ключи сервера — те, что в бэкапе
+  assert.deepEqual(readFileSync(join(t.out, 'restored.sqlite')), t.sqlite);
+  assert.deepEqual(JSON.parse(readFileSync(join(t.out, 'restore-input.json'), 'utf8')), AMNEZIA_JSON);
+  assert.match(res.stdout, /Ключ сервера прежний, клиентов в AmneziaWG: 2 из 2/);
+
+  // порядок: база → «забыть старый сервер» → запуск → ключи → перезапуск AWG → DuckDNS → Caddy
+  const order = [
+    /^docker compose run --rm --no-deps -u root/,
+    /^docker compose run --rm --no-deps portal npm run -s cli -- restored$/,
+    /^docker compose up -d amnezia-api portal$/,
+    /cli -- restore-vpn$/,
+    /^docker restart amnezia-awg2$/,
+    /cli -- duckdns --takeover$/,
+    /^docker compose up -d caddy$/
+  ].map((pattern) => indexOf(calls, pattern));
+  assert.ok(order.every((i) => i >= 0), JSON.stringify(order));
+  assert.deepEqual([...order].sort((a, b) => a - b), order, 'шаги идут по порядку');
+  assert.ok(indexOf(calls, /compose up -d caddy/) > indexOf(calls, /duckdns --takeover/), 'Caddy — только после переноса имён');
+
+  // расшифрованное не осталось на диске; ключ не попал в вывод
+  assert.equal(existsSync(t.work), false);
+  assert.ok(!res.stdout.includes(t.secret) && !res.stderr.includes(t.secret));
+});
+
+test('restore.sh: без подтверждения имена не трогает, Caddy не запускает', { skip: !HAS_AGE && 'нет программы age' }, () => {
+  const t = prepare('no-takeover');
+  // вставлены все три строки из age-keygen, как они лежат в менеджере паролей
+  const res = t.run(`# created: 2026-11-01T12:00:00Z\n# public key: age1abc\n${t.secret}\nn\n`);
+  assert.equal(res.status, 0, res.stderr);
+  assert.equal(indexOf(res.calls, /duckdns --takeover/), -1);
+  assert.equal(indexOf(res.calls, /compose up -d caddy/), -1);
+  assert.match(res.stdout, /Имена не тронуты[\s\S]*duckdns --takeover && docker compose up -d/);
+});
+
+test('restore.sh --drill: учения — бот и сторож выключены, имена и Caddy не трогаются', { skip: !HAS_AGE && 'нет программы age' }, () => {
+  const t = prepare('drill');
+  const res = t.run(`${t.secret}\n`, ['--drill']);
+  assert.equal(res.status, 0, res.stderr);
+  const env = readFileSync(join(t.app, '.env'), 'utf8');
+  assert.match(env, /^TELEGRAM_BOT_TOKEN=$/m);
+  assert.match(env, /^DUCKDNS_TOKEN=$/m);
+  assert.match(env, /^KEY_ENCRYPTION_KEY=kek$/m);
+  assert.ok(indexOf(res.calls, /cli -- restore-vpn$/) >= 0, 'ключи сервера восстанавливаются и на учениях');
+  assert.equal(indexOf(res.calls, /cli -- duckdns/), -1);
+  assert.equal(indexOf(res.calls, /compose up -d caddy/), -1);
+  assert.match(res.stdout, /Учения пройдены\.[\s\S]*Удалите этот VPS/);
+  assert.equal(existsSync(t.work), false);
+});
+
+test('restore.sh: чужой ключ, не тот ключ сервера — остановка, расшифрованное удалено', { skip: !HAS_AGE && 'нет программы age' }, () => {
+  const wrongKey = prepare('wrong-key');
+  const other = spawnSync('age-keygen').stdout.toString().match(/AGE-SECRET-KEY-1\w+/)[0];
+  let res = wrongKey.run(`${other}\n`);
+  assert.notEqual(res.status, 0);
+  assert.match(res.stderr, /Бэкап не расшифровался .*ключ от другой пары/);
+  assert.equal(indexOf(res.calls, /^ufw|install\.sh|compose (run|up|build)|adduser/), -1, 'до расшифровки сервер не трогаем');
+  assert.equal(existsSync(wrongKey.work), false);
+
+  res = wrongKey.run('не ключ\n');
+  assert.match(res.stderr, /Это не закрытый ключ age/);
+
+  // AmneziaWG поднялся не с ключом из бэкапа — дальше нельзя: семья не подключится
+  const mismatch = prepare('mismatch', { publicKey: 'другой-ключ=' });
+  res = mismatch.run(`${mismatch.secret}\ny\n`);
+  assert.notEqual(res.status, 0);
+  assert.match(res.stderr, /не прежний ключ сервера \(другой-ключ=\)/);
+  assert.equal(indexOf(res.calls, /duckdns --takeover/), -1, 'имена не переносятся на неисправный сервер');
+  assert.equal(existsSync(mismatch.work), false);
+});
+
+test('restore.sh: shellcheck без замечаний', { skip: spawnSync('shellcheck', ['--version']).status !== 0 && 'нет shellcheck' }, () => {
+  const res = spawnSync('shellcheck', ['-S', 'style', SCRIPT]);
+  assert.equal(res.status, 0, res.stdout.toString());
+});
