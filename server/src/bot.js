@@ -1,5 +1,5 @@
 import { PortalError } from './portal.js';
-import { memberState } from './pages.js';
+import { memberState, formatAgo } from './pages.js';
 import { describeStatus } from './watchdog.js';
 
 // Команды бота админа. Отвечают простым текстом. В ответах — только коды участников:
@@ -22,7 +22,7 @@ const HELP = `Команды:
 
 Остальное — в админке портала.`;
 
-function createBotCommands({ portal, config, watchdog = null }) {
+function createBotCommands({ portal, config, watchdog = null, heartbeat = null, now = () => Date.now() }) {
   const inviteUrl = (token) => `${config.publicUrl}/i/${token}`;
 
   async function status() {
@@ -40,6 +40,10 @@ function createBotCommands({ portal, config, watchdog = null }) {
     const count = (status) => members.filter((m) => m.status === status).length;
     lines.push(`Участников: ${members.length} (активны ${count('active')}, на паузе ${count('paused')}, приглашены ${count('invited')})`);
     if (watchdog) lines.push(...describeStatus(watchdog.status()));
+    if (heartbeat) {
+      const seenAt = heartbeat.lastSeen();
+      lines.push(seenAt ? `Внешняя проверка доступности: ${formatAgo(seenAt / 1000, now())}` : 'Внешняя проверка доступности не настроена (README, шаг 9)');
+    }
     const ipHosts = portal.ipHosts();
     if (ipHosts.length) lines.push(`⚠️ Есть ключи с IP-адресом вместо имени DuckDNS (${ipHosts.join(', ')}): при смене IP они перестанут работать`);
     return lines.join('\n');

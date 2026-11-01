@@ -1,0 +1,50 @@
+# Проверка доступности сервера снаружи (server/README.md, шаг 9; скрипт server/scripts/monitor.mjs).
+#
+# Раз в 15 минут открывает портал по имени DuckDNS. Нет ответа — повторяет каждую минуту
+# в течение 5 минут; если связь не вернулась, пишет админу в Telegram. Пока сервер недоступен,
+# запуск завершается с ошибкой: по ней следующий запуск понимает, что сервер «лежит», напоминает
+# раз в час и сообщает, когда сервер снова доступен.
+#
+# Секреты (Settings → Secrets and variables → Actions):
+#   MONITOR_HOST       — имя портала в DuckDNS (без https://); если не задано — берётся SERVER_HOST
+#   TELEGRAM_BOT_TOKEN — токен того же бота, что в .env на сервере
+#   TELEGRAM_CHAT_ID   — id чата админа (админка → раздел «Telegram»)
+# Без MONITOR_HOST и SERVER_HOST проверка пропускается.
+#
+# Журналы запусков публичного репозитория видны всем: скрипт не пишет в них ни имя сервера,
+# ни IP, а значения секретов GitHub скрывает сам.
+name: Доступность сервера
+
+on:
+  schedule:
+    # не ровно в :00 — в начале часа у GitHub очередь и запуски опаздывают
+    - cron: '7,22,37,52 * * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  # читать результаты прошлых запусков этой проверки
+  actions: read
+
+concurrency:
+  group: monitor
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          sparse-checkout: server/scripts
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+      - name: Проверка доступности
+        env:
+          MONITOR_HOST: ${{ secrets.MONITOR_HOST || secrets.SERVER_HOST }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          GITHUB_TOKEN: ${{ github.token }}
+          MONITOR_WORKFLOW: monitor.yml
+        run: node server/scripts/monitor.mjs

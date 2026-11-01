@@ -7,6 +7,7 @@ import { createAmneziaClient } from './amnezia.js';
 import { createTelegram } from './telegram.js';
 import { createBotCommands } from './bot.js';
 import { createWatchdog } from './watchdog.js';
+import { createHeartbeat } from './heartbeat.js';
 import { createPortal } from './portal.js';
 import { createApp } from './app.js';
 
@@ -30,10 +31,12 @@ const watchdog = createWatchdog({
   db,
   notify: telegram.notify
 });
-telegram.start(createBotCommands({ portal, config, watchdog }));
-const server = createServer(createApp({ portal, config, telegram, watchdog }));
+const heartbeat = createHeartbeat({ db, notify: telegram.notify });
+telegram.start(createBotCommands({ portal, config, watchdog, heartbeat }));
+const server = createServer(createApp({ portal, config, telegram, watchdog, heartbeat }));
 
 const sweep = async () => {
+  heartbeat.check();
   try {
     await portal.sweep();
   } catch (err) {

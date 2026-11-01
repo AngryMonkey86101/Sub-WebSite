@@ -117,7 +117,7 @@ function setup({ chatId = null } = {}) {
 
 test('Telegram: чат админа подключается одноразовой ссылкой из админки', async () => {
   const { db, tg, log, telegram, say } = setup();
-  assert.deepEqual(telegram.info(), { configured: true, username: null, error: null, fixedChat: false, linked: false });
+  assert.deepEqual(telegram.info(), { configured: true, username: null, error: null, fixedChat: false, linked: false, chatId: null });
 
   // пока чат не подключён, уведомления — в журнал контейнера
   await telegram.notify('📱 K7M2-1: новый ключ');
