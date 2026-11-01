@@ -13,6 +13,7 @@ import {
   errorPage
 } from './pages.js';
 import { createTelegram } from './telegram.js';
+import { createWatchdog } from './watchdog.js';
 
 // HTTP-слой портала. Без фреймворков, как сервер групп Компаса: страниц мало, а каждая
 // зависимость — это обновления и риски цепочки поставок на сервере с доступом к VPN.
@@ -109,7 +110,13 @@ function parseCookies(header = '') {
   return cookies;
 }
 
-function createApp({ portal, config, telegram = createTelegram({ settings: null }), now = () => Date.now() }) {
+function createApp({
+  portal,
+  config,
+  telegram = createTelegram({ settings: null }),
+  watchdog = createWatchdog({ settings: null, names: [] }),
+  now = () => Date.now()
+}) {
   const limit = createRateLimiter(now);
   // Префикс __Host- запрещает подменить cookie с поддомена; он требует Secure, поэтому
   // для локального запуска по HTTP имя обычное
@@ -237,6 +244,7 @@ function createApp({ portal, config, telegram = createTelegram({ settings: null 
         protocols: config.protocols,
         defaultDeviceLimit: config.defaultDeviceLimit,
         telegram: telegram.info(),
+        watchdog: watchdog.status(),
         notice: new URL(req.url, config.publicUrl).searchParams.get('telegram'),
         nowMs: now()
       }));
@@ -256,6 +264,16 @@ function createApp({ portal, config, telegram = createTelegram({ settings: null 
           await telegram.unlink();
           return redirect('/admin#telegram');
       }
+    }],
+
+    // Направить имена DuckDNS на этот сервер — после переезда или если запись правили вручную
+    ['POST', /^\/admin\/duckdns\/takeover$/, async ({ member }) => {
+      const admin = requireAdmin(member);
+      limit(`duckdns:${admin.id}`, 10, HOUR);
+      if (!watchdog.configured) throw new PortalError(404, 'Сторож IP не настроен: впишите DUCKDNS_TOKEN в .env');
+      const status = await watchdog.takeover();
+      if (status.state === 'error') throw new PortalError(502, status.message);
+      return redirect('/admin#duckdns');
     }],
 
     // Ключ, который админ выдаёт сам: хранится у него, с меткой «для кого»

@@ -73,7 +73,9 @@ function loadConfig(env = process.env) {
     // TELEGRAM_CHAT_ID нужен, только чтобы задать чат вручную, например группу
     telegram: env.TELEGRAM_BOT_TOKEN?.trim()
       ? { token: env.TELEGRAM_BOT_TOKEN.trim(), chatId: env.TELEGRAM_CHAT_ID?.trim() || null }
-      : null
+      : null,
+    // Сторож IP: обновляет записи DuckDNS при смене IP сервера (watchdog.js)
+    duckdns: env.DUCKDNS_TOKEN?.trim() ? { token: env.DUCKDNS_TOKEN.trim() } : null
   };
 }
 

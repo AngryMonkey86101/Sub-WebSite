@@ -1,12 +1,13 @@
 import { PortalError } from './portal.js';
 import { memberState } from './pages.js';
+import { describeStatus } from './watchdog.js';
 
 // Команды бота админа. Отвечают простым текстом. В ответах — только коды участников:
 // ни меток устройств, ни адресов. Кто управляет чатом с ботом, может приглашать людей,
 // поэтому ссылку админа (его вход в админку) бот не выдаёт.
 
 const LIST = [
-  { command: 'status', description: 'Сервер VPN и ключи' },
+  { command: 'status', description: 'Сервер VPN, ключи и IP' },
   { command: 'members', description: 'Участники' },
   { command: 'invite', description: 'Приглашение новому участнику' },
   { command: 'relink', description: 'Новая ссылка участнику: /relink КОД' },
@@ -14,14 +15,14 @@ const LIST = [
 ];
 
 const HELP = `Команды:
-/status — сервер VPN и ключи
+/status — сервер VPN, ключи и IP сервера
 /members — участники
 /invite — приглашение новому участнику (/invite 2 — с лимитом 2 устройства)
 /relink КОД — новое приглашение участнику, который потерял ссылку
 
 Остальное — в админке портала.`;
 
-function createBotCommands({ portal, config }) {
+function createBotCommands({ portal, config, watchdog = null }) {
   const inviteUrl = (token) => `${config.publicUrl}/i/${token}`;
 
   async function status() {
@@ -38,6 +39,7 @@ function createBotCommands({ portal, config }) {
     const members = portal.listMembers();
     const count = (status) => members.filter((m) => m.status === status).length;
     lines.push(`Участников: ${members.length} (активны ${count('active')}, на паузе ${count('paused')}, приглашены ${count('invited')})`);
+    if (watchdog) lines.push(...describeStatus(watchdog.status()));
     const ipHosts = portal.ipHosts();
     if (ipHosts.length) lines.push(`⚠️ Есть ключи с IP-адресом вместо имени DuckDNS (${ipHosts.join(', ')}): при смене IP они перестанут работать`);
     return lines.join('\n');

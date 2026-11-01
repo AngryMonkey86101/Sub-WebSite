@@ -6,6 +6,7 @@ import { openDatabase } from './db.js';
 import { loadConfig, ConfigError, PROTOCOLS } from './config.js';
 import { createAmneziaClient } from './amnezia.js';
 import { createTelegram } from './telegram.js';
+import { createWatchdog, detectPublicIp, describeStatus } from './watchdog.js';
 import { createPortal, PortalError } from './portal.js';
 import { hostOfKey, isIpAddress } from './vpnKey.js';
 
@@ -15,28 +16,20 @@ const USAGE = `Команды:
   invite [--admin] [--devices N]  новый участник и ссылка-приглашение
   relink КОД                      новое приглашение взамен потерянной ссылки
   list                            участники и устройства
+  duckdns [--takeover]            сторож IP: проверить записи DuckDNS сейчас; с --takeover —
+                                  направить имена на этот сервер (после переезда)
   check [--keys]                  имена DuckDNS, бот Telegram и связь с amnezia-api; с --keys —
                                   пробный ключ каждого протокола (создаётся и сразу удаляется)`;
 
-// Внешний IPv4 сервера — чтобы сверить с ним записи DuckDNS
-async function fetchPublicIp() {
-  try {
-    const res = await fetch('https://api.ipify.org', { signal: AbortSignal.timeout(5000) });
-    const ip = (await res.text()).trim();
-    return isIpAddress(ip) && !ip.includes(':') ? ip : null;
-  } catch {
-    return null;
-  }
-}
-
-async function main(argv, { out = console.log, dns = systemDns, publicIp = fetchPublicIp, fetch = globalThis.fetch } = {}) {
+async function main(argv, { out = console.log, dns = systemDns, publicIp = () => detectPublicIp(), fetch = globalThis.fetch } = {}) {
   const { positionals, values } = parseArgs({
     args: argv,
     allowPositionals: true,
     options: {
       admin: { type: 'boolean', default: false },
       devices: { type: 'string' },
-      keys: { type: 'boolean', default: false }
+      keys: { type: 'boolean', default: false },
+      takeover: { type: 'boolean', default: false }
     }
   });
   const [command, argument] = positionals;
@@ -48,6 +41,14 @@ async function main(argv, { out = console.log, dns = systemDns, publicIp = fetch
   // CLI только отправляет уведомления; сообщения боту принимает портал
   const telegram = createTelegram({ settings: config.telegram, db, fetch });
   const portal = createPortal({ db, config, amnezia, notify: telegram.notify });
+  const watchdog = createWatchdog({
+    settings: config.duckdns,
+    names: [config.vpnHost, new URL(config.publicUrl).hostname],
+    db,
+    notify: telegram.notify,
+    fetch,
+    dns
+  });
 
   try {
     switch (command) {
@@ -76,6 +77,12 @@ async function main(argv, { out = console.log, dns = systemDns, publicIp = fetch
             out(`    ${portal.clientName(member, device.number)}  ${device.platform}  ${device.protocol}  ${device.host ?? 'ключ создаётся'}${label}`);
           }
         }
+        return;
+      }
+      case 'duckdns': {
+        if (!watchdog.configured) throw new PortalError(400, describeStatus(watchdog.status()).join('\n'));
+        const status = values.takeover ? await watchdog.takeover() : await watchdog.tick();
+        for (const line of describeStatus(status)) out(line);
         return;
       }
       case 'check':
