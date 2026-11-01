@@ -1,0 +1,14 @@
+# HTTPS-сертификат для имени портала Caddy выпускает и продлевает сам (Let's Encrypt).
+# Директивы log нет намеренно: журнал запросов с IP-адресами не ведётся.
+# Имени VPN здесь нет: сертификат для него не выпускается, и оно не попадает
+# в публичные журналы сертификатов.
+{$PORTAL_HOST} {
+	request_body {
+		max_size 16KB
+	}
+	header {
+		-Server
+		Strict-Transport-Security "max-age=31536000"
+	}
+	reverse_proxy portal:8080
+}
