@@ -2,6 +2,10 @@
 # (node:sqlite без флага — с Node 22.13). Версия образа зафиксирована точно, как у Компаса.
 FROM node:22.23.4-alpine3.24
 
+# age — шифрование бэкапов открытым ключом админа (backup.js). Пакет из репозитория Alpine;
+# age-keygen из него же выпускает пару ключей (README, шаг 10)
+RUN apk add --no-cache 'age~1.3'
+
 WORKDIR /app
 COPY package.json ./
 COPY src ./src

@@ -8,6 +8,7 @@ import { createTelegram } from './telegram.js';
 import { createBotCommands } from './bot.js';
 import { createWatchdog } from './watchdog.js';
 import { createHeartbeat } from './heartbeat.js';
+import { createBackup } from './backup.js';
 import { createPortal } from './portal.js';
 import { createApp } from './app.js';
 
@@ -32,11 +33,14 @@ const watchdog = createWatchdog({
   notify: telegram.notify
 });
 const heartbeat = createHeartbeat({ db, notify: telegram.notify });
-telegram.start(createBotCommands({ portal, config, watchdog, heartbeat }));
-const server = createServer(createApp({ portal, config, telegram, watchdog, heartbeat }));
+const backup = createBackup({ config, db, amnezia, telegram, notify: telegram.notify });
+telegram.start(createBotCommands({ portal, config, watchdog, heartbeat, backup }));
+const server = createServer(createApp({ portal, config, telegram, watchdog, heartbeat, backup }));
 
 const sweep = async () => {
   heartbeat.check();
+  // бэкап раз в сутки; идёт в фоне и уборку не задерживает
+  backup.tick();
   try {
     await portal.sweep();
   } catch (err) {

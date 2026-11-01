@@ -295,6 +295,7 @@ const EVENT_LABELS = {
   telegram_linked: 'Telegram подключён',
   telegram_unlinked: 'Telegram отключён',
   ip_changed: 'IP сервера сменился, DuckDNS обновлён',
+  backup_failed: 'бэкап не сделан',
   duckdns_updated: 'DuckDNS направлен на этот сервер'
 };
 
@@ -332,7 +333,7 @@ function telegramSection(telegram, notice) {
   }
   return html`
       <h2 id="telegram">Telegram</h2>
-      ${notice === 'sent' ? html`<p class="notice">Проверочное сообщение отправлено.</p>` : ''}
+      ${notice?.telegram === 'sent' ? html`<p class="notice">Проверочное сообщение отправлено.</p>` : ''}
       ${telegram.error ? html`<p class="warning">${telegram.error}</p>` : ''}
       ${body}
       ${telegram.chatId ? html`<p class="muted">id чата: <b>${telegram.chatId}</b> — понадобится для проверки доступности (README, шаг 9).</p>` : ''}`;
@@ -379,7 +380,29 @@ function duckdnsSection(watchdog, monitorSeenAt, nowMs) {
       ${monitor}`;
 }
 
-function adminPage({ admin, members, statuses, foreign, statusError, ipHosts, events, protocols, defaultDeviceLimit, telegram, watchdog, monitorSeenAt, notice, nowMs }) {
+// Бэкап: настроен ли, когда был последний, кнопка «сейчас»
+function backupSection(backup, notice, nowMs) {
+  let body;
+  if (!backup.configured) {
+    body = backup.problem
+      ? html`<p class="warning">${backup.problem}</p>`
+      : html`<p class="muted">Бэкап не настроен. Без него при потере сервера ключи у всей семьи придётся выдавать заново. Настройка — README, шаг 10.</p>`;
+  } else {
+    body = html`
+      <p>Раз в сутки бот присылает в Telegram зашифрованный бэкап: ключи сервера VPN, базу портала и настройки. Расшифровать его можно только вашим закрытым ключом age (открытый: ${backup.key}).</p>
+      ${notice?.backup === 'sent' ? html`<p class="notice">Бэкап отправлен в Telegram.</p>` : ''}
+      ${backup.error ? html`<p class="warning">Последняя попытка не удалась: ${backup.error}</p>` : ''}
+      <p class="muted">${backup.lastAt
+        ? `Последний бэкап: ${formatAgo(backup.lastAt / 1000, nowMs)}, ${formatBytes(backup.lastSize ?? 0)}.`
+        : 'Бэкапов ещё не было: первый придёт в течение 10 минут после запуска.'}</p>
+      <form method="post" action="/admin/backup"><button type="submit">Сделать бэкап сейчас</button></form>`;
+  }
+  return html`
+      <h2 id="backup">Бэкап</h2>
+      ${body}`;
+}
+
+function adminPage({ admin, members, statuses, foreign, statusError, ipHosts, events, protocols, defaultDeviceLimit, telegram, watchdog, monitorSeenAt, backup, notice, nowMs }) {
   return layout({
     title: 'Админка',
     member: admin,
@@ -451,6 +474,7 @@ function adminPage({ admin, members, statuses, foreign, statusError, ipHosts, ev
         : html`<p>Таких ключей нет.</p>`}`
         : ''}
       ${duckdnsSection(watchdog, monitorSeenAt, nowMs)}
+      ${backupSection(backup, notice, nowMs)}
       ${telegramSection(telegram, notice)}
 
       <h2>Журнал</h2>

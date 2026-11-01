@@ -45,6 +45,7 @@ function createTelegram({ settings, db, fetch = globalThis.fetch, now = () => Da
       createLink: off,
       unlink: off,
       sendTest: off,
+      sendDocument: off,
       fetchMe: off,
       handleUpdate: async () => {},
       start: () => {},
@@ -63,13 +64,15 @@ function createTelegram({ settings, db, fetch = globalThis.fetch, now = () => Da
   // Чат из .env главнее подключённого из админки
   const chatId = () => settings.chatId ?? setting('telegram_chat');
 
+  // params — объект (уходит как JSON) или FormData (файл)
   async function call(method, params = {}, { timeoutMs = 15000 } = {}) {
+    const upload = params instanceof FormData;
     let res;
     try {
       res = await fetch(`${API}/bot${settings.token}/${method}`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(params),
+        headers: upload ? {} : { 'Content-Type': 'application/json' },
+        body: upload ? params : JSON.stringify(params),
         signal: AbortSignal.any([stopper.signal, AbortSignal.timeout(timeoutMs)])
       });
     } catch (err) {
@@ -163,6 +166,22 @@ function createTelegram({ settings, db, fetch = globalThis.fetch, now = () => Da
       await send(chat, 'Бот отключён от портала. Уведомления сюда больше не придут.');
     } catch (err) {
       log.error('Telegram:', err.message);
+    }
+  }
+
+  // Файл в чат админа (бэкап). Без звука: бэкап приходит каждый день. Ошибки — исключением.
+  async function sendDocument({ data, filename, caption }) {
+    const chat = chatId();
+    if (!chat) throw new PortalError(400, 'Чат Telegram не подключён: админка → Telegram → «Подключить Telegram»');
+    const form = new FormData();
+    form.append('chat_id', chat);
+    form.append('caption', caption);
+    form.append('disable_notification', 'true');
+    form.append('document', new Blob([data], { type: 'application/octet-stream' }), filename);
+    try {
+      await call('sendDocument', form, { timeoutMs: 120000 });
+    } catch (err) {
+      throw new PortalError(502, err.message);
     }
   }
 
@@ -276,6 +295,7 @@ function createTelegram({ settings, db, fetch = globalThis.fetch, now = () => Da
     createLink,
     unlink,
     sendTest,
+    sendDocument,
     fetchMe,
     handleUpdate,
     start,

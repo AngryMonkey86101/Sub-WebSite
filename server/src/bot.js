@@ -11,6 +11,7 @@ const LIST = [
   { command: 'members', description: 'Участники' },
   { command: 'invite', description: 'Приглашение новому участнику' },
   { command: 'relink', description: 'Новая ссылка участнику: /relink КОД' },
+  { command: 'backup', description: 'Бэкап сейчас' },
   { command: 'help', description: 'Что умеет бот' }
 ];
 
@@ -19,10 +20,11 @@ const HELP = `Команды:
 /members — участники
 /invite — приглашение новому участнику (/invite 2 — с лимитом 2 устройства)
 /relink КОД — новое приглашение участнику, который потерял ссылку
+/backup — бэкап сейчас (файл придёт сюда)
 
 Остальное — в админке портала.`;
 
-function createBotCommands({ portal, config, watchdog = null, heartbeat = null, now = () => Date.now() }) {
+function createBotCommands({ portal, config, watchdog = null, heartbeat = null, backup = null, now = () => Date.now() }) {
   const inviteUrl = (token) => `${config.publicUrl}/i/${token}`;
 
   async function status() {
@@ -43,6 +45,12 @@ function createBotCommands({ portal, config, watchdog = null, heartbeat = null, 
     if (heartbeat) {
       const seenAt = heartbeat.lastSeen();
       lines.push(seenAt ? `Внешняя проверка доступности: ${formatAgo(seenAt / 1000, now())}` : 'Внешняя проверка доступности не настроена (README, шаг 9)');
+    }
+    if (backup) {
+      const state = backup.status();
+      if (!state.configured) lines.push(state.problem ? `⚠️ ${state.problem}` : '💾 Бэкап не настроен (README, шаг 10)');
+      else if (state.error) lines.push(`⚠️ Бэкап: последняя попытка не удалась — ${state.error}`);
+      else lines.push(state.lastAt ? `💾 Последний бэкап: ${formatAgo(state.lastAt / 1000, now())}` : '💾 Бэкапов ещё не было');
     }
     const ipHosts = portal.ipHosts();
     if (ipHosts.length) lines.push(`⚠️ Есть ключи с IP-адресом вместо имени DuckDNS (${ipHosts.join(', ')}): при смене IP они перестанут работать`);
@@ -85,6 +93,11 @@ function createBotCommands({ portal, config, watchdog = null, heartbeat = null, 
           return invite(args);
         case '/relink':
           return relink(args);
+        case '/backup': {
+          if (!backup) return '💾 Бэкап не настроен (README, шаг 10)';
+          const { size } = await backup.run();
+          return `💾 Бэкап отправлен, ${Math.max(1, Math.round(size / 1024))} КБ.`;
+        }
         default:
           return HELP;
       }
