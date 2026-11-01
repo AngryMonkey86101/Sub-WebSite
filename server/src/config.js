@@ -69,8 +69,10 @@ function loadConfig(env = process.env) {
     defaultDeviceLimit: deviceLimit,
     keyEncryptionKey: parseKey(required('KEY_ENCRYPTION_KEY')),
     appDownloadUrl: env.APP_DOWNLOAD_URL || 'https://amnezia.org/ru/downloads',
-    telegram: env.TELEGRAM_BOT_TOKEN && env.TELEGRAM_CHAT_ID
-      ? { token: env.TELEGRAM_BOT_TOKEN.trim(), chatId: env.TELEGRAM_CHAT_ID.trim() }
+    // Бот админа. Чат подключается из админки (кнопка «Подключить Telegram») и хранится в базе;
+    // TELEGRAM_CHAT_ID нужен, только чтобы задать чат вручную, например группу
+    telegram: env.TELEGRAM_BOT_TOKEN?.trim()
+      ? { token: env.TELEGRAM_BOT_TOKEN.trim(), chatId: env.TELEGRAM_CHAT_ID?.trim() || null }
       : null
   };
 }

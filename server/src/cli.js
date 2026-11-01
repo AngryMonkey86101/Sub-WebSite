@@ -5,7 +5,7 @@ import * as systemDns from 'node:dns/promises';
 import { openDatabase } from './db.js';
 import { loadConfig, ConfigError, PROTOCOLS } from './config.js';
 import { createAmneziaClient } from './amnezia.js';
-import { createNotifier } from './telegram.js';
+import { createTelegram } from './telegram.js';
 import { createPortal, PortalError } from './portal.js';
 import { hostOfKey, isIpAddress } from './vpnKey.js';
 
@@ -15,7 +15,7 @@ const USAGE = `Команды:
   invite [--admin] [--devices N]  новый участник и ссылка-приглашение
   relink КОД                      новое приглашение взамен потерянной ссылки
   list                            участники и устройства
-  check [--keys]                  имена DuckDNS и связь с amnezia-api; с --keys —
+  check [--keys]                  имена DuckDNS, бот Telegram и связь с amnezia-api; с --keys —
                                   пробный ключ каждого протокола (создаётся и сразу удаляется)`;
 
 // Внешний IPv4 сервера — чтобы сверить с ним записи DuckDNS
@@ -29,7 +29,7 @@ async function fetchPublicIp() {
   }
 }
 
-async function main(argv, { out = console.log, dns = systemDns, publicIp = fetchPublicIp } = {}) {
+async function main(argv, { out = console.log, dns = systemDns, publicIp = fetchPublicIp, fetch = globalThis.fetch } = {}) {
   const { positionals, values } = parseArgs({
     args: argv,
     allowPositionals: true,
@@ -45,7 +45,9 @@ async function main(argv, { out = console.log, dns = systemDns, publicIp = fetch
   const config = loadConfig();
   const db = openDatabase(config.dbPath);
   const amnezia = createAmneziaClient({ baseUrl: config.amneziaApiUrl, apiKey: config.amneziaApiKey });
-  const portal = createPortal({ db, config, amnezia, notify: createNotifier(config.telegram) });
+  // CLI только отправляет уведомления; сообщения боту принимает портал
+  const telegram = createTelegram({ settings: config.telegram, db, fetch });
+  const portal = createPortal({ db, config, amnezia, notify: telegram.notify });
 
   try {
     switch (command) {
@@ -59,7 +61,7 @@ async function main(argv, { out = console.log, dns = systemDns, publicIp = fetch
         return;
       }
       case 'relink': {
-        const member = portal.listMembers().find((m) => m.code === argument?.toUpperCase());
+        const member = portal.memberByCode(argument);
         if (!member) throw new PortalError(404, `Участник ${argument ?? ''} не найден`);
         const { inviteToken } = portal.relinkMember(member.id);
         out(`Новое приглашение для ${member.code}: ${config.publicUrl}/i/${inviteToken}`);
@@ -78,6 +80,7 @@ async function main(argv, { out = console.log, dns = systemDns, publicIp = fetch
       }
       case 'check':
         await checkNames({ config, dns, publicIp, out });
+        await checkTelegram({ telegram, out });
         return await check({ config, amnezia, withKeys: values.keys, out });
       default:
         throw new PortalError(400, `Неизвестная команда ${command}\n\n${USAGE}`);
@@ -112,6 +115,20 @@ async function checkNames({ config, dns, publicIp, out }) {
     if (ip && !addresses.includes(ip)) out(`⚠️ ${label}: ${host} ведёт не на этот сервер — укажите на duckdns.org IP ${ip}`);
     const ipv6 = await dns.resolve6(host).catch(() => []);
     if (ipv6.length) out(`⚠️ ${label}: у ${host} есть IPv6 (${ipv6.join(', ')}) — очистите поле ipv6 на duckdns.org`);
+  }
+}
+
+// Бот необязателен; если токен задан — Telegram его принимает и чат админа подключён
+async function checkTelegram({ telegram, out }) {
+  if (!telegram.configured) return out('Telegram: бот не настроен (TELEGRAM_BOT_TOKEN пуст)');
+  try {
+    const me = await telegram.fetchMe();
+    const { fixedChat, linked } = telegram.info();
+    if (fixedChat) out(`Telegram: бот @${me.username}, чат задан в .env`);
+    else if (linked) out(`Telegram: бот @${me.username}, чат подключён`);
+    else out(`⚠️ Telegram: бот @${me.username} не подключён к чату — админка → Telegram → «Подключить Telegram»`);
+  } catch (err) {
+    out(`⚠️ ${err.message}`);
   }
 }
 

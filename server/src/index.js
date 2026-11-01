@@ -4,7 +4,8 @@ import { dirname } from 'node:path';
 import { openDatabase } from './db.js';
 import { loadConfig, ConfigError, LIMITS } from './config.js';
 import { createAmneziaClient } from './amnezia.js';
-import { createNotifier } from './telegram.js';
+import { createTelegram } from './telegram.js';
+import { createBotCommands } from './bot.js';
 import { createPortal } from './portal.js';
 import { createApp } from './app.js';
 
@@ -20,9 +21,10 @@ try {
 if (config.dbPath !== ':memory:') mkdirSync(dirname(config.dbPath), { recursive: true });
 const db = openDatabase(config.dbPath);
 const amnezia = createAmneziaClient({ baseUrl: config.amneziaApiUrl, apiKey: config.amneziaApiKey });
-const notify = createNotifier(config.telegram);
-const portal = createPortal({ db, config, amnezia, notify });
-const server = createServer(createApp({ portal, config }));
+const telegram = createTelegram({ settings: config.telegram, db });
+const portal = createPortal({ db, config, amnezia, notify: telegram.notify });
+telegram.start(createBotCommands({ portal, config }));
+const server = createServer(createApp({ portal, config, telegram }));
 
 const sweep = async () => {
   try {
@@ -36,10 +38,13 @@ const timer = setInterval(sweep, LIMITS.sweepInterval);
 
 server.listen(config.port, () => {
   console.log(`Портал слушает порт ${config.port}, адрес ${config.publicUrl}, протоколы: ${config.protocols.join(', ')}`);
+  // заодно видно неожиданные перезагрузки сервера
+  telegram.notify('🟢 Портал запущен');
 });
 
-const shutdown = () => {
+const shutdown = async () => {
   clearInterval(timer);
+  await telegram.stop();
   server.close(() => {
     db.close();
     process.exit(0);

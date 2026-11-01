@@ -9,8 +9,10 @@ import {
   devicePage,
   adminPage,
   inviteCreatedPage,
+  telegramLinkPage,
   errorPage
 } from './pages.js';
+import { createTelegram } from './telegram.js';
 
 // HTTP-слой портала. Без фреймворков, как сервер групп Компаса: страниц мало, а каждая
 // зависимость — это обновления и риски цепочки поставок на сервере с доступом к VPN.
@@ -107,7 +109,7 @@ function parseCookies(header = '') {
   return cookies;
 }
 
-function createApp({ portal, config, now = () => Date.now() }) {
+function createApp({ portal, config, telegram = createTelegram({ settings: null }), now = () => Date.now() }) {
   const limit = createRateLimiter(now);
   // Префикс __Host- запрещает подменить cookie с поддомена; он требует Secure, поэтому
   // для локального запуска по HTTP имя обычное
@@ -221,7 +223,7 @@ function createApp({ portal, config, now = () => Date.now() }) {
       return redirect('/');
     }],
 
-    ['GET', /^\/admin$/, async ({ member }) => {
+    ['GET', /^\/admin$/, async ({ req, member }) => {
       const admin = requireAdmin(member);
       const { statuses, foreign, statusError } = await serverKeysOrError();
       return page(200, adminPage({
@@ -234,8 +236,26 @@ function createApp({ portal, config, now = () => Date.now() }) {
         events: portal.recentEvents(),
         protocols: config.protocols,
         defaultDeviceLimit: config.defaultDeviceLimit,
+        telegram: telegram.info(),
+        notice: new URL(req.url, config.publicUrl).searchParams.get('telegram'),
         nowMs: now()
       }));
+    }],
+
+    // Бот админа: одноразовая ссылка для подключения чата, проверочное сообщение, отключение
+    ['POST', /^\/admin\/telegram\/(link|test|unlink)$/, async ({ member, params }) => {
+      const admin = requireAdmin(member);
+      limit(`telegram:${admin.id}`, 20, HOUR);
+      switch (params[0]) {
+        case 'link':
+          return page(200, telegramLinkPage({ admin, ...(await telegram.createLink()) }));
+        case 'test':
+          await telegram.sendTest();
+          return redirect('/admin?telegram=sent#telegram');
+        default:
+          await telegram.unlink();
+          return redirect('/admin#telegram');
+      }
     }],
 
     // Ключ, который админ выдаёт сам: хранится у него, с меткой «для кого»

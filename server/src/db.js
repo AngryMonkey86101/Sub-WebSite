@@ -2,6 +2,7 @@ import { DatabaseSync } from 'node:sqlite';
 
 // Хранилище портала. Персональных данных нет: участник — это случайный код, устройство —
 // платформа из списка и номер. Токены — только хэши, ключи VPN — зашифрованы.
+// settings — служебные значения (чат админа в Telegram и одноразовый код его подключения).
 const SCHEMA = `
   CREATE TABLE IF NOT EXISTS members (
     id INTEGER PRIMARY KEY,
@@ -44,6 +45,10 @@ const SCHEMA = `
     type TEXT NOT NULL,
     member_code TEXT,
     details TEXT
+  );
+  CREATE TABLE IF NOT EXISTS settings (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
   );
 `;
 

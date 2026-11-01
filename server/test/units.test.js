@@ -86,6 +86,7 @@ test('настройки: обязательные переменные и пр�
   assert.equal(config.telegram, null);
   assert.equal(loadConfig({ ...env, KEY_ENCRYPTION_KEY: randomBytes(32).toString('hex') }).keyEncryptionKey.length, 32);
   assert.deepEqual(loadConfig({ ...env, TELEGRAM_BOT_TOKEN: 't', TELEGRAM_CHAT_ID: '1' }).telegram, { token: 't', chatId: '1' });
+  assert.deepEqual(loadConfig({ ...env, TELEGRAM_BOT_TOKEN: ' t ' }).telegram, { token: 't', chatId: null }, 'чат подключается из админки');
 
   assert.throws(() => loadConfig({ ...env, AMNEZIA_API_KEY: '' }), ConfigError);
   assert.throws(() => loadConfig({ ...env, KEY_ENCRYPTION_KEY: 'short' }), ConfigError);
@@ -183,6 +184,18 @@ test('CLI: приглашение админа, список, проверка �
     const healthy = { resolve4: async () => ['198.51.100.20'], resolve6: async () => [] };
     await main(['check'], { out, dns: healthy, publicIp: async () => '198.51.100.20' });
     assert.ok(!lines.some((line) => line.startsWith('⚠️')), lines.join('\n'));
+    assert.ok(lines.includes('Telegram: бот не настроен (TELEGRAM_BOT_TOKEN пуст)'));
+
+    // бот задан, но чат не подключён; затем Telegram не принимает токен
+    process.env.TELEGRAM_BOT_TOKEN = '7000000001:test-token';
+    const telegramReply = (status, body) => async () => new Response(JSON.stringify(body), { status });
+    lines.length = 0;
+    await main(['check'], { out, dns: healthy, publicIp: async () => '198.51.100.20', fetch: telegramReply(200, { ok: true, result: { username: 'family_vpn_bot' } }) });
+    assert.ok(lines.some((line) => line.startsWith('⚠️ Telegram: бот @family_vpn_bot не подключён к чату')), lines.join('\n'));
+    lines.length = 0;
+    await main(['check'], { out, dns: healthy, publicIp: async () => '198.51.100.20', fetch: telegramReply(401, { ok: false, description: 'Unauthorized' }) });
+    assert.ok(lines.includes('⚠️ Telegram не принял токен бота — проверьте TELEGRAM_BOT_TOKEN в .env'), lines.join('\n'));
+    delete process.env.TELEGRAM_BOT_TOKEN;
 
     lines.length = 0;
     await main(['check', '--keys'], { out, dns: healthy, publicIp: async () => '198.51.100.20' });
