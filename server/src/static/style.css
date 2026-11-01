@@ -64,6 +64,13 @@ a { color: var(--accent); }
 
 .muted { color: var(--muted); font-size: 0.92rem; }
 
+.notice {
+  background: var(--card);
+  border: 1px solid var(--border);
+  padding: 10px 12px;
+  border-radius: 8px;
+}
+
 .warning {
   background: var(--warning-bg);
   color: var(--warning-text);
@@ -119,6 +126,7 @@ form.inline { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
 form.inline input[type="number"] { width: 5em; }
 
 ul.devices, ul.members, ul.events { list-style: none; padding: 0; margin: 0; }
+ol { padding-left: 1.4em; }
 
 ul.devices > li, ul.members > li {
   background: var(--card);

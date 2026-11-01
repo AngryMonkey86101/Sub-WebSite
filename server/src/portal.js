@@ -131,6 +131,8 @@ function createPortal({ db, config, amnezia, notify, now = () => Date.now() }) {
     return result;
   }
 
+  const memberByCode = (code) => (typeof code === 'string' ? q.memberByCode.get(code.trim().toUpperCase()) ?? null : null);
+
   function memberByToken(token) {
     if (typeof token !== 'string' || !token || token.length > 100) return null;
     const row = q.tokenByHash.get(sha256(token));
@@ -349,6 +351,7 @@ function createPortal({ db, config, amnezia, notify, now = () => Date.now() }) {
     peekInvite,
     activateInvite,
     memberByToken,
+    memberByCode,
     rotateAccessToken,
     devicesOf,
     addDevice,

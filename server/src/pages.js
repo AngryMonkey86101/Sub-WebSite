@@ -291,7 +291,9 @@ const EVENT_LABELS = {
   member_paused: 'пауза',
   member_resumed: 'возобновлён',
   member_deleted: 'участник удалён',
-  limit_changed: 'изменён лимит'
+  limit_changed: 'изменён лимит',
+  telegram_linked: 'Telegram подключён',
+  telegram_unlinked: 'Telegram отключён'
 };
 
 function memberState(member) {
@@ -303,7 +305,37 @@ function memberState(member) {
   return STATUS_LABELS[member.status];
 }
 
-function adminPage({ admin, members, statuses, foreign, statusError, ipHosts, events, protocols, defaultDeviceLimit, nowMs }) {
+// Бот админа: подключение чата, проверка, отключение
+function telegramSection(telegram, notice) {
+  const bot = telegram.username ? html`<b>@${telegram.username}</b>` : 'Бот';
+  const test = html`<form method="post" action="/admin/telegram/test"><button type="submit">Проверить</button></form>`;
+  let body;
+  if (!telegram.configured) {
+    body = html`<p class="muted">Бот не настроен. Создайте бота у @BotFather, впишите его токен в TELEGRAM_BOT_TOKEN в .env и перезапустите портал: docker compose up -d.</p>`;
+  } else if (telegram.fixedChat) {
+    body = html`<p>${bot}: уведомления идут в чат из .env (TELEGRAM_CHAT_ID).</p><div class="actions">${test}</div>`;
+  } else if (telegram.linked) {
+    body = html`
+      <p>${bot} подключён: уведомления и команды — в вашем чате с ним.</p>
+      <div class="actions">
+        ${test}
+        <form method="post" action="/admin/telegram/unlink" data-confirm="Отключить бота? Уведомления перестанут приходить.">
+          <button type="submit" class="danger">Отключить</button>
+        </form>
+      </div>`;
+  } else {
+    body = html`
+      <p>${bot} ещё не подключён. Нажмите кнопку, откройте ссылку на телефоне с Telegram и нажмите «Запустить».</p>
+      <form method="post" action="/admin/telegram/link"><button type="submit" class="primary">Подключить Telegram</button></form>`;
+  }
+  return html`
+      <h2 id="telegram">Telegram</h2>
+      ${notice === 'sent' ? html`<p class="notice">Проверочное сообщение отправлено.</p>` : ''}
+      ${telegram.error ? html`<p class="warning">${telegram.error}</p>` : ''}
+      ${body}`;
+}
+
+function adminPage({ admin, members, statuses, foreign, statusError, ipHosts, events, protocols, defaultDeviceLimit, telegram, notice, nowMs }) {
   return layout({
     title: 'Админка',
     member: admin,
@@ -374,6 +406,7 @@ function adminPage({ admin, members, statuses, foreign, statusError, ipHosts, ev
         <li><b>${peer.name || 'без имени'}</b> · ${PROTOCOLS[peer.protocol] ?? peer.protocol} <span class="status">${deviceStatus(peer, peer, nowMs)}</span></li>`)}</ul>`
         : html`<p>Таких ключей нет.</p>`}`
         : ''}
+      ${telegramSection(telegram, notice)}
 
       <h2>Журнал</h2>
       <ul class="events">${events.map((event) => html`
@@ -391,6 +424,26 @@ function inviteCreatedPage({ member, admin, inviteUrl, relinked }) {
       <h1>${relinked ? 'Новое приглашение' : 'Приглашение создано'}: <b>${member.code}</b></h1>
       <p>Передайте ссылку лично. Она одноразовая и действует 3 дня. Запомните, кому выдан код ${member.code}: в портале это нигде не записано.</p>
       ${copyField('invite-link', inviteUrl, 2)}`
+  });
+}
+
+function telegramLinkPage({ admin, url, expiresAt }) {
+  const until = new Date(expiresAt);
+  return layout({
+    title: 'Подключение Telegram',
+    member: admin,
+    section: 'admin',
+    body: html`
+      <p><a href="/admin#telegram">← Админка</a></p>
+      <h1>Подключение Telegram</h1>
+      <ol>
+        <li>Откройте ссылку на устройстве, где установлен Telegram.</li>
+        <li>В чате с ботом нажмите «Запустить» (Start).</li>
+        <li>Бот ответит «Бот подключён» — готово.</li>
+      </ol>
+      <p><a class="button primary" href="${url}">Открыть Telegram</a></p>
+      <p class="muted">Ссылка одноразовая и действует 10 минут (до ${pad(until.getUTCHours())}:${pad(until.getUTCMinutes())} UTC). Не пересылайте её: кто подключит бота, тот сможет приглашать людей.</p>
+      ${copyField('telegram-link', url, 2)}`
   });
 }
 
@@ -417,5 +470,7 @@ export {
   devicePage,
   adminPage,
   inviteCreatedPage,
-  errorPage
+  telegramLinkPage,
+  errorPage,
+  memberState
 };
