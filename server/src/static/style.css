@@ -49,6 +49,12 @@ header {
 
 .brand { font-weight: 600; color: var(--text); text-decoration: none; }
 
+.who { display: flex; flex-wrap: wrap; gap: 4px 14px; align-items: center; }
+.who a[aria-current="page"] { color: var(--text); font-weight: 600; text-decoration: none; }
+
+details { margin-top: 12px; }
+summary { cursor: pointer; color: var(--accent); }
+
 main { max-width: 720px; margin: 0 auto; padding: 16px; }
 
 h1 { font-size: 1.5rem; margin: 8px 0 16px; }

@@ -296,6 +296,58 @@ test('админка показывает ключи вне портала: из
   }
 });
 
+test('ярлык: манифест ведёт на личную ссылку, есть иконки и раздел в кабинете', async () => {
+  const { browser: b } = await joinedMember();
+  const token = b.jar['__Host-sid'];
+  const cabinet = await b.get('/');
+  assert.ok(cabinet.text.includes(`<link rel="manifest" href="/manifest.webmanifest?t=${token}">`));
+  assert.match(cabinet.text, /data-install>Добавить на экран «Домой»<\/button>/);
+  assert.match(cabinet.text, /На экран „Домой“/);
+  assert.match(cabinet.text, /Добавить на главный экран/);
+  assert.match(cabinet.headers.get('content-security-policy'), /manifest-src 'self'/);
+
+  const manifest = await fetch(`${base}/manifest.webmanifest?t=${token}`);
+  assert.match(manifest.headers.get('content-type'), /application\/manifest\+json/);
+  const data = await manifest.json();
+  assert.equal(data.start_url, `/m/${token}`);
+  assert.equal(data.display, 'standalone');
+  assert.equal(data.id, '/');
+  assert.deepEqual(data.icons.map((icon) => icon.sizes), ['192x192', '512x512', '512x512']);
+  for (const url of ['/manifest.webmanifest', `/manifest.webmanifest?t=${'A'.repeat(43)}`, '/manifest.webmanifest?t=%3Cscript%3E']) {
+    assert.equal((await (await fetch(base + url)).json()).start_url, '/', url);
+  }
+  for (const icon of ['/static/icon-180.png', '/static/icon-192.png', '/static/icon-512.png']) {
+    const res = await fetch(base + icon);
+    assert.equal(res.headers.get('content-type'), 'image/png');
+    assert.deepEqual([...new Uint8Array(await res.arrayBuffer()).slice(0, 4)], [0x89, 0x50, 0x4e, 0x47]);
+  }
+  assert.ok(!(await browser().get('/')).text.includes('rel="manifest"'), 'без входа ярлык не предлагается');
+
+  const rotated = await b.post('/link');
+  const newToken = personalLink(rotated.text);
+  assert.ok(rotated.text.includes(`/manifest.webmanifest?t=${newToken}`), 'после новой личной ссылки манифест ведёт на неё');
+});
+
+test('навигация админа: кабинет и админка, «Выйти из админки», «Выдать ещё ключ»', async () => {
+  const admin = await joinedMember({ role: 'admin' });
+  const regular = await joinedMember();
+  const cabinet = (await admin.browser.get('/')).text;
+  assert.match(cabinet, /<a href="\/" aria-current="page">Мои устройства<\/a>/);
+  assert.match(cabinet, /<a href="\/admin" aria-current="false">Админка<\/a>/);
+
+  const adminPage = (await admin.browser.get('/admin')).text;
+  assert.match(adminPage, /<a href="\/admin" aria-current="page">Админка<\/a>/);
+  assert.match(adminPage, /<a class="button" href="\/">← Выйти из админки<\/a>/);
+
+  const issued = await admin.browser.post('/admin/devices', { label: 'дача', platform: 'android', protocol: 'amneziawg3' });
+  const issuedPage = (await admin.browser.get(issued.headers.get('location'))).text;
+  assert.match(issuedPage, /<a href="\/admin#issue">← Админка<\/a>/);
+  assert.match(issuedPage, /Выдать ещё ключ/);
+  const own = await addDevice(admin.browser);
+  assert.ok(!(await admin.browser.get(`/devices/${own.id}`)).text.includes('Выдать ещё ключ'));
+  assert.ok(!(await regular.browser.get('/')).text.includes('href="/admin"'), 'у участника ссылки на админку нет');
+});
+
 test('пауза, возобновление и удаление участника', async () => {
   const admin = await joinedMember({ role: 'admin' });
   const { member, browser: b } = await joinedMember();

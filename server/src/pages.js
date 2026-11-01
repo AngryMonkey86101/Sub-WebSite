@@ -64,21 +64,36 @@ function deviceStatus(device, peer, nowMs) {
   return device.protocol === 'xray' ? '' : 'ещё не подключался';
 }
 
-function layout({ title, member, body }) {
+// section — раздел для навигации админа: 'cabinet' или 'admin'
+function layout({ title, member, body, section }) {
+  const current = (name) => (section === name ? 'page' : 'false');
   return html`<!doctype html>
 <html lang="ru">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="robots" content="noindex, nofollow">
+<meta name="theme-color" content="#2563eb">
+<meta name="apple-mobile-web-app-title" content="Семейный VPN">
 <title>${title} · Семейный VPN</title>
+<link rel="icon" href="/static/icon-192.png">
+<link rel="apple-touch-icon" href="/static/icon-180.png">
+${member?.token ? html`<link rel="manifest" href="/manifest.webmanifest?t=${member.token}">` : ''}
 <link rel="stylesheet" href="/static/style.css">
 <script src="/static/app.js" defer></script>
 </head>
 <body>
 <header>
   <a class="brand" href="/">Семейный VPN</a>
-  ${member ? html`<span class="who">Участник <b>${member.code}</b>${member.role === 'admin' ? html` · <a href="/admin">админка</a>` : ''}</span>` : ''}
+  ${member
+    ? html`<nav class="who">
+    <span>Участник <b>${member.code}</b></span>
+    ${member.role === 'admin'
+      ? html`<a href="/" aria-current="${current('cabinet')}">Мои устройства</a>
+    <a href="/admin" aria-current="${current('admin')}">Админка</a>`
+      : ''}
+  </nav>`
+    : ''}
 </header>
 <main>
 ${body}
@@ -128,6 +143,33 @@ function personalLinkPage({ member, personalUrl, rotated }) {
   });
 }
 
+// Ярлык портала на экране «Домой». Кнопка открывает системное окно установки там, где браузер
+// его предлагает (Chrome на Android); на iPhone и в других браузерах сайт сам ярлык не создаст —
+// кнопка раскрывает инструкцию. В открытом с ярлыка портале раздел скрывается (static/app.js).
+function homeScreenSection() {
+  return html`
+      <section data-install-section>
+        <h2>Ярлык на экране «Домой»</h2>
+        <p class="muted">Ярлык открывает кабинет одним нажатием, без личной ссылки. Если выпустите новую личную ссылку, ярлык нужно добавить заново.</p>
+        <button type="button" class="primary" data-install>Добавить на экран «Домой»</button>
+        <details id="install-help">
+          <summary>Как добавить вручную</summary>
+          <p><b>iPhone и iPad</b> — в Safari:</p>
+          <ol>
+            <li>Нажмите «Поделиться» — квадрат со стрелкой вверх. В новых версиях iOS он может прятаться в меню «•••».</li>
+            <li>Пролистайте список и выберите «На экран „Домой“».</li>
+            <li>Нажмите «Добавить».</li>
+          </ol>
+          <p><b>Android</b> — в Chrome, Яндекс Браузере и других:</p>
+          <ol>
+            <li>Откройте меню браузера — «⋮» (три точки).</li>
+            <li>Выберите «Добавить на главный экран», «Установить приложение» или «Добавить ярлык» — название зависит от браузера.</li>
+            <li>Подтвердите добавление.</li>
+          </ol>
+        </details>
+      </section>`;
+}
+
 // Название устройства в списках: номер, платформа и метка, если ключ выдан из админки
 const deviceName = (device) =>
   html`№${device.number} · ${PLATFORMS[device.platform]}${device.label ? html` · «${device.label}»` : ''}`;
@@ -158,6 +200,7 @@ function cabinetPage({ member, devices, statuses, protocols, nowMs }) {
   return layout({
     title: 'Кабинет',
     member,
+    section: 'cabinet',
     body: html`
       <h1>Мои устройства</h1>
       ${member.status === 'paused' ? html`<p class="warning">Доступ приостановлен админом. Ключи сейчас не работают.</p>` : ''}
@@ -190,6 +233,8 @@ function cabinetPage({ member, devices, statuses, protocols, nowMs }) {
         <button type="submit" class="primary">Получить ключ</button>
       </form>`}
 
+      ${homeScreenSection()}
+
       <h2>Личная ссылка</h2>
       <p class="muted">Если кто-то мог увидеть вашу личную ссылку, выпустите новую — старая перестанет работать.</p>
       <form method="post" action="/link" data-confirm="Выпустить новую личную ссылку? Старая перестанет работать на всех устройствах.">
@@ -209,11 +254,14 @@ function instructions(platform, appDownloadUrl) {
 }
 
 function devicePage({ member, device, key, qrCodes, appDownloadUrl }) {
+  // ключ с меткой админ выдал из админки — туда и возвращаемся
+  const fromAdmin = Boolean(device.label) && member.role === 'admin';
   return layout({
     title: `Устройство №${device.number}`,
     member,
+    section: fromAdmin ? 'admin' : 'cabinet',
     body: html`
-      <p><a href="/">← Мои устройства</a></p>
+      <p>${fromAdmin ? html`<a href="/admin#issue">← Админка</a>` : html`<a href="/">← Мои устройства</a>`}</p>
       <h1>${deviceName(device)}</h1>
       <p class="muted">${PROTOCOLS[device.protocol]}. ${device.label
         ? 'Передайте ключ лично: скопируйте его или дайте отсканировать QR-код с экрана. Ключ хранится у вас — его можно показать снова или отозвать.'
@@ -224,7 +272,8 @@ function devicePage({ member, device, key, qrCodes, appDownloadUrl }) {
       ${qrCodes.length
         ? html`<h2>QR-код${qrCodes.length > 1 ? 'ы' : ''}</h2>
       <div class="qr">${qrCodes.map((src, i) => html`<figure><img src="${src}" alt="QR-код ${i + 1} из ${qrCodes.length}">${qrCodes.length > 1 ? html`<figcaption>${i + 1} из ${qrCodes.length}</figcaption>` : ''}</figure>`)}</div>`
-        : ''}`
+        : ''}
+      ${fromAdmin ? html`<p class="actions"><a class="button primary" href="/admin#issue">Выдать ещё ключ</a><a class="button" href="/">Мои устройства</a></p>` : ''}`
   });
 }
 
@@ -258,8 +307,10 @@ function adminPage({ admin, members, statuses, foreign, statusError, ipHosts, ev
   return layout({
     title: 'Админка',
     member: admin,
+    section: 'admin',
     body: html`
       <h1>Админка</h1>
+      <p><a class="button" href="/">← Выйти из админки</a></p>
       ${statusError ? html`<p class="warning">Нет связи с amnezia-api: ${statusError}</p>` : ''}
       ${ipHosts.length ? html`<p class="warning">Ключи собраны с IP-адресом (${ipHosts.join(', ')}), а не с именем DuckDNS: при смене IP они перестанут работать. Проверьте VPN_HOST в .env.</p>` : ''}
 
@@ -272,7 +323,7 @@ function adminPage({ admin, members, statuses, foreign, statusError, ipHosts, ev
         <button type="submit" class="primary">Создать приглашение</button>
       </form>
 
-      <h2>Выдать ключ</h2>
+      <h2 id="issue">Выдать ключ</h2>
       <p class="muted">Для тех, кому неудобно заходить на портал самим. Ключ сохранится у вас в «Моих устройствах»: его можно показать снова или отозвать. Метка видна только вам — на сервер VPN и в Telegram она не уходит. Имена писать не обязательно, хватит условного обозначения.</p>
       <form method="post" action="/admin/devices" class="stack">
         <label>Метка
@@ -334,6 +385,7 @@ function inviteCreatedPage({ member, admin, inviteUrl, relinked }) {
   return layout({
     title: 'Приглашение',
     member: admin,
+    section: 'admin',
     body: html`
       <p><a href="/admin">← Админка</a></p>
       <h1>${relinked ? 'Новое приглашение' : 'Приглашение создано'}: <b>${member.code}</b></h1>

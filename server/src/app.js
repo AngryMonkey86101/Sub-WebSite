@@ -20,14 +20,40 @@ import {
 
 const TOKEN = '([A-Za-z0-9_-]{43})';
 
+const staticFile = (type, name) => [type, readFileSync(new URL(`./static/${name}`, import.meta.url))];
+
 const STATIC = {
-  '/static/style.css': ['text/css; charset=utf-8', readFileSync(new URL('./static/style.css', import.meta.url))],
-  '/static/app.js': ['text/javascript; charset=utf-8', readFileSync(new URL('./static/app.js', import.meta.url))]
+  '/static/style.css': staticFile('text/css; charset=utf-8', 'style.css'),
+  '/static/app.js': staticFile('text/javascript; charset=utf-8', 'app.js'),
+  '/static/icon-180.png': staticFile('image/png', 'icon-180.png'),
+  '/static/icon-192.png': staticFile('image/png', 'icon-192.png'),
+  '/static/icon-512.png': staticFile('image/png', 'icon-512.png')
 };
+
+// Манифест ярлыка на экране «Домой». start_url — личная ссылка: ярлык на iPhone открывается
+// отдельно от Safari и может не видеть его cookie, а личная ссылка входит заново в любом случае
+function webManifest(startUrl) {
+  return {
+    id: '/',
+    name: 'Семейный VPN',
+    short_name: 'Семейный VPN',
+    lang: 'ru',
+    start_url: startUrl,
+    scope: '/',
+    display: 'standalone',
+    background_color: '#f6f7f9',
+    theme_color: '#2563eb',
+    icons: [
+      { src: '/static/icon-192.png', sizes: '192x192', type: 'image/png', purpose: 'any' },
+      { src: '/static/icon-512.png', sizes: '512x512', type: 'image/png', purpose: 'any' },
+      { src: '/static/icon-512.png', sizes: '512x512', type: 'image/png', purpose: 'maskable' }
+    ]
+  };
+}
 
 const SECURITY_HEADERS = {
   'Content-Security-Policy':
-    "default-src 'none'; style-src 'self'; script-src 'self'; img-src 'self' data:; form-action 'self'; frame-ancestors 'none'; base-uri 'none'",
+    "default-src 'none'; style-src 'self'; script-src 'self'; img-src 'self' data:; manifest-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'",
   // Личный токен лежит в адресе страницы — по ссылкам на другие сайты он не уходит.
   // Не no-referrer: с ним браузер шлёт с форм Origin: null, и проверка Origin их отклоняет.
   'Referrer-Policy': 'same-origin',
@@ -120,6 +146,16 @@ function createApp({ portal, config, now = () => Date.now() }) {
   const routes = [
     ['GET', /^\/healthz$/, () => ({ status: 200, json: { ok: true } })],
 
+    ['GET', /^\/manifest\.webmanifest$/, ({ req }) => {
+      const token = new URL(req.url, config.publicUrl).searchParams.get('t');
+      const valid = new RegExp(`^${TOKEN}$`).test(token ?? '') && portal.memberByToken(token);
+      return {
+        status: 200,
+        json: webManifest(valid ? `/m/${token}` : '/'),
+        contentType: 'application/manifest+json; charset=utf-8'
+      };
+    }],
+
     ['GET', /^\/$/, async ({ member }) => {
       if (!member) return page(200, landingPage());
       const devices = portal.devicesOf(member.id);
@@ -141,7 +177,7 @@ function createApp({ portal, config, now = () => Date.now() }) {
       const { member, accessToken } = portal.activateInvite(params[0]);
       return page(
         200,
-        personalLinkPage({ member, personalUrl: `${config.publicUrl}/m/${accessToken}`, rotated: false }),
+        personalLinkPage({ member: { ...member, token: accessToken }, personalUrl: `${config.publicUrl}/m/${accessToken}`, rotated: false }),
         { 'Set-Cookie': sessionCookie(accessToken) }
       );
     }],
@@ -159,7 +195,7 @@ function createApp({ portal, config, now = () => Date.now() }) {
       const accessToken = portal.rotateAccessToken(member.id);
       return page(
         200,
-        personalLinkPage({ member, personalUrl: `${config.publicUrl}/m/${accessToken}`, rotated: true }),
+        personalLinkPage({ member: { ...member, token: accessToken }, personalUrl: `${config.publicUrl}/m/${accessToken}`, rotated: true }),
         { 'Set-Cookie': sessionCookie(accessToken) }
       );
     }],
@@ -269,9 +305,9 @@ function createApp({ portal, config, now = () => Date.now() }) {
   }
 
   return async function handle(req, res) {
-    const send = ({ status, body, json, headers = {} }) => {
+    const send = ({ status, body, json, contentType = 'application/json; charset=utf-8', headers = {} }) => {
       if (json) {
-        res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', ...headers });
+        res.writeHead(status, { 'Content-Type': contentType, 'Cache-Control': 'no-store', ...headers });
         return res.end(JSON.stringify(json));
       }
       res.writeHead(status, {
@@ -294,7 +330,10 @@ function createApp({ portal, config, now = () => Date.now() }) {
     try {
       const client = clientKey(req);
       limit(`all:${client}`, 600, MINUTE);
-      member = portal.memberByToken(parseCookies(req.headers.cookie)[cookieName]);
+      const sessionToken = parseCookies(req.headers.cookie)[cookieName];
+      const row = portal.memberByToken(sessionToken);
+      // токен входа нужен странице для ярлыка: манифест ведёт на личную ссылку
+      member = row ? { ...row, token: sessionToken } : null;
       for (const [method, pattern, handler] of routes) {
         const match = pattern.exec(path);
         if (!match || method !== req.method) continue;
