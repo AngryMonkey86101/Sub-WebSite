@@ -48,6 +48,24 @@ async function startFakeAmnezia({ apiKey, host = 'k4tq9v.duckdns.org' }) {
       return send(status, { message: 'Сбой контейнера' });
     }
 
+    if (url.pathname === '/server/backup' && req.method === 'POST') {
+      if (!Array.isArray(body.protocols) || !body.amneziaWg3?.wgConfig) return send(400, { message: 'Некорректная резервная копия' });
+      state.imported = body;
+      state.clients.clear();
+      for (const client of body.amneziaWg3.clients) {
+        state.clients.set(client.clientId, {
+          id: client.clientId,
+          name: client.userData?.clientName ?? '',
+          protocol: 'amneziawg3',
+          status: 'active',
+          online: false,
+          lastHandshake: 0,
+          traffic: { received: 0, sent: 0 }
+        });
+      }
+      return send(200, { id: 'srv', region: 'NL', weight: 100, maxPeers: 200, totalPeers: state.clients.size, protocols: ['amneziawg3'] });
+    }
+
     if (url.pathname === '/server/backup' && req.method === 'GET') {
       return send(200, {
         generatedAt: new Date().toISOString(),

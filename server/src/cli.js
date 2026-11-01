@@ -2,6 +2,7 @@ import { parseArgs } from 'node:util';
 import { pathToFileURL } from 'node:url';
 import { randomBytes } from 'node:crypto';
 import * as systemDns from 'node:dns/promises';
+import { setTimeout as delay } from 'node:timers/promises';
 import { openDatabase } from './db.js';
 import { loadConfig, ConfigError, PROTOCOLS } from './config.js';
 import { createAmneziaClient } from './amnezia.js';
@@ -21,8 +22,70 @@ const USAGE = `Команды:
                                   направить имена на этот сервер (после переезда)
   backup [--stdout]               бэкап сейчас — в Telegram; с --stdout — зашифрованный архив
                                   в стандартный вывод (docker compose exec -T … > файл)
+  restored                        после переноса базы на новый сервер: забыть состояние старого
+                                  (используется scripts/restore.sh)
+  restore-vpn < amnezia.json      загрузить ключи сервера VPN из бэкапа в amnezia-api
   check [--keys]                  имена DuckDNS, бот Telegram и связь с amnezia-api; с --keys —
                                   пробный ключ каждого протокола (создаётся и сразу удаляется)`;
+
+// Состояние, которое относится к серверу, а не к семье. После переноса базы на новый сервер его
+// нужно забыть: иначе сторож, увидев в базе IP старого сервера, сам направил бы DuckDNS на новый
+// ещё до восстановления ключей VPN. Бэкап до восстановления ключей тоже нельзя: в нём оказались бы
+// новые пустые ключи AmneziaWG — поэтому restored его откладывает, а restore-vpn разрешает снова.
+const SERVER_STATE = [
+  'duckdns_ip',
+  'duckdns_prev_ip',
+  'duckdns_updated_at',
+  'duckdns_alert',
+  'backup_last_at',
+  'backup_failed_at',
+  'backup_alert',
+  'backup_error',
+  'monitor_alert'
+];
+
+async function readAll(stream) {
+  const chunks = [];
+  for await (const chunk of stream) chunks.push(chunk);
+  return Buffer.concat(chunks).toString('utf8');
+}
+
+// amnezia-api только что запущен: ждём, пока ответит
+async function waitForApi(amnezia, { attempts, delayMs }) {
+  for (let i = 1; ; i++) {
+    try {
+      return await amnezia.health();
+    } catch (err) {
+      if (i >= attempts) throw err;
+      await delay(delayMs);
+    }
+  }
+}
+
+// Ключи сервера VPN из бэкапа (amnezia.json) — обратно в amnezia-api. Восстанавливаются протоколы,
+// которые есть на этом сервере; AmneziaWG обязателен. Проверка — число клиентов как в бэкапе.
+async function restoreVpn({ amnezia, input, wait, out }) {
+  let data;
+  try {
+    data = JSON.parse(input);
+  } catch {
+    throw new PortalError(400, 'На вход нужен файл amnezia.json из бэкапа');
+  }
+  if (!data?.amneziaWg3?.wgConfig || !Array.isArray(data.amneziaWg3.clients)) {
+    throw new PortalError(400, 'В amnezia.json нет ключей AmneziaWG (раздел amneziaWg3)');
+  }
+  await waitForApi(amnezia, wait);
+  const available = (await amnezia.serverInfo()).protocols;
+  const protocols = data.protocols.filter((p) => available.includes(p));
+  if (!protocols.includes('amneziawg3')) throw new PortalError(400, 'На этом сервере нет контейнера AmneziaWG (amnezia-awg2)');
+  const skipped = data.protocols.filter((p) => !available.includes(p));
+  if (skipped.length) out(`⚠️ Не восстановлены — их нет на этом сервере: ${skipped.join(', ')}`);
+  await amnezia.importServerBackup({ ...data, protocols });
+  const peers = (await amnezia.listClients()).flatMap((client) => client.peers).filter((peer) => peer.protocol === 'amneziawg3').length;
+  const expected = data.amneziaWg3.clients.length;
+  out(`Ключи сервера VPN восстановлены: клиентов ${peers} из ${expected} в бэкапе`);
+  if (peers !== expected) throw new PortalError(500, 'Число клиентов не совпало с бэкапом — проверьте docker compose logs amnezia-api');
+}
 
 async function main(argv, {
   out = console.log,
@@ -30,7 +93,9 @@ async function main(argv, {
   dns = systemDns,
   publicIp = () => detectPublicIp(),
   fetch = globalThis.fetch,
-  encrypt = null
+  encrypt = null,
+  stdin = process.stdin,
+  wait = { attempts: 24, delayMs: 5000 }
 } = {}) {
   const { positionals, values } = parseArgs({
     args: argv,
@@ -107,6 +172,21 @@ async function main(argv, {
         out(`Бэкап отправлен в Telegram: ${filename}, ${Math.max(1, Math.round(size / 1024))} КБ`);
         return;
       }
+      case 'restored': {
+        const remove = db.prepare('DELETE FROM settings WHERE key = ?');
+        for (const key of SERVER_STATE) remove.run(key);
+        // бэкап — только после restore-vpn, с прежними ключами сервера
+        db.prepare("INSERT INTO settings (key, value) VALUES ('backup_last_at', ?)").run(String(Date.now()));
+        const members = portal.listMembers();
+        const devices = members.reduce((sum, member) => sum + member.devices.length, 0);
+        out(`База перенесена: участников ${members.length}, ключей ${devices}. Сторож DuckDNS не тронет записи до команды duckdns --takeover.`);
+        return;
+      }
+      case 'restore-vpn':
+        await restoreVpn({ amnezia, input: await readAll(stdin), wait, out });
+        // ключи прежние — первый бэкап с этого сервера придёт в течение 10 минут
+        db.prepare("DELETE FROM settings WHERE key = 'backup_last_at'").run();
+        return;
       case 'check':
         await checkNames({ config, dns, publicIp, out });
         await checkTelegram({ telegram, out });
