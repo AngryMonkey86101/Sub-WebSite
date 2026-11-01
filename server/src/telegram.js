@@ -126,7 +126,8 @@ function createTelegram({ settings, db, fetch = globalThis.fetch, now = () => Da
     username: state.username,
     error: state.error,
     fixedChat: Boolean(settings.chatId),
-    linked: Boolean(chatId())
+    linked: Boolean(chatId()),
+    chatId: chatId()
   });
 
   // Одноразовая ссылка для подключения чата админа. Действует 10 минут, новая отменяет прежнюю.

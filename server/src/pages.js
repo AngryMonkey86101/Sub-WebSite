@@ -334,11 +334,12 @@ function telegramSection(telegram, notice) {
       <h2 id="telegram">Telegram</h2>
       ${notice === 'sent' ? html`<p class="notice">Проверочное сообщение отправлено.</p>` : ''}
       ${telegram.error ? html`<p class="warning">${telegram.error}</p>` : ''}
-      ${body}`;
+      ${body}
+      ${telegram.chatId ? html`<p class="muted">id чата: <b>${telegram.chatId}</b> — понадобится для проверки доступности (README, шаг 9).</p>` : ''}`;
 }
 
 // Сторож IP: куда ведут имена DuckDNS и что он делает
-function duckdnsSection(watchdog, nowMs) {
+function duckdnsSection(watchdog, monitorSeenAt, nowMs) {
   let body;
   if (watchdog.state === 'off') {
     body = html`<p class="muted">${watchdog.message
@@ -369,12 +370,16 @@ function duckdnsSection(watchdog, nowMs) {
         : ''}
       ${watchdog.checkedAt ? html`<p class="muted">Проверено: ${formatAgo(watchdog.checkedAt / 1000, nowMs)}.</p>` : ''}`;
   }
+  const monitor = monitorSeenAt
+    ? html`<p class="muted">Внешняя проверка доступности (GitHub, раз в 15 минут): последняя — ${formatAgo(monitorSeenAt / 1000, nowMs)}.</p>`
+    : html`<p class="muted">Внешняя проверка доступности ещё не приходила. Без неё о падении сервера никто не сообщит: настройка — README, шаг 9.</p>`;
   return html`
       <h2 id="duckdns">Адрес сервера</h2>
-      ${body}`;
+      ${body}
+      ${monitor}`;
 }
 
-function adminPage({ admin, members, statuses, foreign, statusError, ipHosts, events, protocols, defaultDeviceLimit, telegram, watchdog, notice, nowMs }) {
+function adminPage({ admin, members, statuses, foreign, statusError, ipHosts, events, protocols, defaultDeviceLimit, telegram, watchdog, monitorSeenAt, notice, nowMs }) {
   return layout({
     title: 'Админка',
     member: admin,
@@ -445,7 +450,7 @@ function adminPage({ admin, members, statuses, foreign, statusError, ipHosts, ev
         <li><b>${peer.name || 'без имени'}</b> · ${PROTOCOLS[peer.protocol] ?? peer.protocol} <span class="status">${deviceStatus(peer, peer, nowMs)}</span></li>`)}</ul>`
         : html`<p>Таких ключей нет.</p>`}`
         : ''}
-      ${duckdnsSection(watchdog, nowMs)}
+      ${duckdnsSection(watchdog, monitorSeenAt, nowMs)}
       ${telegramSection(telegram, notice)}
 
       <h2>Журнал</h2>

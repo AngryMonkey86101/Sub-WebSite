@@ -115,6 +115,8 @@ function createApp({
   config,
   telegram = createTelegram({ settings: null }),
   watchdog = createWatchdog({ settings: null, names: [] }),
+  // метка внешней проверки доступности (heartbeat.js); без неё — заглушка
+  heartbeat = { seen: () => {}, lastSeen: () => null },
   now = () => Date.now()
 }) {
   const limit = createRateLimiter(now);
@@ -153,7 +155,11 @@ function createApp({
   }
 
   const routes = [
-    ['GET', /^\/healthz$/, () => ({ status: 200, json: { ok: true } })],
+    // Docker проверяет портал изнутри, внешняя проверка доступности приходит с ?from=monitor
+    ['GET', /^\/healthz$/, ({ req }) => {
+      if (new URL(req.url, config.publicUrl).searchParams.get('from') === 'monitor') heartbeat.seen();
+      return { status: 200, json: { ok: true } };
+    }],
 
     ['GET', /^\/manifest\.webmanifest$/, ({ req }) => {
       const token = new URL(req.url, config.publicUrl).searchParams.get('t');
@@ -245,6 +251,7 @@ function createApp({
         defaultDeviceLimit: config.defaultDeviceLimit,
         telegram: telegram.info(),
         watchdog: watchdog.status(),
+        monitorSeenAt: heartbeat.lastSeen(),
         notice: new URL(req.url, config.publicUrl).searchParams.get('telegram'),
         nowMs: now()
       }));
