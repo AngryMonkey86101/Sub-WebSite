@@ -293,7 +293,9 @@ const EVENT_LABELS = {
   member_deleted: 'участник удалён',
   limit_changed: 'изменён лимит',
   telegram_linked: 'Telegram подключён',
-  telegram_unlinked: 'Telegram отключён'
+  telegram_unlinked: 'Telegram отключён',
+  ip_changed: 'IP сервера сменился, DuckDNS обновлён',
+  duckdns_updated: 'DuckDNS направлен на этот сервер'
 };
 
 function memberState(member) {
@@ -335,7 +337,44 @@ function telegramSection(telegram, notice) {
       ${body}`;
 }
 
-function adminPage({ admin, members, statuses, foreign, statusError, ipHosts, events, protocols, defaultDeviceLimit, telegram, notice, nowMs }) {
+// Сторож IP: куда ведут имена DuckDNS и что он делает
+function duckdnsSection(watchdog, nowMs) {
+  let body;
+  if (watchdog.state === 'off') {
+    body = html`<p class="muted">${watchdog.message
+      ? `Сторож выключен: ${watchdog.message}.`
+      : 'Сторож не настроен: при смене IP запись DuckDNS придётся обновлять вручную. Чтобы включить, впишите DUCKDNS_TOKEN в .env (README, шаг 7).'}</p>`;
+  } else if (watchdog.state === 'starting') {
+    body = html`<p class="muted">Первая проверка ещё идёт — обновите страницу через минуту.</p>`;
+  } else {
+    const names = watchdog.names.filter((host) => watchdog.records?.[host]);
+    body = html`
+      ${watchdog.ip ? html`<p>IP сервера: <b>${watchdog.ip}</b></p>` : ''}
+      ${names.length
+        ? html`<ul class="devices compact">${names.map((host) => {
+          const found = watchdog.records[host];
+          const ok = found.length === 1 && found[0] === watchdog.ip;
+          return html`<li>${host} → ${found.length ? found.join(', ') : 'никуда'} <span class="status">${ok ? 'ведёт сюда' : 'не сюда'}</span></li>`;
+        })}</ul>`
+        : ''}
+      ${watchdog.state === 'ok' ? html`<p class="muted">Всё в порядке. Если IP сменится, сторож за минуту-две обновит запись сам.</p>` : ''}
+      ${watchdog.state === 'waiting' ? html`<p class="notice">Запись DuckDNS обновлена. DNS-серверы подхватят её в течение нескольких минут.</p>` : ''}
+      ${watchdog.state === 'error' ? html`<p class="warning">${watchdog.message}</p>` : ''}
+      ${watchdog.state === 'foreign'
+        ? html`
+      <p class="warning">Имя ведёт не на этот сервер, поэтому сторож его не трогает. Так бывает после переезда: имя уже направлено на другой сервер. Если основной сервер теперь этот, направьте имя сюда. Старый сервер при этом выключите — иначе бот будет работать на двух серверах сразу.</p>
+      <form method="post" action="/admin/duckdns/takeover" data-confirm="Направить имена DuckDNS на этот сервер (${watchdog.ip})?">
+        <button type="submit" class="primary">Направить DuckDNS сюда</button>
+      </form>`
+        : ''}
+      ${watchdog.checkedAt ? html`<p class="muted">Проверено: ${formatAgo(watchdog.checkedAt / 1000, nowMs)}.</p>` : ''}`;
+  }
+  return html`
+      <h2 id="duckdns">Адрес сервера</h2>
+      ${body}`;
+}
+
+function adminPage({ admin, members, statuses, foreign, statusError, ipHosts, events, protocols, defaultDeviceLimit, telegram, watchdog, notice, nowMs }) {
   return layout({
     title: 'Админка',
     member: admin,
@@ -406,6 +445,7 @@ function adminPage({ admin, members, statuses, foreign, statusError, ipHosts, ev
         <li><b>${peer.name || 'без имени'}</b> · ${PROTOCOLS[peer.protocol] ?? peer.protocol} <span class="status">${deviceStatus(peer, peer, nowMs)}</span></li>`)}</ul>`
         : html`<p>Таких ключей нет.</p>`}`
         : ''}
+      ${duckdnsSection(watchdog, nowMs)}
       ${telegramSection(telegram, notice)}
 
       <h2>Журнал</h2>
