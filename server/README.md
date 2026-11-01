@@ -84,13 +84,17 @@ ls -a ~/family-vpn
 - В выводе `ls` должны быть `docker-compose.yml` и `.env.example`.
 - Если `git` не установлен — под root: `apt install -y git`.
 
-Обновить файлы позже, пока не настроена выкладка из GitHub Actions (шаг 7):
+Обновить портал позже, пока не настроена выкладка из GitHub Actions (шаг 7):
 
 ```bash
 git -C ~/sub-website pull && cp -r ~/sub-website/server/. ~/family-vpn/
 ```
 
-Файл `.env` при этом не затрагивается.
+```bash
+cd ~/family-vpn && docker compose up -d --build
+```
+
+Файл `.env` и база при этом не затрагиваются. Все команды `docker compose` выполняются из папки `~/family-vpn`, иначе Docker ответит «no configuration file provided».
 
 `.env` — файл настроек и секретов. `docker compose` читает его сам из той же папки, в репозиторий он не попадает. Создайте его одной командой: подставьте свои имена DuckDNS в первые две строки `sed`, остальное она сгенерирует и определит сама. Если `.env` уже есть, команда его не тронет — иначе новые секреты затёрли бы старые.
 
