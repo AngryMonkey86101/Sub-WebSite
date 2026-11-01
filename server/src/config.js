@@ -75,7 +75,9 @@ function loadConfig(env = process.env) {
       ? { token: env.TELEGRAM_BOT_TOKEN.trim(), chatId: env.TELEGRAM_CHAT_ID?.trim() || null }
       : null,
     // Сторож IP: обновляет записи DuckDNS при смене IP сервера (watchdog.js)
-    duckdns: env.DUCKDNS_TOKEN?.trim() ? { token: env.DUCKDNS_TOKEN.trim() } : null
+    duckdns: env.DUCKDNS_TOKEN?.trim() ? { token: env.DUCKDNS_TOKEN.trim() } : null,
+    // Бэкап: открытый ключ age админа (backup.js). Пусто — бэкап не делается
+    backup: { recipient: env.BACKUP_AGE_RECIPIENT?.trim() || null }
   };
 }
 

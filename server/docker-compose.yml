@@ -20,6 +20,10 @@ services:
       TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
       TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID:-}
       DUCKDNS_TOKEN: ${DUCKDNS_TOKEN:-}
+      BACKUP_AGE_RECIPIENT: ${BACKUP_AGE_RECIPIENT:-}
+      # только чтобы попасть в бэкап настроек (backup.js): портал их не использует
+      SERVER_ID: ${SERVER_ID:-}
+      AMNEZIA_API_VERSION: ${AMNEZIA_API_VERSION:-2.0.0}
     volumes:
       - data:/data
     # Порт наружу не открыт: к порталу ходит только Caddy. Поэтому порталу можно доверять

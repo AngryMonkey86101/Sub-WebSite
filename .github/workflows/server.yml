@@ -28,6 +28,8 @@ jobs:
       - uses: actions/setup-node@v7
         with:
           node-version: 22
+      - name: Программа age для теста бэкапа
+        run: sudo apt-get install -y --no-install-recommends age && age --version
       - name: Тесты портала
         working-directory: server
         run: npm test
@@ -41,6 +43,7 @@ jobs:
             -e AMNEZIA_API_KEY="$(openssl rand -hex 32)" \
             -e KEY_ENCRYPTION_KEY="$(openssl rand -base64 32)" \
             family-vpn-portal
+          docker run --rm --entrypoint age family-vpn-portal --version
           for i in $(seq 1 20); do curl -fsS http://127.0.0.1:8080/healthz && exit 0; sleep 1; done
           docker logs portal; exit 1
       - name: Проверка docker compose

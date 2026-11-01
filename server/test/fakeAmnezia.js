@@ -48,6 +48,20 @@ async function startFakeAmnezia({ apiKey, host = 'k4tq9v.duckdns.org' }) {
       return send(status, { message: 'Сбой контейнера' });
     }
 
+    if (url.pathname === '/server/backup' && req.method === 'GET') {
+      return send(200, {
+        generatedAt: new Date().toISOString(),
+        serverId: 'srv',
+        protocols: ['amneziawg3'],
+        amneziaWg3: {
+          wgConfig: '[Interface]\nPrivateKey = server-private-key\nJc = 4\n',
+          presharedKey: 'psk',
+          serverPublicKey: 'server-public-key',
+          clients: [...state.clients.values()].map((c) => ({ clientId: c.id, userData: { clientName: c.name } }))
+        }
+      });
+    }
+
     if (url.pathname === '/server' && req.method === 'GET') {
       return send(200, { id: 'srv', region: 'NL', weight: 100, maxPeers: 200, totalPeers: state.clients.size, protocols: ['amneziawg3', 'xray'] });
     }

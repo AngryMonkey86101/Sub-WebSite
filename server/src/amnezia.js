@@ -43,6 +43,9 @@ function createAmneziaClient({ baseUrl, apiKey, timeoutMs = 30000, fetch = globa
     },
 
     serverInfo: () => request('GET', '/server'),
+    // Ключи и клиенты сервера VPN: awg0.conf (закрытый ключ сервера, параметры маскировки, пиры),
+    // PSK и таблица клиентов. Восстанавливается через POST /server/backup (этап 4, переезд).
+    serverBackup: () => request('GET', '/server/backup'),
 
     // Новый клиент на сервере; config — готовый ключ vpn://
     async createClient({ name, protocol }) {

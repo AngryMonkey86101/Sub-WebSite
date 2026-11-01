@@ -7,6 +7,7 @@ import { loadConfig, ConfigError, PROTOCOLS } from './config.js';
 import { createAmneziaClient } from './amnezia.js';
 import { createTelegram } from './telegram.js';
 import { createWatchdog, detectPublicIp, describeStatus } from './watchdog.js';
+import { createBackup } from './backup.js';
 import { createPortal, PortalError } from './portal.js';
 import { hostOfKey, isIpAddress } from './vpnKey.js';
 
@@ -18,10 +19,19 @@ const USAGE = `Команды:
   list                            участники и устройства
   duckdns [--takeover]            сторож IP: проверить записи DuckDNS сейчас; с --takeover —
                                   направить имена на этот сервер (после переезда)
+  backup [--stdout]               бэкап сейчас — в Telegram; с --stdout — зашифрованный архив
+                                  в стандартный вывод (docker compose exec -T … > файл)
   check [--keys]                  имена DuckDNS, бот Telegram и связь с amnezia-api; с --keys —
                                   пробный ключ каждого протокола (создаётся и сразу удаляется)`;
 
-async function main(argv, { out = console.log, dns = systemDns, publicIp = () => detectPublicIp(), fetch = globalThis.fetch } = {}) {
+async function main(argv, {
+  out = console.log,
+  write = (data) => process.stdout.write(data),
+  dns = systemDns,
+  publicIp = () => detectPublicIp(),
+  fetch = globalThis.fetch,
+  encrypt = null
+} = {}) {
   const { positionals, values } = parseArgs({
     args: argv,
     allowPositionals: true,
@@ -29,7 +39,8 @@ async function main(argv, { out = console.log, dns = systemDns, publicIp = () =>
       admin: { type: 'boolean', default: false },
       devices: { type: 'string' },
       keys: { type: 'boolean', default: false },
-      takeover: { type: 'boolean', default: false }
+      takeover: { type: 'boolean', default: false },
+      stdout: { type: 'boolean', default: false }
     }
   });
   const [command, argument] = positionals;
@@ -83,6 +94,17 @@ async function main(argv, { out = console.log, dns = systemDns, publicIp = () =>
         if (!watchdog.configured) throw new PortalError(400, describeStatus(watchdog.status()).join('\n'));
         const status = values.takeover ? await watchdog.takeover() : await watchdog.tick();
         for (const line of describeStatus(status)) out(line);
+        return;
+      }
+      case 'backup': {
+        const backup = createBackup({ config, db, amnezia, telegram, notify: telegram.notify, encrypt });
+        if (values.stdout) {
+          const { data } = await backup.createArchive();
+          await new Promise((resolve, reject) => write(data) ? resolve() : process.stdout.once('drain', resolve).once('error', reject));
+          return;
+        }
+        const { filename, size } = await backup.run();
+        out(`Бэкап отправлен в Telegram: ${filename}, ${Math.max(1, Math.round(size / 1024))} КБ`);
         return;
       }
       case 'check':

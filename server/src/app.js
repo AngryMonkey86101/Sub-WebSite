@@ -117,6 +117,8 @@ function createApp({
   watchdog = createWatchdog({ settings: null, names: [] }),
   // метка внешней проверки доступности (heartbeat.js); без неё — заглушка
   heartbeat = { seen: () => {}, lastSeen: () => null },
+  // бэкап (backup.js); без него — «не настроен»
+  backup = null,
   now = () => Date.now()
 }) {
   const limit = createRateLimiter(now);
@@ -252,7 +254,8 @@ function createApp({
         telegram: telegram.info(),
         watchdog: watchdog.status(),
         monitorSeenAt: heartbeat.lastSeen(),
-        notice: new URL(req.url, config.publicUrl).searchParams.get('telegram'),
+        backup: backup?.status() ?? { configured: false },
+        notice: Object.fromEntries(new URL(req.url, config.publicUrl).searchParams),
         nowMs: now()
       }));
     }],
@@ -271,6 +274,15 @@ function createApp({
           await telegram.unlink();
           return redirect('/admin#telegram');
       }
+    }],
+
+    // Бэкап сейчас — файл приходит в Telegram
+    ['POST', /^\/admin\/backup$/, async ({ member }) => {
+      const admin = requireAdmin(member);
+      limit(`backup:${admin.id}`, 10, HOUR);
+      if (!backup) throw new PortalError(404, 'Бэкап не настроен');
+      await backup.run();
+      return redirect('/admin?backup=sent#backup');
     }],
 
     // Направить имена DuckDNS на этот сервер — после переезда или если запись правили вручную
