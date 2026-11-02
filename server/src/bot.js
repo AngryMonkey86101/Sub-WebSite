@@ -12,6 +12,7 @@ const LIST = [
   { command: 'invite', description: 'Приглашение новому участнику' },
   { command: 'relink', description: 'Новая ссылка участнику: /relink КОД' },
   { command: 'backup', description: 'Бэкап сейчас' },
+  { command: 'reboot', description: 'Перезагрузить сервер' },
   { command: 'help', description: 'Что умеет бот' }
 ];
 
@@ -21,11 +22,30 @@ const HELP = `Команды:
 /invite — приглашение новому участнику (/invite 2 — с лимитом 2 устройства)
 /relink КОД — новое приглашение участнику, который потерял ссылку
 /backup — бэкап сейчас (файл придёт сюда)
+/reboot — перезагрузить сервер (с подтверждением)
 
 Остальное — в админке портала.`;
 
-function createBotCommands({ portal, config, watchdog = null, heartbeat = null, backup = null, now = () => Date.now() }) {
+// Подтверждение перезагрузки действует минуту: случайное нажатие на старое сообщение её не вызовет
+const REBOOT_CONFIRM_MS = 60 * 1000;
+
+function createBotCommands({ portal, config, watchdog = null, heartbeat = null, backup = null, reboot = null, now = () => Date.now() }) {
   const inviteUrl = (token) => `${config.publicUrl}/i/${token}`;
+  let rebootAskedAt = null;
+
+  function askReboot() {
+    if (!reboot?.available()) return `⚠️ ${reboot?.NOT_SET_UP ?? 'Перезагрузка по команде не настроена'}`;
+    rebootAskedAt = now();
+    return 'Перезагрузить сервер? VPN у всех пропадёт на 1–2 минуты и подключится сам.\n\nПодтвердить: /reboot_confirm (в течение минуты)';
+  }
+
+  function confirmReboot() {
+    const asked = rebootAskedAt;
+    rebootAskedAt = null;
+    if (!asked || now() - asked > REBOOT_CONFIRM_MS) return 'Подтверждение устарело. Сначала /reboot.';
+    reboot.request('бот');
+    return '🔄 Перезагружаю сервер. Когда он вернётся, придёт «🟢 Сервер перезагружен».';
+  }
 
   async function status() {
     const lines = [];
@@ -93,6 +113,10 @@ function createBotCommands({ portal, config, watchdog = null, heartbeat = null, 
           return invite(args);
         case '/relink':
           return relink(args);
+        case '/reboot':
+          return askReboot();
+        case '/reboot_confirm':
+          return confirmReboot();
         case '/backup': {
           if (!backup) return '💾 Бэкап не настроен (README, шаг 10)';
           const { size } = await backup.run();

@@ -179,6 +179,8 @@ compose run --rm --no-deps portal npm run -s cli -- restored
 # Caddy — только после переноса имён: иначе Let's Encrypt откажет и временно заблокирует выпуск
 compose up -d amnezia-api portal
 ok "Портал запущен"
+# служба перезагрузки по команде из бота и админки — том данных уже есть
+bash "$APP/scripts/install-reboot.sh"
 
 step "6/7 Прежние ключи сервера VPN"
 cli restore-vpn < "$WORK/amnezia.json"

@@ -9,6 +9,7 @@ import { createBotCommands } from './bot.js';
 import { createWatchdog } from './watchdog.js';
 import { createHeartbeat } from './heartbeat.js';
 import { createBackup } from './backup.js';
+import { createReboot } from './reboot.js';
 import { createPortal } from './portal.js';
 import { createApp } from './app.js';
 
@@ -34,8 +35,10 @@ const watchdog = createWatchdog({
 });
 const heartbeat = createHeartbeat({ db, notify: telegram.notify });
 const backup = createBackup({ config, db, amnezia, telegram, notify: telegram.notify });
-telegram.start(createBotCommands({ portal, config, watchdog, heartbeat, backup }));
-const server = createServer(createApp({ portal, config, telegram, watchdog, heartbeat, backup }));
+// файл-запрос — на томе данных, рядом с базой: его видит служба на сервере (scripts/install-reboot.sh)
+const reboot = createReboot({ dir: dirname(config.dbPath), db, notify: telegram.notify });
+telegram.start(createBotCommands({ portal, config, watchdog, heartbeat, backup, reboot }));
+const server = createServer(createApp({ portal, config, telegram, watchdog, heartbeat, backup, reboot }));
 
 const sweep = async () => {
   heartbeat.check();
@@ -53,12 +56,13 @@ const timer = setInterval(sweep, LIMITS.sweepInterval);
 server.listen(config.port, () => {
   console.log(`Портал слушает порт ${config.port}, адрес ${config.publicUrl}, протоколы: ${config.protocols.join(', ')}`);
   // заодно видно неожиданные перезагрузки сервера
-  telegram.notify('🟢 Портал запущен');
+  telegram.notify(reboot.startupMessage() ?? '🟢 Портал запущен');
   watchdog.start();
 });
 
 const shutdown = async () => {
   clearInterval(timer);
+  reboot.stop();
   await Promise.all([telegram.stop(), watchdog.stop()]);
   server.close(() => {
     db.close();

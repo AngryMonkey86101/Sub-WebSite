@@ -420,5 +420,6 @@ docs/
 - **Этап 3 — сторож IP — в коде** (server/README.md, шаг 7). На сервере его включает `DUCKDNS_TOKEN` в `.env`.
 - **Проверка доступности снаружи — в коде** (server/README.md, шаг 9). Её включают секреты GitHub `MONITOR_HOST`, `TELEGRAM_BOT_TOKEN` и `TELEGRAM_CHAT_ID`.
 - **Бэкап — в коде** (server/README.md, шаг 10). Его включает открытый ключ age в `BACKUP_AGE_RECIPIENT`.
+- **Перезагрузка с телефона — в коде:** `/reboot` в боте и кнопка в админке. Портал кладёт файл-запрос на том, перезагружает служба systemd (`scripts/install-reboot.sh`). Прав на сервер у портала нет, петля перезагрузок исключена.
 - **Переезд — в коде:** `server/scripts/restore.sh` (server/README.md, «Переезд на новый VPS»), памятка — `docs/RUNBOOK.md`.
 - **Дальше:** учения `restore.sh --drill` на временном VPS, затем по желанию — перерисовка ключей при смене имени (`cli rehost`).
