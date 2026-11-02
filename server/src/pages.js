@@ -296,6 +296,7 @@ const EVENT_LABELS = {
   telegram_unlinked: 'Telegram отключён',
   ip_changed: 'IP сервера сменился, DuckDNS обновлён',
   backup_failed: 'бэкап не сделан',
+  reboot_requested: 'перезагрузка сервера по команде',
   duckdns_updated: 'DuckDNS направлен на этот сервер'
 };
 
@@ -402,7 +403,20 @@ function backupSection(backup, notice, nowMs) {
       ${body}`;
 }
 
-function adminPage({ admin, members, statuses, foreign, statusError, ipHosts, events, protocols, defaultDeviceLimit, telegram, watchdog, monitorSeenAt, backup, notice, nowMs }) {
+// Перезагрузка сервера по кнопке — если на сервере стоит служба (scripts/install-reboot.sh)
+function rebootSection(available) {
+  return html`
+      <h2 id="reboot">Перезагрузка сервера</h2>
+      ${available
+        ? html`
+      <p class="muted">Если что-то подглючивает. VPN у всех пропадёт на 1–2 минуты и подключится сам. Когда сервер вернётся, бот напишет «🟢 Сервер перезагружен». Если сервер завис намертво, кнопка не поможет — перезагрузите его в личном кабинете хостинга.</p>
+      <form method="post" action="/admin/reboot" data-confirm="Перезагрузить сервер? VPN у всех пропадёт на 1–2 минуты.">
+        <button type="submit" class="danger">Перезагрузить сервер</button>
+      </form>`
+        : html`<p class="muted">Не настроена: один раз выполните на сервере под root <b>bash /home/deploy/family-vpn/scripts/install-reboot.sh</b> (README, «Перезагрузка из бота и админки»).</p>`}`;
+}
+
+function adminPage({ admin, members, statuses, foreign, statusError, ipHosts, events, protocols, defaultDeviceLimit, telegram, watchdog, monitorSeenAt, backup, rebootAvailable, notice, nowMs }) {
   return layout({
     title: 'Админка',
     member: admin,
@@ -475,6 +489,7 @@ function adminPage({ admin, members, statuses, foreign, statusError, ipHosts, ev
         : ''}
       ${duckdnsSection(watchdog, monitorSeenAt, nowMs)}
       ${backupSection(backup, notice, nowMs)}
+      ${rebootSection(rebootAvailable)}
       ${telegramSection(telegram, notice)}
 
       <h2>Журнал</h2>
@@ -516,6 +531,18 @@ function telegramLinkPage({ admin, url, expiresAt }) {
   });
 }
 
+function rebootPage({ admin }) {
+  return layout({
+    title: 'Перезагрузка',
+    member: admin,
+    section: 'admin',
+    body: html`
+      <h1>Сервер перезагружается</h1>
+      <p>Через несколько секунд сервер выключится и загрузится снова. VPN у всех пропадёт на 1–2 минуты и подключится сам.</p>
+      <p>Когда сервер вернётся, бот напишет «🟢 Сервер перезагружен». Тогда можно открыть <a href="/admin">админку</a> снова.</p>`
+  });
+}
+
 function errorPage({ status, message, member }) {
   return layout({
     title: 'Ошибка',
@@ -540,6 +567,7 @@ export {
   adminPage,
   inviteCreatedPage,
   telegramLinkPage,
+  rebootPage,
   errorPage,
   memberState
 };

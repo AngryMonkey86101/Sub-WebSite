@@ -10,6 +10,7 @@ import {
   adminPage,
   inviteCreatedPage,
   telegramLinkPage,
+  rebootPage,
   errorPage
 } from './pages.js';
 import { createTelegram } from './telegram.js';
@@ -119,6 +120,8 @@ function createApp({
   heartbeat = { seen: () => {}, lastSeen: () => null },
   // бэкап (backup.js); без него — «не настроен»
   backup = null,
+  // перезагрузка сервера (reboot.js); без неё — «не настроена»
+  reboot = null,
   now = () => Date.now()
 }) {
   const limit = createRateLimiter(now);
@@ -255,6 +258,7 @@ function createApp({
         watchdog: watchdog.status(),
         monitorSeenAt: heartbeat.lastSeen(),
         backup: backup?.status() ?? { configured: false },
+        rebootAvailable: reboot?.available() ?? false,
         notice: Object.fromEntries(new URL(req.url, config.publicUrl).searchParams),
         nowMs: now()
       }));
@@ -274,6 +278,15 @@ function createApp({
           await telegram.unlink();
           return redirect('/admin#telegram');
       }
+    }],
+
+    // Перезагрузка сервера: страница-ответ уходит раньше, чем сервер начнёт выключаться
+    ['POST', /^\/admin\/reboot$/, ({ member }) => {
+      const admin = requireAdmin(member);
+      limit(`reboot:${admin.id}`, 5, HOUR);
+      if (!reboot) throw new PortalError(404, 'Перезагрузка не настроена');
+      reboot.request('админка');
+      return page(200, rebootPage({ admin }));
     }],
 
     // Бэкап сейчас — файл приходит в Telegram

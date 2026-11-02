@@ -139,7 +139,7 @@ function prepare(name, { publicKey = SERVER_KEY } = {}) {
     writeFileSync(join(bin, file), STUB(body));
     chmodSync(join(bin, file), 0o755);
   };
-  for (const file of ['apt-get', 'curl', 'ufw', 'adduser', 'usermod', 'chown', 'sleep']) write(file, '');
+  for (const file of ['apt-get', 'curl', 'ufw', 'adduser', 'usermod', 'chown', 'sleep', 'systemctl']) write(file, '');
   write('id', '[ "$1" = "-u" ] && echo 0');
   // клон установщика AmneziaWG: вместо него — запись аргументов
   write('git', `if [ "$1" = clone ]; then mkdir -p "$4/.git"; printf '#!/usr/bin/env bash\\necho "install.sh $*" >> "$CALLS"\\n' > "$4/install.sh"; fi`);
@@ -152,6 +152,7 @@ case "$*" in
   "compose exec -T portal npm run -s cli -- duckdns") echo "⚠️ Имя DuckDNS указывает не на этот сервер" ;;
   "exec amnezia-awg2 awg show awg0 public-key") echo "$FAKE_PUBLIC_KEY" ;;
   "exec amnezia-awg2 awg show awg0 peers") printf 'a\\nb\\n' ;;
+  "volume inspect -f {{.Mountpoint}} family-vpn_data") mkdir -p "$OUT/volume"; echo "$OUT/volume" ;;
   "compose run --rm --no-deps -u root"*)
     # база из бэкапа: что именно увидит контейнер в /restore
     while [ $# -gt 0 ]; do [ "$1" = "-v" ] && cp "\${2%%:*}/portal.sqlite" "$OUT/restored.sqlite"; shift; done ;;
@@ -161,6 +162,7 @@ esac`);
   writeFileSync(sock, '');
   const out = join(root, 'out');
   mkdirSync(out);
+  mkdirSync(join(root, 'systemd'));
   const calls = join(root, 'calls.log');
   writeFileSync(calls, '');
 
@@ -177,6 +179,7 @@ esac`);
         WORK_DIR: join(root, 'work'),
         PROTOCOLS_DIR: join(root, 'opt', 'amnezia-protocols'),
         DOCKER_SOCK: sock,
+        SYSTEMD_DIR: join(root, 'systemd'),
         SSH_CONNECTION: '203.0.113.9 51515 198.51.100.30 2222',
         NO_COLOR: '1'
       },
@@ -218,6 +221,11 @@ test('restore.sh: бэкап расшифрован, AmneziaWG с прежним
   assert.equal(statSync(join(t.app, '.env')).mode & 0o777, 0o600);
   assert.ok(existsSync(join(t.app, 'docker-compose.yml')), 'файлы портала скопированы');
   assert.ok(existsSync(join(t.root, 'home', 'deploy', 'sub-website', 'server', 'scripts', 'restore.sh')), 'клон для обновлений у deploy');
+
+  // служба перезагрузки из бота поставлена на том портала
+  assert.ok(existsSync(join(t.root, 'systemd', 'family-vpn-reboot.path')));
+  assert.ok(existsSync(join(t.out, 'volume', 'reboot-enabled')));
+  assert.ok(indexOf(calls, /^systemctl enable --now family-vpn-reboot\.path$/) > indexOf(calls, /compose up -d amnezia-api portal/));
 
   // база и ключи сервера — те, что в бэкапе
   assert.deepEqual(readFileSync(join(t.out, 'restored.sqlite')), t.sqlite);
