@@ -144,7 +144,10 @@ function prepare(name, { publicKey = SERVER_KEY } = {}) {
   // клон установщика AmneziaWG: вместо него — запись аргументов
   write('git', `if [ "$1" = clone ]; then mkdir -p "$4/.git"; printf '#!/usr/bin/env bash\\necho "install.sh $*" >> "$CALLS"\\n' > "$4/install.sh"; fi`);
   write('docker', `
+# FAIL_ON — какую команду docker провалить; NO_BUILDX — сервер без docker buildx
+if [ -n "\${FAIL_ON:-}" ] && [ "$*" = "$FAIL_ON" ]; then echo "сбой: $*" >&2; exit 1; fi
 case "$*" in
+  "buildx version") [ -z "\${NO_BUILDX:-}" ] || exit 1 ;;
   "compose version") echo "Docker Compose version v2.30.0" ;;
   "--version") echo "Docker version 27.3.1" ;;
   "version --format {{.Server.APIVersion}}") echo "1.47" ;;
@@ -166,11 +169,12 @@ esac`);
   const calls = join(root, 'calls.log');
   writeFileSync(calls, '');
 
-  function run(input, flags = []) {
+  function run(input, flags = [], extraEnv = {}) {
     const res = spawnSync('bash', [SCRIPT, ...flags, backup], {
       input,
       env: {
         ...process.env,
+        ...extraEnv,
         PATH: `${bin}:${process.env.PATH}`,
         CALLS: calls,
         OUT: out,
@@ -274,6 +278,30 @@ test('restore.sh --drill: учения — бот и сторож выключе
   assert.equal(indexOf(res.calls, /compose up -d caddy/), -1);
   assert.match(res.stdout, /Учения пройдены\.[\s\S]*Удалите этот VPS/);
   assert.equal(existsSync(t.work), false);
+});
+
+test('restore.sh: без buildx — ставит его сам; сбой команды — называет шаг и команду', { skip: !HAS_AGE && 'нет программы age' }, () => {
+  const t = prepare('buildx');
+  let res = t.run(`${t.secret}\nn\n`, [], { NO_BUILDX: '1' });
+  assert.equal(res.status, 0, res.stderr);
+  assert.ok(res.calls.includes('apt-get install -y -qq docker-buildx-plugin'), 'buildx ставится до сборки образа');
+  assert.ok(res.calls.includes('docker compose build portal'));
+
+  // сборка образа портала упала: понятно, где и что; расшифрованное удалено; повторный запуск проходит
+  const failed = prepare('build-fails');
+  res = failed.run(`${failed.secret}\n`, [], { FAIL_ON: 'compose build portal' });
+  assert.notEqual(res.status, 0);
+  assert.match(res.stderr, /✗ Остановка на шаге «5\/7 Портал с прежними настройками и базой»: не выполнилась команда «docker compose build portal» \(код 1\)/);
+  assert.match(res.stderr, /Скрипт можно запустить снова с тем же файлом бэкапа/);
+  assert.equal(existsSync(failed.work), false);
+  res = failed.run(`${failed.secret}\nn\n`);
+  assert.equal(res.status, 0, res.stderr);
+
+  // своя проверка скрипта (die) — без второго, общего сообщения
+  const own = prepare('own-message');
+  res = own.run('не ключ\n');
+  assert.match(res.stderr, /Это не закрытый ключ age/);
+  assert.doesNotMatch(res.stderr, /Остановка на шаге/);
 });
 
 test('restore.sh: чужой ключ, не тот ключ сервера — остановка, расшифрованное удалено', { skip: !HAS_AGE && 'нет программы age' }, () => {

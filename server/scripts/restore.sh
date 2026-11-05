@@ -39,15 +39,28 @@ if [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then
 else
   R="" BOLD="" GREEN="" YELLOW="" CYAN="" RED=""
 fi
-step() { printf '\n%s\n' "${BOLD}${CYAN}▶ $*${R}"; }
+STEP="подготовка"
+FAILED=""
+DIED=0
+step() { STEP=$*; printf '\n%s\n' "${BOLD}${CYAN}▶ $*${R}"; }
 ok()   { printf '  %s\n' "${GREEN}✓${R} $*"; }
 warn() { printf '  %s\n' "${YELLOW}⚠${R} $*"; }
-die()  { printf '%s\n' "${RED}✗ $*${R}" >&2; exit 1; }
+die()  { DIED=1; printf '%s\n' "${RED}✗ $*${R}" >&2; exit 1; }
 
-# расшифрованный бэкап и ключ не остаются на диске ни при успехе, ни при ошибке
-trap 'rm -rf "$WORK"' EXIT
+# Какая команда не выполнилась — чтобы при остановке назвать её, а не молча выйти
+trap '[ -n "$FAILED" ] || FAILED=$BASH_COMMAND' ERR
+on_exit() {
+  local code=$?
+  # расшифрованный бэкап и ключ не остаются на диске ни при успехе, ни при ошибке
+  rm -rf "$WORK"
+  if [ "$code" -ne 0 ] && [ "$DIED" -eq 0 ]; then
+    printf '%s\n' "${RED}✗ Остановка на шаге «$STEP»: не выполнилась команда «${FAILED:-?}» (код $code).${R}" >&2
+    printf '%s\n' "  Причина — в сообщениях выше. Скрипт можно запустить снова с тем же файлом бэкапа." >&2
+  fi
+}
+trap on_exit EXIT
 
-compose() { (cd "$APP" && docker compose "$@"); }
+compose() { (cd "$APP" && docker compose "$@") || { FAILED="docker compose $*"; return 1; }; }
 cli() { compose exec -T portal npm run -s cli -- "$@"; }
 
 DRILL=0
@@ -78,6 +91,11 @@ docker compose version >/dev/null 2>&1 \
   || apt-get install -y -qq docker-compose-v2 >/dev/null 2>&1 \
   || true
 docker compose version >/dev/null 2>&1 || die "Не удалось поставить docker compose"
+# образ портала docker compose собирает через buildx; без него — предупреждение про Bake
+docker buildx version >/dev/null 2>&1 \
+  || apt-get install -y -qq docker-buildx-plugin >/dev/null 2>&1 \
+  || apt-get install -y -qq docker-buildx >/dev/null 2>&1 \
+  || warn "docker buildx не поставился — образ соберётся встроенным сборщиком"
 ok "$(docker --version)"
 
 step "2/7 Расшифровка бэкапа"
@@ -169,7 +187,7 @@ if [ "$DRILL" -eq 1 ]; then
   ok "Учения: бот Telegram и сторож DuckDNS на этом сервере выключены"
 fi
 chown -R "$DEPLOY_USER:$DEPLOY_USER" "$APP" "$DEPLOY_HOME/sub-website"
-compose build --quiet portal
+compose build portal
 compose stop portal caddy >/dev/null 2>&1 || true
 # база — на том портала; владелец — пользователь node, от которого работает портал
 compose run --rm --no-deps -u root --entrypoint sh -v "$WORK:/restore:ro" portal -c \
