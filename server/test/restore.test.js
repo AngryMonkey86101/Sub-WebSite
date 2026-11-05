@@ -151,12 +151,12 @@ case "$*" in
   "compose version") echo "Docker Compose version v2.30.0" ;;
   "--version") echo "Docker version 27.3.1" ;;
   "version --format {{.Server.APIVersion}}") echo "1.47" ;;
-  "compose exec -T portal npm run -s cli -- restore-vpn") cat > "$OUT/restore-input.json"; echo "Ключи сервера VPN восстановлены: клиентов 2 из 2 в бэкапе" ;;
-  "compose exec -T portal npm run -s cli -- duckdns") echo "⚠️ Имя DuckDNS указывает не на этот сервер" ;;
+  "compose --ansi never exec -T portal node --disable-warning=ExperimentalWarning src/cli.js restore-vpn") cat > "$OUT/restore-input.json"; echo "Ключи сервера VPN восстановлены: клиентов 2 из 2 в бэкапе" ;;
+  "compose --ansi never exec -T portal node --disable-warning=ExperimentalWarning src/cli.js duckdns") echo "⚠️ Имя DuckDNS указывает не на этот сервер" ;;
   "exec amnezia-awg2 awg show awg0 public-key") echo "$FAKE_PUBLIC_KEY" ;;
   "exec amnezia-awg2 awg show awg0 peers") printf 'a\\nb\\n' ;;
   "volume inspect -f {{.Mountpoint}} family-vpn_data") mkdir -p "$OUT/volume"; echo "$OUT/volume" ;;
-  "compose run --rm --no-deps -u root"*)
+  "compose --ansi never run --rm --no-deps -T -u root"*)
     # база из бэкапа: что именно увидит контейнер в /restore
     while [ $# -gt 0 ]; do [ "$1" = "-v" ] && cp "\${2%%:*}/portal.sqlite" "$OUT/restored.sqlite"; shift; done ;;
 esac`);
@@ -229,7 +229,7 @@ test('restore.sh: бэкап расшифрован, AmneziaWG с прежним
   // служба перезагрузки из бота поставлена на том портала
   assert.ok(existsSync(join(t.root, 'systemd', 'family-vpn-reboot.path')));
   assert.ok(existsSync(join(t.out, 'volume', 'reboot-enabled')));
-  assert.ok(indexOf(calls, /^systemctl enable --now family-vpn-reboot\.path$/) > indexOf(calls, /compose up -d amnezia-api portal/));
+  assert.ok(indexOf(calls, /^systemctl enable --now family-vpn-reboot\.path$/) > indexOf(calls, /up -d amnezia-api portal/));
 
   // база и ключи сервера — те, что в бэкапе
   assert.deepEqual(readFileSync(join(t.out, 'restored.sqlite')), t.sqlite);
@@ -238,17 +238,17 @@ test('restore.sh: бэкап расшифрован, AmneziaWG с прежним
 
   // порядок: база → «забыть старый сервер» → запуск → ключи → перезапуск AWG → DuckDNS → Caddy
   const order = [
-    /^docker compose run --rm --no-deps -u root/,
-    /^docker compose run --rm --no-deps portal npm run -s cli -- restored$/,
-    /^docker compose up -d amnezia-api portal$/,
-    /cli -- restore-vpn$/,
+    /^docker compose --ansi never run --rm --no-deps -T -u root/,
+    /^docker compose --ansi never run --rm --no-deps -T portal node --disable-warning=ExperimentalWarning src\/cli\.js restored$/,
+    /^docker compose --ansi never up -d amnezia-api portal$/,
+    /src\/cli\.js restore-vpn$/,
     /^docker restart amnezia-awg2$/,
-    /cli -- duckdns --takeover$/,
-    /^docker compose up -d caddy$/
+    /src\/cli\.js duckdns --takeover$/,
+    /^docker compose --ansi never up -d caddy$/
   ].map((pattern) => indexOf(calls, pattern));
   assert.ok(order.every((i) => i >= 0), JSON.stringify(order));
   assert.deepEqual([...order].sort((a, b) => a - b), order, 'шаги идут по порядку');
-  assert.ok(indexOf(calls, /compose up -d caddy/) > indexOf(calls, /duckdns --takeover/), 'Caddy — только после переноса имён');
+  assert.ok(indexOf(calls, /up -d caddy/) > indexOf(calls, /duckdns --takeover/), 'Caddy — только после переноса имён');
 
   // расшифрованное не осталось на диске; ключ не попал в вывод
   assert.equal(existsSync(t.work), false);
@@ -261,7 +261,7 @@ test('restore.sh: без подтверждения имена не трогае
   const res = t.run(`# created: 2026-11-01T12:00:00Z\n# public key: age1abc\n${t.secret}\nn\n`);
   assert.equal(res.status, 0, res.stderr);
   assert.equal(indexOf(res.calls, /duckdns --takeover/), -1);
-  assert.equal(indexOf(res.calls, /compose up -d caddy/), -1);
+  assert.equal(indexOf(res.calls, /up -d caddy/), -1);
   assert.match(res.stdout, /Имена не тронуты[\s\S]*duckdns --takeover && docker compose up -d/);
 });
 
@@ -273,9 +273,9 @@ test('restore.sh --drill: учения — бот и сторож выключе
   assert.match(env, /^TELEGRAM_BOT_TOKEN=$/m);
   assert.match(env, /^DUCKDNS_TOKEN=$/m);
   assert.match(env, /^KEY_ENCRYPTION_KEY=kek$/m);
-  assert.ok(indexOf(res.calls, /cli -- restore-vpn$/) >= 0, 'ключи сервера восстанавливаются и на учениях');
-  assert.equal(indexOf(res.calls, /cli -- duckdns/), -1);
-  assert.equal(indexOf(res.calls, /compose up -d caddy/), -1);
+  assert.ok(indexOf(res.calls, /src\/cli\.js restore-vpn$/) >= 0, 'ключи сервера восстанавливаются и на учениях');
+  assert.equal(indexOf(res.calls, /src\/cli\.js duckdns/), -1);
+  assert.equal(indexOf(res.calls, /up -d caddy/), -1);
   assert.match(res.stdout, /Учения пройдены\.[\s\S]*Удалите этот VPS/);
   assert.equal(existsSync(t.work), false);
 });
@@ -285,11 +285,11 @@ test('restore.sh: без buildx — ставит его сам; сбой ком�
   let res = t.run(`${t.secret}\nn\n`, [], { NO_BUILDX: '1' });
   assert.equal(res.status, 0, res.stderr);
   assert.ok(res.calls.includes('apt-get install -y -qq docker-buildx-plugin'), 'buildx ставится до сборки образа');
-  assert.ok(res.calls.includes('docker compose build portal'));
+  assert.ok(res.calls.includes('docker compose --ansi never build portal'));
 
   // сборка образа портала упала: понятно, где и что; расшифрованное удалено; повторный запуск проходит
   const failed = prepare('build-fails');
-  res = failed.run(`${failed.secret}\n`, [], { FAIL_ON: 'compose build portal' });
+  res = failed.run(`${failed.secret}\n`, [], { FAIL_ON: 'compose --ansi never build portal' });
   assert.notEqual(res.status, 0);
   assert.match(res.stderr, /✗ Остановка на шаге «5\/7 Портал с прежними настройками и базой»: не выполнилась команда «docker compose build portal» \(код 1\)/);
   assert.match(res.stderr, /Скрипт можно запустить снова с тем же файлом бэкапа/);
@@ -310,7 +310,7 @@ test('restore.sh: чужой ключ, не тот ключ сервера — �
   let res = wrongKey.run(`${other}\n`);
   assert.notEqual(res.status, 0);
   assert.match(res.stderr, /Бэкап не расшифровался .*ключ от другой пары/);
-  assert.equal(indexOf(res.calls, /^ufw|install\.sh|compose (run|up|build)|adduser/), -1, 'до расшифровки сервер не трогаем');
+  assert.equal(indexOf(res.calls, /^ufw|install\.sh|--ansi never (run|up|build)|adduser/), -1, 'до расшифровки сервер не трогаем');
   assert.equal(existsSync(wrongKey.work), false);
 
   res = wrongKey.run('не ключ\n');
