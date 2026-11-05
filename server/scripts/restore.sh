@@ -188,7 +188,8 @@ if [ "$DRILL" -eq 1 ]; then
 fi
 chown -R "$DEPLOY_USER:$DEPLOY_USER" "$APP" "$DEPLOY_HOME/sub-website"
 compose build portal
-compose stop portal caddy >/dev/null 2>&1 || true
+# мимо обёртки compose: неудача здесь ожидаема и не должна попасть в сообщение об остановке
+(cd "$APP" && docker compose stop portal caddy) >/dev/null 2>&1 || true
 # база — на том портала; владелец — пользователь node, от которого работает портал
 compose run --rm --no-deps -u root --entrypoint sh -v "$WORK:/restore:ro" portal -c \
   'cp /restore/portal.sqlite /data/portal.sqlite && rm -f /data/portal.sqlite-wal /data/portal.sqlite-shm && chown node:node /data/portal.sqlite && chmod 600 /data/portal.sqlite'
@@ -222,7 +223,7 @@ if [ "$DRILL" -eq 1 ]; then
 fi
 
 step "7/7 Имена DuckDNS и HTTPS"
-cli duckdns || true
+(cd "$APP" && docker compose exec -T portal npm run -s cli -- duckdns) || true
 printf '\nНаправить %s на этот сервер сейчас? После этого старый сервер нужно выключить. [y/N] ' "$VPN_HOST"
 read -r ANSWER || ANSWER=""
 if [[ "$ANSWER" =~ ^[yYдД] ]]; then
