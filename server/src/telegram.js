@@ -3,12 +3,13 @@ import { sha256, newToken } from './crypto.js';
 import { MINUTE } from './config.js';
 import { PortalError } from './portal.js';
 
-// Telegram-бот админа: уведомления портала и несколько команд (bot.js).
+// Telegram-бот: уведомления портала, команды админа (bot.js) и клиентское меню (client.js).
 //
 // Бот сам забирает сообщения (getUpdates, длинный опрос) — входящих подключений к серверу нет,
 // вебхук не нужен. Чат админа подключается из админки: портал выдаёт одноразовую ссылку
 // t.me/<бот>?start=<код>, админ открывает её и нажимает «Старт», бот запоминает этот чат.
-// Сообщения из других чатов бот не выполняет.
+// Команды админа выполняются только из этого чата. Остальные личные чаты видят клиентское меню,
+// группы — ничего.
 //
 // В текстах только коды участников и номера устройств: ни IP-адресов, ни имён, ни меток.
 // Токен бота не попадает ни в журналы, ни в сообщения об ошибках.
@@ -17,7 +18,13 @@ const API = 'https://api.telegram.org';
 const LINK_TTL = 10 * MINUTE;
 const POLL_SECONDS = 50;
 
-const CLOSED = 'Это закрытый бот семейного VPN. Подключить его можно только по ссылке из админки портала.';
+// Чужие чаты: не больше RATE_MAX сообщений и нажатий в минуту, дальше — одно предупреждение
+// и тишина до конца минуты. Чат админа не ограничен.
+const RATE_MAX = 20;
+const RATE_WINDOW = MINUTE;
+const RATE_TRACKED = 5000;
+// Кнопки клиентского меню: callback_data = «c:<действие>»
+const CLIENT_PREFIX = 'c:';
 
 class TelegramError extends Error {
   constructor(message, code) {
@@ -97,6 +104,52 @@ function createTelegram({ settings, db, fetch = globalThis.fetch, now = () => Da
 
   const send = (chat, text) => call('sendMessage', { chat_id: chat, text, link_preview_options: { is_disabled: true } });
 
+  // Экран клиентского меню: { text, buttons } → сообщение с кнопками под ним
+  const keyboard = (buttons) =>
+    buttons?.length
+      ? {
+          inline_keyboard: buttons.map((row) =>
+            row.map((b) => (b.url ? { text: b.text, url: b.url } : { text: b.text, callback_data: CLIENT_PREFIX + b.action }))
+          )
+        }
+      : undefined;
+
+  // По нажатию кнопки экран заменяет то же сообщение — чат не засоряется. Если править нельзя
+  // (сообщение старое или удалено), экран приходит новым сообщением.
+  async function show(chat, screen, messageId = null) {
+    const params = { chat_id: chat, text: screen.text, link_preview_options: { is_disabled: true }, reply_markup: keyboard(screen.buttons) };
+    if (messageId) {
+      try {
+        await call('editMessageText', { ...params, message_id: messageId });
+        return;
+      } catch (err) {
+        // тот же экран ещё раз — Telegram отвечает «message is not modified»
+        if (/not modified/i.test(err.message)) return;
+      }
+    }
+    await call('sendMessage', params);
+  }
+
+  const hits = new Map();
+  // 'ok' — обработать, 'warn' — предупредить один раз, 'drop' — молча пропустить
+  function rate(chat) {
+    const t = now();
+    let entry = hits.get(chat);
+    if (!entry || t - entry.start >= RATE_WINDOW) {
+      if (hits.size >= RATE_TRACKED) {
+        for (const [key, value] of hits) if (t - value.start >= RATE_WINDOW) hits.delete(key);
+        if (hits.size >= RATE_TRACKED) hits.clear();
+      }
+      entry = { start: t, count: 0, warned: false };
+      hits.set(chat, entry);
+    }
+    entry.count += 1;
+    if (entry.count <= RATE_MAX) return 'ok';
+    if (entry.warned) return 'drop';
+    entry.warned = true;
+    return 'warn';
+  }
+
   // Уведомление не должно ломать выдачу ключа: ошибки только в журнал контейнера
   async function notify(text) {
     const chat = chatId();
@@ -115,10 +168,20 @@ function createTelegram({ settings, db, fetch = globalThis.fetch, now = () => Da
     return me;
   }
 
-  // Подсказка команд в меню Telegram — только в чате админа
+  // Подсказка команд в меню Telegram: у чата админа — команды админа, у всех личных чатов —
+  // клиентские. Меню чата главнее общего.
   async function showCommands(chat, commands) {
     try {
-      await call('setMyCommands', { commands, scope: { type: 'chat', chat_id: chat } });
+      await call('setMyCommands', { commands, scope: chat ? { type: 'chat', chat_id: chat } : { type: 'all_private_chats' } });
+    } catch (err) {
+      log.error('Меню команд Telegram не обновлено:', err.message);
+    }
+  }
+
+  // Бывший чат админа снова видит клиентское меню
+  async function hideCommands(chat) {
+    try {
+      await call('deleteMyCommands', { scope: { type: 'chat', chat_id: chat } });
     } catch (err) {
       log.error('Меню команд Telegram не обновлено:', err.message);
     }
@@ -162,6 +225,7 @@ function createTelegram({ settings, db, fetch = globalThis.fetch, now = () => Da
     if (!chat) throw new PortalError(400, 'Чат не подключён');
     q.remove.run('telegram_chat');
     q.event.run(now(), 'telegram_unlinked');
+    await hideCommands(chat);
     try {
       await send(chat, 'Бот отключён от портала. Уведомления сюда больше не придут.');
     } catch (err) {
@@ -195,21 +259,27 @@ function createTelegram({ settings, db, fetch = globalThis.fetch, now = () => Da
     }
   }
 
-  // Одно сообщение из Telegram. commands — обработчик команд админа (bot.js).
-  async function handleUpdate(update, commands) {
+  // Одно сообщение или нажатие кнопки из Telegram.
+  // handlers — { admin: команды админа (bot.js), client: клиентское меню (client.js) }
+  async function handleUpdate(update, handlers) {
+    if (update?.callback_query) return handleButton(update.callback_query, handlers);
     const message = update?.message;
     if (!message?.chat || typeof message.text !== 'string') return;
     const chat = String(message.chat.id);
     const isPrivate = message.chat.type === 'private';
     const [head = '', ...args] = message.text.trim().split(/\s+/);
     const command = head.toLowerCase().replace(/@\w+$/, '');
+    const isAdmin = chat === chatId();
+
+    // Группы: команды в них мог бы отправить любой участник, клиентского меню там тоже нет
+    if (!isPrivate) {
+      if (command === '/start' && args[0] && !settings.chatId && !isAdmin) await send(chat, 'Бота можно подключить только в личном чате.');
+      return;
+    }
+    if (!isAdmin && !(await allowed(chat))) return;
 
     // Подключение по ссылке из админки
-    if (command === '/start' && args[0] && !settings.chatId && chat !== chatId()) {
-      if (!isPrivate) {
-        await send(chat, 'Бота можно подключить только в личном чате.');
-        return;
-      }
+    if (command === '/start' && args[0] && !settings.chatId && !isAdmin) {
       if (!takeLink(args[0])) {
         await send(chat, 'Ссылка для подключения недействительна или устарела. Создайте новую в админке портала.');
         return;
@@ -218,31 +288,49 @@ function createTelegram({ settings, db, fetch = globalThis.fetch, now = () => Da
       q.set.run('telegram_chat', chat);
       q.event.run(now(), 'telegram_linked');
       // если ссылкой воспользовался кто-то другой, прежний чат об этом узнает
-      if (previous) await send(previous, 'Бот подключён к другому чату. Если это сделали не вы, создайте ссылку в админке и подключите бота заново.').catch(() => {});
-      await send(chat, `✅ Бот подключён: сюда будут приходить уведомления портала.\n\n${commands.help()}`);
-      await showCommands(chat, commands.list);
+      if (previous) {
+        await hideCommands(previous);
+        await send(previous, 'Бот подключён к другому чату. Если это сделали не вы, создайте ссылку в админке и подключите бота заново.').catch(() => {});
+      }
+      await send(chat, `✅ Бот подключён: сюда будут приходить уведомления портала.\n\n${handlers.admin.help()}`);
+      await showCommands(chat, handlers.admin.list);
       return;
     }
 
-    // Команды — только из чата админа и только в личной переписке: в группе их могли бы
-    // отправить и другие участники
-    if (chat !== chatId() || !isPrivate) {
-      if (isPrivate && command === '/start') await send(chat, CLOSED);
-      return;
-    }
-    await send(chat, await commands.run(command, args));
+    if (!isAdmin) return show(chat, handlers.client.command(command));
+    // админ смотрит клиентское меню глазами покупателя
+    if (command === '/client') return show(chat, handlers.client.command('/start'));
+    await send(chat, await handlers.admin.run(command, args));
+  }
+
+  async function allowed(chat) {
+    const verdict = rate(chat);
+    if (verdict === 'warn') await send(chat, 'Слишком много сообщений. Подождите минуту.');
+    return verdict === 'ok';
+  }
+
+  // Кнопки есть только у клиентского меню. Нажать их можно и в чате админа (/client).
+  async function handleButton(query, handlers) {
+    const message = query.message;
+    if (!message?.chat || message.chat.type !== 'private' || typeof query.data !== 'string') return;
+    const chat = String(message.chat.id);
+    if (chat !== chatId() && !(await allowed(chat))) return;
+    // без ответа кнопка «крутится» несколько секунд
+    await call('answerCallbackQuery', { callback_query_id: query.id }).catch(() => {});
+    if (!query.data.startsWith(CLIENT_PREFIX)) return;
+    await show(chat, handlers.client.action(query.data.slice(CLIENT_PREFIX.length)), message.message_id);
   }
 
   // Длинный опрос: Telegram держит запрос до 50 секунд и отвечает сразу, как придёт сообщение.
   // Следующий запрос с offset подтверждает уже обработанные сообщения.
-  async function pollLoop(commands) {
+  async function pollLoop(handlers) {
     let offset = 0;
     let delay = 1000;
     while (!stopper.signal.aborted) {
       try {
         const updates = await call(
           'getUpdates',
-          { offset, timeout: POLL_SECONDS, allowed_updates: ['message'] },
+          { offset, timeout: POLL_SECONDS, allowed_updates: ['message', 'callback_query'] },
           { timeoutMs: (POLL_SECONDS + 15) * 1000 }
         );
         delay = 1000;
@@ -250,7 +338,7 @@ function createTelegram({ settings, db, fetch = globalThis.fetch, now = () => Da
         for (const update of updates) {
           offset = update.update_id + 1;
           try {
-            await handleUpdate(update, commands);
+            await handleUpdate(update, handlers);
           } catch (err) {
             log.error('Telegram: сообщение не обработано:', err.message);
           }
@@ -265,12 +353,13 @@ function createTelegram({ settings, db, fetch = globalThis.fetch, now = () => Da
     }
   }
 
-  function start(commands) {
+  function start(handlers) {
     polling = (async () => {
       try {
         const me = await fetchMe();
         log.log(`Telegram: бот @${me.username}${chatId() ? ', чат подключён' : ', чат не подключён — подключите в админке'}`);
-        if (chatId()) await showCommands(chatId(), commands.list);
+        await showCommands(null, handlers.client.list);
+        if (chatId()) await showCommands(chatId(), handlers.admin.list);
       } catch (err) {
         if (stopper.signal.aborted) return;
         state.error = err.message;
@@ -278,7 +367,7 @@ function createTelegram({ settings, db, fetch = globalThis.fetch, now = () => Da
         // с отвергнутым токеном опрашивать бесполезно — до исправления .env и перезапуска
         if (err.code === 401 || err.code === 404) return;
       }
-      await pollLoop(commands);
+      await pollLoop(handlers);
     })();
   }
 

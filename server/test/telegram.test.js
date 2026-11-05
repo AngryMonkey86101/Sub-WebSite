@@ -9,11 +9,12 @@ import { createAmneziaClient } from '../src/amnezia.js';
 import { createPortal, PortalError } from '../src/portal.js';
 import { createTelegram } from '../src/telegram.js';
 import { createBotCommands } from '../src/bot.js';
+import { createClientBot } from '../src/client.js';
 import { createApp } from '../src/app.js';
 import { startFakeAmnezia } from './fakeAmnezia.js';
 
-// Бот админа поверх поддельного Bot API: подключение чата по одноразовой ссылке, команды,
-// длинный опрос, отказ Telegram. Сеть не нужна.
+// Бот поверх поддельного Bot API: подключение чата админа по одноразовой ссылке, команды,
+// клиентское меню с кнопками, лимит частоты, длинный опрос, отказ Telegram. Сеть не нужна.
 
 const PUBLIC_URL = 'https://m2pr7x.duckdns.org';
 const API_KEY = randomBytes(24).toString('hex');
@@ -46,6 +47,7 @@ const json = (status, body) => new Response(JSON.stringify(body), { status, head
 function fakeTelegram() {
   const state = { down: false, rejectToken: false };
   const sent = [];
+  const edited = [];
   const calls = [];
   let queue = [];
   let wake = null;
@@ -62,7 +64,16 @@ function fakeTelegram() {
       case 'sendMessage':
         sent.push(params);
         return json(200, { ok: true, result: { message_id: sent.length } });
+      case 'editMessageText':
+        if (state.cannotEdit) return json(400, { ok: false, description: 'Bad Request: message to edit not found' });
+        if (edited.at(-1)?.message_id === params.message_id && edited.at(-1)?.text === params.text) {
+          return json(400, { ok: false, description: 'Bad Request: message is not modified' });
+        }
+        edited.push(params);
+        return json(200, { ok: true, result: true });
       case 'setMyCommands':
+      case 'deleteMyCommands':
+      case 'answerCallbackQuery':
         return json(200, { ok: true, result: true });
       case 'getUpdates': {
         while (!queue.length) {
@@ -83,6 +94,7 @@ function fakeTelegram() {
     fetch,
     state,
     sent,
+    edited,
     calls,
     push(update) {
       queue.push(update);
@@ -99,6 +111,10 @@ const quiet = () => {
 
 let updateId = 0;
 const message = (chatId, text, type = 'private') => ({ update_id: ++updateId, message: { message_id: updateId, chat: { id: chatId, type }, text } });
+const button = (chatId, data, messageId = 1, type = 'private') => ({
+  update_id: ++updateId,
+  callback_query: { id: `q${updateId}`, data, message: { message_id: messageId, chat: { id: chatId, type } } }
+});
 
 function setup({ chatId = null } = {}) {
   const db = openDatabase(':memory:');
@@ -107,12 +123,14 @@ function setup({ chatId = null } = {}) {
   const telegram = createTelegram({ settings: { token: TOKEN, chatId }, db, fetch: tg.fetch, now, log });
   const portal = createPortal({ db, config, amnezia, notify: telegram.notify, now });
   const commands = createBotCommands({ portal, config });
-  const say = (chat, text, type) => telegram.handleUpdate(message(chat, text, type), commands);
+  const handlers = { admin: commands, client: createClientBot({ config }) };
+  const say = (chat, text, type) => telegram.handleUpdate(message(chat, text, type), handlers);
+  const press = (chat, data, messageId, type) => telegram.handleUpdate(button(chat, data, messageId, type), handlers);
   async function link(chat) {
     const { url } = await telegram.createLink();
     await say(chat, `/start ${new URL(url).searchParams.get('start')}`);
   }
-  return { db, tg, log, telegram, portal, commands, say, link };
+  return { db, tg, log, telegram, portal, commands, handlers, say, press, link };
 }
 
 test('Telegram: чат админа подключается одноразовой ссылкой из админки', async () => {
@@ -131,11 +149,10 @@ test('Telegram: чат админа подключается одноразов�
   const code = match[1];
   assert.ok(!db.prepare('SELECT value FROM settings').all().some((row) => row.value.includes(code)), 'в базе только хэш кода');
 
-  // посторонние: команды молча игнорируются, на /start — вежливый отказ
+  // посторонние: команд админа не выполняют, видят клиентское меню
   await say(999, '/status');
-  assert.equal(tg.sent.length, 0);
-  await say(999, '/start');
-  assert.match(tg.last(), /закрытый бот/);
+  assert.match(tg.last(), /Здесь можно купить доступ/);
+  assert.ok(!tg.sent.some((m) => /Сервер VPN|Участников/.test(m.text)));
   await say(999, '/start wrong-code');
   assert.match(tg.last(), /недействительна или устарела/);
   // в группе не подключается, и код при этом не сгорает
@@ -170,19 +187,22 @@ test('Telegram: чат админа подключается одноразов�
   await say(77, `/start ${new URL(fresh.url).searchParams.get('start')}`);
   assert.equal(telegram.chatId(), '77');
   assert.ok(tg.sent.some((m) => m.chat_id === '42' && /подключён к другому чату/.test(m.text)));
+  assert.ok(tg.calls.some((c) => c.method === 'deleteMyCommands' && c.params.scope.chat_id === '42'), 'у прежнего чата — снова клиентское меню команд');
   await say(42, '/status');
   assert.ok(!tg.sent.some((m) => m.chat_id === '42' && /Сервер VPN/.test(m.text)), 'прежний чат больше не управляет');
+  assert.match(tg.last(), /Здесь можно купить доступ/);
 
   await telegram.unlink();
   assert.equal(telegram.chatId(), null);
   assert.ok(tg.sent.some((m) => m.chat_id === '77' && /отключён/.test(m.text)));
+  assert.equal(tg.calls.filter((c) => c.method === 'deleteMyCommands').at(-1).params.scope.chat_id, '77');
   assert.equal(db.prepare("SELECT COUNT(*) AS n FROM events WHERE type = 'telegram_unlinked'").get().n, 1);
   await assert.rejects(telegram.unlink(), (err) => err instanceof PortalError && err.status === 400);
   db.close();
 });
 
 test('Telegram: команды админа — статус, участники, приглашения', async () => {
-  const { db, tg, telegram, portal, commands, say, link } = setup();
+  const { db, tg, telegram, portal, handlers, say, link } = setup();
   const created = portal.createMember({ role: 'admin' });
   const admin = portal.activateInvite(created.inviteToken).member;
   const member = portal.createMember().member;
@@ -232,8 +252,8 @@ test('Telegram: команды админа — статус, участники
   // тот же чат, но группа, и сообщения без текста — не выполняются
   const count = tg.sent.length;
   await say(42, '/invite', 'group');
-  await telegram.handleUpdate({ update_id: ++updateId, message: { message_id: 1, chat: { id: 42, type: 'private' }, photo: [] } }, commands);
-  await telegram.handleUpdate({ update_id: ++updateId, edited_message: {} }, commands);
+  await telegram.handleUpdate({ update_id: ++updateId, message: { message_id: 1, chat: { id: 42, type: 'private' }, photo: [] } }, handlers);
+  await telegram.handleUpdate({ update_id: ++updateId, edited_message: {} }, handlers);
   assert.equal(tg.sent.length, count);
   db.close();
 });
@@ -248,14 +268,16 @@ test('Telegram: чат из .env — подключать не нужно, ко�
   assert.equal(tg.sent.at(-1).chat_id, '-100500');
   const count = tg.sent.length;
   await say(-100500, '/invite', 'supergroup');
-  await say(42, '/invite');
   assert.equal(tg.sent.length, count, 'в группе команды мог бы отправить кто угодно');
+  await say(42, '/invite');
+  assert.match(tg.last(), /Здесь можно купить доступ/, 'личный чат — клиентское меню');
+  assert.equal(tg.sent.at(-1).chat_id, '42');
   db.close();
 });
 
 test('Telegram: длинный опрос, недоступность и отвергнутый токен', async () => {
-  const { db, tg, log, telegram, commands } = setup();
-  telegram.start(commands);
+  const { db, tg, log, telegram, handlers } = setup();
+  telegram.start(handlers);
   const { url } = await telegram.createLink();
   const first = message(42, `/start ${new URL(url).searchParams.get('start')}`);
   tg.push(first);
@@ -265,6 +287,9 @@ test('Telegram: длинный опрос, недоступность и отв�
   for (let i = 0; i < 200 && !/Участников пока нет/.test(tg.last()); i++) await sleep(5);
   assert.match(tg.last(), /Участников пока нет/);
   const offsets = tg.calls.filter((c) => c.method === 'getUpdates').map((c) => c.params.offset);
+  assert.deepEqual(tg.calls.find((c) => c.method === 'getUpdates').params.allowed_updates, ['message', 'callback_query']);
+  const menus = tg.calls.filter((c) => c.method === 'setMyCommands').map((c) => c.params.scope);
+  assert.deepEqual(menus[0], { type: 'all_private_chats' }, 'при запуске — клиентское меню команд для всех');
   assert.ok(offsets.includes(first.update_id + 1), 'следующий запрос подтверждает обработанные сообщения');
   await telegram.stop();
   assert.equal(telegram.info().username, BOT);
@@ -283,13 +308,96 @@ test('Telegram: длинный опрос, недоступность и отв�
   // отвергнутый токен: опрос не запускается, админка показывает причину
   const broken = setup();
   broken.tg.state.rejectToken = true;
-  broken.telegram.start(broken.commands);
+  broken.telegram.start(broken.handlers);
   for (let i = 0; i < 200 && !broken.telegram.info().error; i++) await sleep(5);
   assert.match(broken.telegram.info().error, /не принял токен бота/);
   await broken.telegram.stop();
   assert.ok(!broken.tg.calls.some((c) => c.method === 'getUpdates'));
   await assert.rejects(broken.telegram.createLink(), (err) => err.status === 502);
   broken.db.close();
+});
+
+test('Telegram: клиентское меню — кнопки, экраны, лимит частоты', async () => {
+  const { db, tg, telegram, say, press, link } = setup();
+  await link(42);
+
+  await say(500, '/start');
+  const menu = tg.sent.at(-1);
+  assert.equal(menu.chat_id, '500');
+  assert.match(menu.text, /Здесь можно купить доступ на 1, 2 или 3 месяца для 1–4 устройств/);
+  const actions = menu.reply_markup.inline_keyboard.flat().map((b) => b.callback_data);
+  assert.deepEqual(actions, ['c:buy', 'c:keys', 'c:help']);
+
+  // кнопка правит то же сообщение и отвечает на нажатие
+  await press(500, 'c:buy', 7);
+  assert.equal(tg.edited.at(-1).message_id, 7);
+  assert.equal(tg.edited.at(-1).chat_id, '500');
+  assert.match(tg.edited.at(-1).text, /Продажа скоро откроется/);
+  assert.ok(tg.calls.some((c) => c.method === 'answerCallbackQuery' && c.params.callback_query_id === `q${updateId}`));
+  // повторное нажатие того же экрана — не ошибка и не новое сообщение
+  const sentBefore = tg.sent.length;
+  await press(500, 'c:buy', 7);
+  assert.equal(tg.sent.length, sentBefore);
+
+  await press(500, 'c:help', 7);
+  const download = tg.edited.at(-1).reply_markup.inline_keyboard.flat().find((b) => b.url);
+  assert.equal(download.url, config.appDownloadUrl);
+  await press(500, 'c:keys', 7);
+  assert.match(tg.edited.at(-1).text, /Ключей пока нет/);
+  // неизвестная или устаревшая кнопка — меню
+  await press(500, 'c:что-то-старое', 7);
+  assert.match(tg.edited.at(-1).text, /Здесь можно купить/);
+
+  // старое сообщение править нельзя — экран приходит новым сообщением
+  tg.state.cannotEdit = true;
+  await press(500, 'c:help', 3);
+  assert.match(tg.last(), /Как подключиться/);
+  tg.state.cannotEdit = false;
+
+  // команды и любой текст
+  await say(500, '/help');
+  assert.match(tg.last(), /Как подключиться/);
+  await say(500, '/keys');
+  assert.match(tg.last(), /Ключей пока нет/);
+  await say(500, 'добрый день');
+  assert.match(tg.last(), /Здесь можно купить/);
+
+  // кнопки в группах не работают
+  const quietBefore = tg.calls.length;
+  await press(-100500, 'c:buy', 1, 'group');
+  assert.equal(tg.calls.length, quietBefore);
+
+  // админ смотрит меню покупателя, кнопки работают и у него; команды админа — по-прежнему
+  await say(42, '/client');
+  assert.match(tg.last(), /Здесь можно купить/);
+  assert.equal(tg.sent.at(-1).chat_id, '42');
+  await press(42, 'c:help', 9);
+  assert.equal(tg.edited.at(-1).chat_id, '42');
+  await say(42, '/members');
+  assert.match(tg.last(), /Участников пока нет/);
+
+  // лимит: 20 сообщений в минуту, затем одно предупреждение и тишина
+  for (let i = 0; i < 18; i++) await say(600, `/start`);
+  await press(600, 'c:buy', 1);
+  await say(600, '/help');
+  assert.match(tg.last(), /Как подключиться/, '20-е сообщение ещё обрабатывается');
+  await say(600, '/help');
+  assert.match(tg.last(), /Слишком много сообщений/);
+  const flood = tg.calls.length;
+  await say(600, '/help');
+  await press(600, 'c:buy', 1);
+  assert.equal(tg.calls.length, flood, 'после предупреждения — ни ответов, ни запросов к Telegram');
+  // админа лимит не касается, а через минуту и покупатель снова получает ответы
+  for (let i = 0; i < 25; i++) await say(42, '/help');
+  assert.match(tg.last(), /Команды:/);
+  clock += MINUTE;
+  await say(600, '/help');
+  assert.match(tg.last(), /Как подключиться/);
+
+  // о покупателях в базе ничего не остаётся
+  assert.equal(db.prepare('SELECT COUNT(*) AS n FROM settings WHERE value LIKE ?').get('%600%').n, 0);
+  assert.equal(db.prepare('SELECT COUNT(*) AS n FROM events WHERE details LIKE ?').get('%600%').n, 0);
+  db.close();
 });
 
 test('админка: раздел Telegram — подключить, проверить, отключить', async () => {
