@@ -6,6 +6,7 @@
 # Учения на временном VPS (рабочий сервер не затрагивается: бот и сторож DuckDNS здесь выключены,
 # имена не переносятся):
 #   bash ~/sub-website/server/scripts/restore.sh --drill ~/family-vpn-ГГГГ-ММ-ДД.tar.gz.age
+# --yes — перенести имена DuckDNS без вопроса в конце (так запускает его scripts/windows/migrate.ps1).
 #
 # Что делает:
 #   1. ставит Docker, age, jq, git и ufw, если их нет;
@@ -67,12 +68,16 @@ PORTAL_CLI=(node --disable-warning=ExperimentalWarning src/cli.js)
 cli() { compose exec -T portal "${PORTAL_CLI[@]}" "$@"; }
 
 DRILL=0
-if [ "${1:-}" = "--drill" ]; then
-  DRILL=1
-  shift
-fi
+YES=0
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --drill) DRILL=1; shift ;;
+    --yes) YES=1; shift ;;
+    *) break ;;
+  esac
+done
 
-[ "$(id -u)" -eq 0 ] || die "Запустите от root: bash $0 [--drill] <файл бэкапа>"
+[ "$(id -u)" -eq 0 ] || die "Запустите от root: bash $0 [--drill] [--yes] <файл бэкапа>"
 BACKUP=${1:-}
 [ -n "$BACKUP" ] && [ -f "$BACKUP" ] || die "Укажите файл бэкапа: bash $0 ~/family-vpn-ГГГГ-ММ-ДД.tar.gz.age"
 BACKUP=$(realpath "$BACKUP")
@@ -235,8 +240,12 @@ fi
 
 step "7/7 Имена DuckDNS и HTTPS"
 (cd "$APP" && docker compose --ansi never exec -T portal "${PORTAL_CLI[@]}" duckdns) || true
-printf '\nНаправить %s на этот сервер сейчас? После этого старый сервер нужно выключить. [y/N] ' "$VPN_HOST"
-read -r ANSWER || ANSWER=""
+if [ "$YES" -eq 1 ]; then
+  ANSWER=y
+else
+  printf '\nНаправить %s на этот сервер сейчас? После этого старый сервер нужно выключить. [y/N] ' "$VPN_HOST"
+  read -r ANSWER || ANSWER=""
+fi
 if [[ "$ANSWER" =~ ^[yYдД] ]]; then
   cli duckdns --takeover
   compose up -d caddy

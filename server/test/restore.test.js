@@ -269,6 +269,15 @@ test('restore.sh: без подтверждения имена не трогае
   assert.match(res.stdout, /Имена не тронуты[\s\S]*duckdns --takeover && docker compose up -d/);
 });
 
+test('restore.sh --yes: имена переносятся без вопроса — нужен только ключ', { skip: !HAS_AGE && 'нет программы age' }, () => {
+  const t = prepare('yes');
+  const res = t.run(`${t.secret}\n`, ['--yes']);
+  assert.equal(res.status, 0, res.stderr);
+  assert.ok(indexOf(res.calls, /src\/cli\.js duckdns --takeover$/) >= 0);
+  assert.ok(indexOf(res.calls, /up -d caddy$/) > indexOf(res.calls, /duckdns --takeover$/));
+  assert.doesNotMatch(res.stdout, /\[y\/N\]/);
+});
+
 test('restore.sh --drill: учения — бот и сторож выключены, имена и Caddy не трогаются', { skip: !HAS_AGE && 'нет программы age' }, () => {
   const t = prepare('drill');
   const res = t.run(`${t.secret}\n`, ['--drill']);

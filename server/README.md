@@ -412,6 +412,34 @@ mkdir -p ~/restore && age -d -i ~/backup-key.txt family-vpn-2026-11-01.tar.gz.ag
 - **Выкладка из GitHub.** Если она настроена, обновите секрет `SERVER_KNOWN_HOSTS` (`ssh-keyscan <имя-портала>.duckdns.org`) и добавьте ключ `family-vpn-deploy.pub` в `/home/deploy/.ssh/authorized_keys` нового сервера. Проверку доступности (`MONITOR_HOST`) менять не нужно.
 - **Xray** скрипт не восстанавливает: Xray отложен.
 
+### Переезд с Windows одним скриптом
+
+То же самое, но без ручных команд на сервере. Скрипт спросит только:
+- IP нового сервера;
+- один раз пароль root;
+- закрытый ключ age.
+
+Нужен Windows 10 или 11 со встроенным клиентом OpenSSH.
+
+1. Отправьте боту `/backup` и сохраните присланный файл в «Загрузки». Telegram Desktop сохраняет туда сам.
+2. Откройте PowerShell и скачайте скрипт:
+   ```powershell
+   irm https://raw.githubusercontent.com/AngryMonkey86101/Sub-WebSite/main/server/scripts/windows/migrate.ps1 -OutFile $HOME\migrate.ps1
+   ```
+3. Запустите его:
+   ```powershell
+   powershell -ExecutionPolicy Bypass -File $HOME\migrate.ps1
+   ```
+   Можно и двойным щелчком по `server/scripts/windows/migrate.cmd`, если файлы репозитория есть на компьютере.
+
+Скрипт:
+- **находит бэкап** — самый свежий `family-vpn-*.tar.gz.age` в «Загрузках» или на рабочем столе. Если не найдёт, предложит перетащить файл в окно;
+- **настраивает вход по ключу** `~\.ssh\family-vpn`, поэтому пароль спрашивается один раз;
+- **копирует бэкап и скачивает репозиторий** на сервер;
+- **запускает `restore.sh --yes`** — имена DuckDNS переезжают без вопроса.
+
+После него остаётся выключить старый сервер в кабинете хостинга. Учения: `migrate.ps1 -Drill` на временном VPS.
+
 **Учения раз в квартал.** Возьмите временный дешёвый VPS и запустите скрипт с `--drill`:
 
 ```bash
@@ -516,7 +544,8 @@ npm start       # портал на http://localhost:8080
 | `src/heartbeat.js` | Следит, что внешняя проверка доступности приходит |
 | `scripts/monitor.mjs` | Внешняя проверка доступности (запускается в GitHub Actions) |
 | `src/backup.js`, `src/tar.js` | Бэкап: архив, шифрование age, отправка в Telegram |
-| `scripts/restore.sh` | Переезд на новый VPS из бэкапа и учения (`--drill`) |
+| `scripts/restore.sh` | Переезд на новый VPS из бэкапа и учения (`--drill`, `--yes`) |
+| `scripts/windows/migrate.ps1`, `migrate.cmd` | Переезд с компьютера на Windows: спрашивает только IP и ключ age |
 | `scripts/install-reboot.sh`, `src/reboot.js` | Перезагрузка сервера по команде из бота и админки |
 | `src/static/` | Стили, скрипт кнопок, иконки ярлыка (`scripts/generate-icons.py`, нужен Pillow) |
 | `src/cli.js` | Команды админа |
