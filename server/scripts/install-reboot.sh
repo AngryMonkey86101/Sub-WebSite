@@ -9,6 +9,8 @@
 # в первые 2 минуты после загрузки, он только удаляется: так исключена петля перезагрузок.
 
 set -euo pipefail
+# файлы служб — с обычными правами, даже если скрипт запущен из restore.sh с umask 077
+umask 022
 
 APP=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 SYSTEMD_DIR=${SYSTEMD_DIR:-/etc/systemd/system}
