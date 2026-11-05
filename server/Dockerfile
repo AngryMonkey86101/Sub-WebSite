@@ -17,6 +17,9 @@ ENV NODE_ENV=production \
 
 # База — на отдельном томе, чтобы переживать пересборку контейнера
 RUN mkdir -p /data && chown node:node /data
+# Код портала должен читаться пользователем node при любых правах файлов на сервере, откуда
+# собирается образ (например, если их скопировали с umask 077)
+RUN chmod -R a+rX /app
 USER node
 VOLUME /data
 EXPOSE 8080

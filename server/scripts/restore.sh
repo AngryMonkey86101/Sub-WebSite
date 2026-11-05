@@ -169,14 +169,22 @@ if docker ps -a --format '{{.Names}}' | grep -qx "$AWG"; then
     || die "Контейнер $AWG уже есть, но с другим портом. Удалите его (docker rm -f $AWG) и запустите скрипт снова"
   ok "Контейнер $AWG уже есть — ключи в нём заменятся прежними"
 else
-  [ -d "$PROTOCOLS_DIR/.git" ] || git clone -q "$PROTOCOLS_REPO" "$PROTOCOLS_DIR"
-  git -C "$PROTOCOLS_DIR" checkout -q --detach "$PROTOCOLS_REF"
-  bash "$PROTOCOLS_DIR/install.sh" awg --port "$AWG_PORT" --subnet "$AWG_SUBNET" --cidr "$AWG_CIDR"
+  # установщик и его файлы для образа AmneziaWG — с обычными правами, не umask 077
+  (
+    umask 022
+    [ -d "$PROTOCOLS_DIR/.git" ] || git clone -q "$PROTOCOLS_REPO" "$PROTOCOLS_DIR"
+    git -C "$PROTOCOLS_DIR" checkout -q --detach "$PROTOCOLS_REF"
+    bash "$PROTOCOLS_DIR/install.sh" awg --port "$AWG_PORT" --subnet "$AWG_SUBNET" --cidr "$AWG_CIDR"
+  )
 fi
 
 step "5/7 Портал с прежними настройками и базой"
 mkdir -p "$APP"
 cp -r "$REPO_DIR/server/." "$APP/"
+# Файлы портала — читаемые для всех: из них собирается образ, а портал в нём работает не от root.
+# Иначе umask 077 этого скрипта оставил бы их только для root, и в контейнере был бы EACCES.
+# .env и его копии не трогаем: в них секреты.
+find "$APP" -name '.env*' -prune -o -exec chmod u=rwX,go=rX {} +
 [ -d "$DEPLOY_HOME/sub-website" ] || cp -a "$REPO_DIR" "$DEPLOY_HOME/sub-website"
 [ ! -f "$APP/.env" ] || cp -p "$APP/.env" "$APP/.env.before-restore"
 # DOCKER_GID и DOCKER_API_VERSION у каждого сервера свои

@@ -223,6 +223,10 @@ test('restore.sh: бэкап расшифрован, AmneziaWG с прежним
   assert.match(env, /^KEY_ENCRYPTION_KEY=kek$/m);
   assert.match(env, /^TELEGRAM_BOT_TOKEN=7000000001:bot$/m, 'бот переезжает вместе с сервером');
   assert.equal(statSync(join(t.app, '.env')).mode & 0o777, 0o600);
+  // код портала читается всеми, несмотря на umask 077 скрипта: в контейнере он работает от node
+  assert.equal(statSync(join(t.app, 'src', 'cli.js')).mode & 0o777, 0o644);
+  assert.equal(statSync(join(t.app, 'src')).mode & 0o777, 0o755);
+  assert.equal(statSync(join(t.app, 'package.json')).mode & 0o777, 0o644);
   assert.ok(existsSync(join(t.app, 'docker-compose.yml')), 'файлы портала скопированы');
   assert.ok(existsSync(join(t.root, 'home', 'deploy', 'sub-website', 'server', 'scripts', 'restore.sh')), 'клон для обновлений у deploy');
 
