@@ -373,9 +373,14 @@ function createApp({
       }
     }],
 
-    ['POST', /^\/admin\/orders\/(\d+)\/(grant|cancel)$/, async ({ member, params }) => {
-      requireAdmin(member);
+    ['POST', /^\/admin\/orders\/(\d+)\/(grant|cancel|refund)$/, async ({ member, params, form }) => {
+      const admin = requireAdmin(member);
       if (!shop) throw new PortalError(404, 'Продажи не подключены');
+      if (params[1] === 'refund') {
+        limit(`refund:${admin.id}`, 20, HOUR);
+        await shop.refundOrder(toId(params[0]), form.get('amount') || null);
+        return redirect('/admin/shop?refunded=1#history');
+      }
       if (params[1] === 'grant') await shop.grantOrder(toId(params[0]));
       else shop.cancelOrder(toId(params[0]));
       return redirect('/admin/shop#orders');

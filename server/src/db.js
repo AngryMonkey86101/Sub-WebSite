@@ -83,7 +83,13 @@ const ADDED_COLUMNS = [
   // сообщить об оплате (даже если заказ уже отменён у нас — тогда он оживает и выполняется)
   ['orders', 'payment_id', 'TEXT'],
   ['orders', 'payment_url', 'TEXT'],
-  ['orders', 'payment_open', 'INTEGER NOT NULL DEFAULT 0']
+  ['orders', 'payment_open', 'INTEGER NOT NULL DEFAULT 0'],
+  // возвраты по заказу: сколько рублей уже вернули, когда, номер последнего возврата ЮKassa
+  ['orders', 'refunded', 'INTEGER NOT NULL DEFAULT 0'],
+  ['orders', 'refunded_at', 'INTEGER'],
+  ['orders', 'refund_id', 'TEXT'],
+  // попытка возврата для ключа идемпотентности: после отказа ЮKassa — следующая
+  ['orders', 'refund_attempt', 'INTEGER NOT NULL DEFAULT 0']
 ];
 
 function openDatabase(path) {

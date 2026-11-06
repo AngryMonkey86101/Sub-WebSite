@@ -31,6 +31,8 @@ const PAYMENT_GIVE_UP = 7 * DAY;
 const MSK = 3 * HOUR;
 // Напоминания о конце срока: за 3 дня и за 1 день
 const REMIND = [3, 1];
+// Лимит дохода самозанятого за календарный год (422-ФЗ); с 90% лимита отчёт предупреждает
+const SELF_EMPLOYED_LIMIT = 2400000;
 
 const DEFAULTS = {
   open: false,
@@ -153,7 +155,19 @@ function createShop({ db, config, portal, yookassa = null, returnUrl = () => con
     byPayment: db.prepare('SELECT * FROM orders WHERE payment_id = ? AND payment_open = 1'),
     openPayments: db.prepare('SELECT * FROM orders WHERE payment_open = 1 ORDER BY id'),
     stale: db.prepare("SELECT * FROM orders WHERE status = 'pending' AND created_at <= ?"),
-    revenue: db.prepare("SELECT COUNT(*) AS n, COALESCE(SUM(amount), 0) AS sum FROM orders WHERE status = 'paid' AND kind = 'paid' AND paid_at > ?"),
+    // выручка — за вычетом возвратов
+    revenue: db.prepare("SELECT COUNT(*) AS n, COALESCE(SUM(amount - refunded), 0) AS sum FROM orders WHERE status = 'paid' AND kind = 'paid' AND paid_at > ?"),
+    paidSince: db.prepare("SELECT * FROM orders WHERE status = 'paid' AND paid_at > ? ORDER BY id"),
+    refundsSince: db.prepare("SELECT COUNT(*) AS n, COALESCE(SUM(refunded), 0) AS sum FROM orders WHERE refunded > 0 AND refunded_at > ?"),
+    activeClients: db.prepare("SELECT COUNT(*) AS n FROM members WHERE role = 'client' AND paid_until > ? AND status != 'paused'"),
+    orderWithMember: db.prepare('SELECT o.*, m.code, m.telegram_chat, m.paid_until, m.role, m.status AS member_status FROM orders o LEFT JOIN members m ON m.id = o.member_id WHERE o.id = ?'),
+    addRefund: db.prepare("UPDATE orders SET refunded = refunded + ?, refunded_at = ?, refund_id = COALESCE(?, refund_id) WHERE id = ? AND status = 'paid' AND refunded + ? <= amount"),
+    setUntil: db.prepare('UPDATE members SET paid_until = ? WHERE id = ?'),
+    nextRefundAttempt: db.prepare('UPDATE orders SET refund_attempt = refund_attempt + 1 WHERE id = ?'),
+    firstPaid: db.prepare("SELECT COUNT(*) AS n FROM orders o WHERE o.kind = 'paid' AND o.status = 'paid' AND o.paid_at > ? AND NOT EXISTS (SELECT 1 FROM orders p WHERE p.member_id = o.member_id AND p.kind = 'paid' AND p.status = 'paid' AND p.id < o.id)"),
+    // кто брал пробный период и кто из них потом заплатил
+    trialMembers: db.prepare("SELECT DISTINCT member_id FROM orders WHERE kind = 'trial' AND paid_at > ? AND member_id IS NOT NULL"),
+    paidAfterTrial: db.prepare("SELECT COUNT(DISTINCT t.member_id) AS n FROM orders t JOIN orders p ON p.member_id = t.member_id AND p.kind = 'paid' AND p.status = 'paid' WHERE t.kind = 'trial' AND t.paid_at > ?"),
     seatsUsed: db.prepare("SELECT COALESCE(SUM(device_limit), 0) AS n FROM members WHERE role = 'client' AND paid_until > ? AND id != ?"),
     clients: db.prepare("SELECT * FROM members WHERE role = 'client' ORDER BY paid_until DESC"),
     expired: db.prepare("SELECT * FROM members WHERE role = 'client' AND paid_until <= ? AND status IN ('active', 'invited')"),
@@ -405,6 +419,108 @@ function createShop({ db, config, portal, yookassa = null, returnUrl = () => con
     return result.member;
   }
 
+  // Возврат денег по оплаченному заказу. amount — рубли, по умолчанию всё, что ещё не вернули.
+  // ЮKassa — через API; ручная оплата — деньги админ возвращает сам, здесь только учёт.
+  // Полный возврат уменьшает срок покупателя на срок заказа; если срок вышел — ключи на паузу.
+  // Частичный (компенсация) срок не трогает.
+  function refundPreview(orderId, value = null) {
+    const order = q.orderWithMember.get(orderId);
+    if (!order || order.status !== 'paid' || order.kind !== 'paid') throw new PortalError(404, `Оплаченного заказа №${orderId} нет`);
+    const left = order.amount - order.refunded;
+    if (left <= 0) throw new PortalError(409, `По заказу №${orderId} деньги уже возвращены полностью`);
+    const amount = value === null || value === '' ? left : intField(value, { min: 1, max: left, name: 'Сумма возврата, ₽' });
+    if (order.payment_id && !yookassa) throw new PortalError(409, 'Заказ оплачен через ЮKassa, а ЮKassa сейчас не подключена: верните деньги в личном кабинете ЮKassa');
+    const full = amount === left;
+    const period = parsePeriodKey(order.period);
+    const shift = addPeriod(order.paid_at, period) - order.paid_at;
+    const newUntil = full && order.member_id && order.paid_until ? Math.max(now(), order.paid_until - shift) : null;
+    return { order, amount, full, newUntil, viaYooKassa: Boolean(order.payment_id), periodLabel: periodLabel(period) };
+  }
+
+  async function refundOrder(orderId, value = null) {
+    const preview = refundPreview(orderId, value);
+    const { order, amount, full, newUntil } = preview;
+    let refundId = null;
+    let pending = false;
+    if (preview.viaYooKassa) {
+      let refund;
+      try {
+        refund = await yookassa.createRefund({
+          paymentId: order.payment_id,
+          amount,
+          description: `Возврат по заказу №${order.id}`,
+          // после обрыва связи повтор идёт с тем же ключом — деньги не вернутся дважды;
+          // после отказа ЮKassa — со следующим, иначе ЮKassa повторила бы тот же отказ
+          key: `family-vpn-refund-${order.id}-${order.refunded}-${amount}-${order.refund_attempt}`
+        });
+      } catch (err) {
+        throw new PortalError(502, `Возврат не сделан: ${err.message}`);
+      }
+      if (refund.status === 'canceled') {
+        q.nextRefundAttempt.run(order.id);
+        throw new PortalError(502, `ЮKassa отклонила возврат${refund.cancelReason ? ` (${refund.cancelReason})` : ''}`);
+      }
+      refundId = refund.id;
+      pending = refund.status === 'pending';
+    }
+    if (q.addRefund.run(amount, now(), refundId, order.id, amount).changes === 0) throw new PortalError(409, `Возврат по заказу №${order.id} уже учтён`);
+    let paused = false;
+    if (newUntil !== null) {
+      q.setUntil.run(newUntil, order.member_id);
+      if (newUntil <= now() && order.member_status !== 'paused') {
+        try {
+          await portal.setPaused(order.member_id, true);
+          paused = true;
+        } catch (err) {
+          notify(`⚠️ ${order.code}: срок уменьшен, но ключи не встали на паузу — ${err.message}. Уборка повторит через 10 минут`);
+        }
+      }
+    }
+    event('order_refunded', order.code, `№${order.id}: ${formatRub(amount)}${full ? ', полностью' : ''}`);
+    const lines = [`💸 Вам вернули ${formatRub(amount)} по заказу №${order.id}.`];
+    if (preview.viaYooKassa) lines.push('Деньги придут туда, откуда была оплата, — обычно за несколько дней, срок зависит от банка.');
+    if (newUntil !== null) lines.push(newUntil <= now() ? 'Доступ по этому заказу закончен, ключи на паузе.' : `Срок доступа уменьшен: теперь до ${formatMsk(newUntil)}.`);
+    await tell(order.telegram_chat, { text: lines.join('\n'), buttons: [[{ text: '🔑 Мой доступ', action: 'keys' }]] });
+    return { ...preview, refundId, pending, paused };
+  }
+
+  // Отчёт о продажах за days дней и доход с начала года — для лимита самозанятого
+  function salesReport(days = 30) {
+    const since = now() - days * DAY;
+    const orders = q.paidSince.all(since);
+    const paid = orders.filter((o) => o.kind === 'paid');
+    const byTariff = new Map();
+    for (const o of paid) {
+      const key = `${periodLabel(parsePeriodKey(o.period))}, ${devicesLabel(o.devices)}`;
+      const row = byTariff.get(key) ?? { label: key, count: 0, sum: 0 };
+      row.count += 1;
+      row.sum += o.amount - o.refunded;
+      byTariff.set(key, row);
+    }
+    // начало года по Москве
+    const mskYear = new Date(now() + MSK).getUTCFullYear();
+    const yearStart = Date.UTC(mskYear, 0, 1) - MSK;
+    const year = q.revenue.get(yearStart).sum;
+    const refunds = q.refundsSince.get(since);
+    const trials = q.trialMembers.all(since).length;
+    return {
+      days,
+      orders: paid.length,
+      gross: paid.reduce((sum, o) => sum + o.amount, 0),
+      refunds: { count: refunds.n, sum: refunds.sum },
+      net: paid.reduce((sum, o) => sum + o.amount - o.refunded, 0),
+      byTariff: [...byTariff.values()].sort((a, b) => b.sum - a.sum),
+      // новые покупатели — первая оплата у участника; остальное — продления
+      newClients: q.firstPaid.get(since).n,
+      byMethod: { yookassa: paid.filter((o) => o.method === 'yookassa').length, manual: paid.filter((o) => o.method === 'manual').length },
+      trials,
+      trialsConverted: q.paidAfterTrial.get(since).n,
+      activeClients: q.activeClients.get(now()).n,
+      seats: seats(),
+      year: { year: mskYear, sum: year, limit: SELF_EMPLOYED_LIMIT, nearLimit: year >= SELF_EMPLOYED_LIMIT * 0.9 }
+    };
+  }
+
   // Покупатель потерял ссылку на кабинет: новое приглашение, прежняя личная ссылка перестаёт работать
   function relink(chat) {
     const member = memberOf(chat);
@@ -545,6 +661,7 @@ function createShop({ db, config, portal, yookassa = null, returnUrl = () => con
       seats: seats(),
       pending: q.pending.all(),
       recent: q.recent.all(20),
+      report: salesReport(30),
       clients: q.clients.all(),
       month: { orders: month.n, sum: month.sum },
       payments
@@ -566,6 +683,9 @@ function createShop({ db, config, portal, yookassa = null, returnUrl = () => con
     pendingOrder,
     cancelOrder,
     grantOrder,
+    refundPreview,
+    refundOrder,
+    salesReport,
     startTrial,
     gift,
     relink,

@@ -1,4 +1,5 @@
-// Клиент API ЮKassa (https://yookassa.ru/developers): создать платёж и узнать его состояние.
+// Клиент API ЮKassa (https://yookassa.ru/developers): создать платёж, узнать его состояние,
+// вернуть деньги.
 //
 // Платёж создаётся со списанием сразу (capture: true) и переходом на страницу оплаты ЮKassa
 // (confirmation.type = redirect). После оплаты ЮKassa возвращает покупателя по return_url —
@@ -82,7 +83,18 @@ function createYooKassa({ settings, fetch = globalThis.fetch, api = API }) {
     };
   }
 
-  return { createPayment, getPayment };
+  // Возврат части или всей суммы платежа. key — ключ идемпотентности: повтор после обрыва связи
+  // не вернёт деньги дважды. Состояние: succeeded, pending (банк ещё обрабатывает) или canceled.
+  async function createRefund({ paymentId, amount, description, key }) {
+    const refund = await call('POST', '/refunds', {
+      idempotenceKey: key,
+      body: { payment_id: paymentId, amount: { value: `${amount}.00`, currency: 'RUB' }, description: description.slice(0, 250) }
+    });
+    if (!refund?.id) throw new YooKassaError('ЮKassa не вернула номер возврата');
+    return { id: refund.id, status: refund.status, cancelReason: refund.cancellation_details?.reason ?? null };
+  }
+
+  return { createPayment, getPayment, createRefund };
 }
 
 export { createYooKassa, YooKassaError };

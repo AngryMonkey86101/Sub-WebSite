@@ -10,6 +10,7 @@ import { createShop } from '../src/shop.js';
 import { createYooKassa } from '../src/yookassa.js';
 import { createClientBot } from '../src/client.js';
 import { createApp } from '../src/app.js';
+import { createBotCommands } from '../src/bot.js';
 import { startFakeAmnezia } from './fakeAmnezia.js';
 
 // Оплата через ЮKassa поверх поддельного API: платёж по заказу, выдача доступа без админа
@@ -43,7 +44,8 @@ const json = (status, body) => new Response(JSON.stringify(body), { status, head
 
 // Поддельный API ЮKassa: платежи в payments, запросы в calls
 function fakeYooKassa() {
-  const state = { down: false, rejectKeys: false };
+  const state = { down: false, rejectKeys: false, refundStatus: 'succeeded' };
+  const refunds = [];
   const payments = new Map();
   const byKey = new Map();
   const calls = [];
@@ -73,6 +75,21 @@ function fakeYooKassa() {
       byKey.set(key, id);
       return json(200, payment);
     }
+    if (init.method === 'POST' && pathname === '/v3/refunds') {
+      const key = init.headers['Idempotence-Key'];
+      const known = refunds.find((r) => r.key === key);
+      if (known) return json(200, known.refund);
+      const body = JSON.parse(init.body);
+      const refund = {
+        id: `rf${refunds.length + 1}-0000-5000-8000-000000000000`,
+        status: state.refundStatus,
+        payment_id: body.payment_id,
+        amount: body.amount,
+        ...(state.refundStatus === 'canceled' ? { cancellation_details: { party: 'yoo_money', reason: 'insufficient_funds' } } : {})
+      };
+      refunds.push({ key, refund, body });
+      return json(200, refund);
+    }
     const match = /^\/v3\/payments\/([\w-]+)$/.exec(pathname);
     if (init.method === 'GET' && match) {
       const payment = payments.get(match[1]);
@@ -85,6 +102,7 @@ function fakeYooKassa() {
     fetch,
     state,
     payments,
+    refunds,
     calls,
     succeed: (id) => set(id, { status: 'succeeded', paid: true }),
     cancel: (id, reason = 'expired_on_confirmation') => set(id, { status: 'canceled', paid: false, cancellation_details: { party: 'yoo_money', reason } }),
@@ -115,6 +133,7 @@ function setup() {
     log: quiet
   });
   const client = createClientBot({ config, shop, now });
+  const admin = createBotCommands({ portal, config, shop, now });
   const form = (fields) => new URLSearchParams(fields);
   shop.saveCatalog(form({ count_0: '1', unit_0: 'month', price_0_1: '300', price_0_2: '500' }));
   // с ЮKassa «Как оплатить» не нужно
@@ -127,7 +146,14 @@ function setup() {
     const order = db.prepare('SELECT * FROM orders WHERE id = ?').get(id);
     return { screen, id, order };
   };
-  return { db, yk, notes, delivered, portal, shop, client, tap, orderOf, now, advance: (ms) => { clock += ms; } };
+  // заказ и сразу успешная оплата
+  const paidOrder = async (chat, action) => {
+    const made = await orderOf(chat, action);
+    yk.succeed(made.order.payment_id);
+    await shop.poll();
+    return made;
+  };
+  return { db, yk, notes, delivered, portal, shop, client, admin, tap, orderOf, paidOrder, now, advance: (ms) => { clock += ms; } };
 }
 
 test('ЮKassa: настройки — оба ключа или ни одного, формат ключей', () => {
@@ -341,6 +367,174 @@ test('ЮKassa: HTTP-уведомление — сразу 200, платёж пе
     assert.ok(page.includes(`<b>${PUBLIC_URL}/yookassa/notify</b>`));
     assert.match(page, /с ЮKassa не нужно/);
     assert.match(page, /оплачен через ЮKassa/);
+  } finally {
+    server.close();
+    db.close();
+  }
+});
+
+test('возврат через ЮKassa: подтверждение в боте, срок уменьшается, ключи на паузу', async () => {
+  const { db, yk, delivered, portal, shop, admin, paidOrder, now, advance } = setup();
+  const { id, order } = await paidOrder('1500');
+  const member = portal.memberByChat('1500');
+  const invite = delivered.at(-1).buttons.flat().find((b) => b.url).url.split('/i/')[1];
+  portal.activateInvite(invite);
+  const device = await portal.addDevice(member.id, { platform: 'ios', protocol: 'amneziawg3' });
+
+  assert.match(await admin.run('/refund', []), /Укажите номер заказа/);
+  assert.match(await admin.run('/refund', ['999']), /Оплаченного заказа №999 нет/);
+  assert.match(await admin.run('/refund', [String(id), '600']), /Сумма возврата, ₽: целое число от 1 до 500/);
+  assert.match(await admin.run('/refund_confirm', []), /Подтверждение устарело/);
+
+  // частичный — срок не трогает
+  const ask = await admin.run('/refund', [String(id), '100']);
+  assert.match(ask, new RegExp(`Вернуть 100 ₽ по заказу №${id} \\(${member.code}, 1 месяц, 2 устройства — 500 ₽\\)\\?[\\s\\S]*Деньги вернёт ЮKassa[\\s\\S]*частичный: срок доступа не меняется[\\s\\S]*/refund_confirm`));
+  assert.equal(yk.refunds.length, 0, 'до подтверждения ничего не происходит');
+  assert.match(await admin.run('/refund_confirm', []), new RegExp(`Заказ №${id}: возвращено 100 ₽`));
+  assert.deepEqual(yk.refunds[0].body, { payment_id: order.payment_id, amount: { value: '100.00', currency: 'RUB' }, description: `Возврат по заказу №${id}` });
+  assert.equal(portal.memberByChat('1500').paid_until, member.paid_until);
+  assert.match(delivered.at(-1).text, new RegExp(`Вам вернули 100 ₽ по заказу №${id}[\\s\\S]*откуда была оплата`));
+  assert.match(await admin.run('/refund_confirm', []), /устарело/, 'подтверждение одноразовое');
+
+  // остаток — полный: срок минус месяц, то есть сейчас; ключи на паузе
+  assert.match(await admin.run('/refund', [String(id)]), /Вернуть 400 ₽[\s\S]*доступ закончится сразу/);
+  assert.match(await admin.run('/refund_confirm', []), /возвращено 400 ₽[\s\S]*Доступ закончен, ключи на паузе/);
+  assert.equal(yk.refunds[1].key, `family-vpn-refund-${id}-100-400-0`);
+  const after = portal.memberByChat('1500');
+  assert.equal(after.status, 'paused');
+  assert.equal(after.paid_until, now());
+  assert.equal(fake.state.clients.get(device.client_id).status, 'disabled');
+  assert.match(delivered.at(-1).text, /Вам вернули 400 ₽[\s\S]*Доступ по этому заказу закончен/);
+  assert.match(await admin.run('/refund', [String(id)]), /уже возвращены полностью/);
+  assert.equal(db.prepare('SELECT refunded FROM orders WHERE id = ?').get(id).refunded, 500);
+
+  // подтверждение живёт минуту
+  const second = await paidOrder('1501');
+  await admin.run('/refund', [String(second.id)]);
+  advance(2 * MINUTE);
+  assert.match(await admin.run('/refund_confirm', []), /устарело/);
+  assert.equal(yk.refunds.length, 2);
+  db.close();
+});
+
+test('возврат: продление — срок уменьшается на срок заказа; отказ и недоступность ЮKassa; ручная оплата', async () => {
+  const { db, yk, portal, shop, admin, paidOrder, now } = setup();
+  await paidOrder('1600', 'order:1m:1:300');
+  const renew = await paidOrder('1600', 'order:1m:1:300');
+  const until = portal.memberByChat('1600').paid_until;
+  const preview = shop.refundPreview(renew.id);
+  assert.ok(preview.newUntil > now() && preview.newUntil < until);
+  await shop.refundOrder(renew.id);
+  const member = portal.memberByChat('1600');
+  assert.notEqual(member.status, 'paused', 'первый месяц ещё оплачен');
+  assert.equal(member.paid_until, preview.newUntil);
+  assert.ok(Math.abs(member.paid_until - (until - 30 * DAY)) <= DAY, 'примерно на месяц меньше');
+
+  // ЮKassa отклонила — ничего не учтено
+  const other = await paidOrder('1601');
+  yk.state.refundStatus = 'canceled';
+  await assert.rejects(shop.refundOrder(other.id), /ЮKassa отклонила возврат \(insufficient_funds\)/);
+  assert.equal(db.prepare('SELECT refunded FROM orders WHERE id = ?').get(other.id).refunded, 0);
+  yk.state.refundStatus = 'succeeded';
+  yk.state.down = true;
+  await assert.rejects(shop.refundOrder(other.id), /Возврат не сделан: ЮKassa недоступна/);
+  yk.state.down = false;
+  // после отказа — новый ключ идемпотентности, после обрыва связи — тот же
+  const keys = yk.calls.filter((c) => c.pathname === '/v3/refunds').map((c) => c.headers['Idempotence-Key']);
+  assert.deepEqual(keys.slice(-2), [`family-vpn-refund-${other.id}-0-500-0`, `family-vpn-refund-${other.id}-0-500-1`]);
+  // ещё обрабатывается банком — учтён, админ видит пометку
+  yk.state.refundStatus = 'pending';
+  assert.match(await admin.run('/refund', [String(other.id)]), /Вернуть 500 ₽/);
+  assert.match(await admin.run('/refund_confirm', []), /ЮKassa ещё обрабатывает возврат/);
+  yk.state.refundStatus = 'succeeded';
+
+  // ручная оплата: API не вызывается, админ возвращает сам
+  const plain = createShop({ db, config, portal, notify: () => {}, now, log: quiet });
+  plain.saveSettings(new URLSearchParams({ trial_enabled: '1', trial_days: '1', trial_devices: '1', seats: '100', pay_info: 'СБП' }));
+  const manual = (await plain.createOrder('1602', '1m', 1)).order.id;
+  await plain.grantOrder(manual);
+  const calls = yk.refunds.length;
+  assert.match(await admin.run('/refund', [String(manual)]), /оплачен вручную: деньги верните покупателю сами/);
+  await admin.run('/refund_confirm', []);
+  assert.equal(yk.refunds.length, calls);
+  assert.equal(db.prepare('SELECT refunded FROM orders WHERE id = ?').get(manual).refunded, 300);
+  db.close();
+});
+
+test('отчёт о продажах: выручка за вычетом возвратов, тарифы, новые и продления, пробный период, лимит самозанятого', async () => {
+  const { db, shop, admin, tap, paidOrder, advance } = setup();
+  await tap('1700', 'trial');
+  advance(HOUR);
+  await paidOrder('1700', 'order:1m:2:500');
+  await paidOrder('1701', 'order:1m:1:300');
+  await paidOrder('1701', 'order:1m:1:300');
+  await tap('1702', 'trial');
+  const refunded = await paidOrder('1703', 'order:1m:1:300');
+  await shop.refundOrder(refunded.id, '100');
+
+  const r = shop.salesReport(30);
+  assert.equal(r.orders, 4);
+  assert.equal(r.gross, 1400);
+  assert.deepEqual(r.refunds, { count: 1, sum: 100 });
+  assert.equal(r.net, 1300);
+  assert.equal(r.newClients, 3);
+  assert.deepEqual(r.byMethod, { yookassa: 4, manual: 0 });
+  assert.deepEqual(r.byTariff, [
+    { label: '1 месяц, 1 устройство', count: 3, sum: 800 },
+    { label: '1 месяц, 2 устройства', count: 1, sum: 500 }
+  ]);
+  assert.equal(r.trials, 2);
+  assert.equal(r.trialsConverted, 1);
+  assert.equal(r.activeClients, 4);
+  assert.deepEqual(r.year, { year: 2026, sum: 1300, limit: 2400000, nearLimit: false });
+
+  const text = await admin.run('/sales', []);
+  assert.match(text, /📊 Продажи за 30 дн\.\nОплат: 4 на 1 400 ₽, возвратов: 1 на 100 ₽\nИтого: 1 300 ₽\nНовых покупателей: 3, продлений: 1/);
+  assert.match(text, /1 месяц, 1 устройство: 3 шт\., 800 ₽/);
+  assert.match(text, /Пробный период: 2, из них купили: 1/);
+  assert.match(text, /Доход за 2026 год: 1 300 ₽ из 2 400 000 ₽/);
+  assert.match(await admin.run('/sales', ['abc']), /Укажите число дней/);
+  assert.match(await admin.run('/shop', []), /За 30 дней: 4 оплат на 1 300 ₽/, 'выручка в /shop — тоже за вычетом возвратов');
+
+  // за неделю, которой ещё не было, — пусто; доход с начала года считается по Москве
+  advance(40 * DAY);
+  assert.equal(shop.salesReport(7).orders, 0);
+  assert.equal(shop.salesReport(7).year.sum, 1300);
+  // близко к лимиту — предупреждение
+  db.prepare("UPDATE orders SET amount = 2200000 WHERE id = (SELECT MAX(id) FROM orders WHERE kind = 'paid')").run();
+  assert.match(await admin.run('/sales', []), /⚠️ Доход за 2026 год/);
+  db.close();
+});
+
+test('админка: отчёт и кнопка «Вернуть деньги» во вкладке «Продажи»', async () => {
+  const { db, yk, portal, shop, paidOrder } = setup();
+  const server = createServer(createApp({ portal, config, shop }));
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const base = `http://127.0.0.1:${server.address().port}`;
+  try {
+    const cookie = `__Host-sid=${portal.activateInvite(portal.createMember({ role: 'admin' }).inviteToken).accessToken}`;
+    const { id } = await paidOrder('1800');
+    const page = await (await fetch(`${base}/admin/shop`, { headers: { Cookie: cookie } })).text();
+    assert.match(page, /Отчёт за 30 дней[\s\S]*Оплат: <b>1<\/b> на 500 ₽/);
+    assert.match(page, /Доход за 2026 год: 500 ₽ из 2 400 000 ₽/);
+    assert.ok(page.includes(`action="/admin/orders/${id}/refund"`));
+    const post = (body) =>
+      fetch(`${base}/admin/orders/${id}/refund`, {
+        method: 'POST',
+        headers: { Cookie: cookie, Origin: PUBLIC_URL, 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams(body).toString(),
+        redirect: 'manual'
+      });
+    assert.equal((await post({ amount: '9999' })).status, 400);
+    const res = await post({ amount: '' });
+    assert.equal(res.status, 303);
+    assert.equal(res.headers.get('location'), '/admin/shop?refunded=1#history');
+    assert.equal(yk.refunds.at(-1).body.amount.value, '500.00');
+    const after = await (await fetch(`${base}/admin/shop?refunded=1`, { headers: { Cookie: cookie } })).text();
+    assert.match(after, /Возврат сделан/);
+    assert.match(after, /возвращено 500 ₽/);
+    assert.ok(!after.includes(`action="/admin/orders/${id}/refund"`), 'вернуть больше нечего');
+    assert.equal((await post({})).status, 409);
   } finally {
     server.close();
     db.close();
