@@ -319,6 +319,113 @@ test('продажи: конец срока — пауза ключей, про�
   db.close();
 });
 
+test('продажи: напоминания за 3 дня и за 1 день, удаление ключей через 14 дней без продления', async () => {
+  const { db, portal, shop, admin, delivered, notes, prices, configure, tap, now, advance } = setup();
+  prices([[1, 'month', 300, null, null, null], [7, 'day', 100, null, null, null]]);
+  configure({ trial_days: '1' });
+  shop.setOpen(true);
+  const grant = async (chat, action) => shop.grantOrder(Number((await tap(chat, action)).text.match(/№(\d+)/)[1]));
+  const sentTo = (chat, pattern) => delivered.filter((d) => d.chat === chat && pattern.test(d.text));
+
+  await grant('1100', 'order:1m:1:300');
+  const invite = delivered.at(-1).buttons.flat().find((b) => b.url).url.split('/i/')[1];
+  const { member } = portal.activateInvite(invite);
+  const device = await portal.addDevice(member.id, { platform: 'ios', protocol: 'amneziawg3' });
+  const until = portal.memberByChat('1100').paid_until;
+
+  // за 3 дня — одно напоминание, сколько бы раз ни шла уборка
+  advance(until - now() - 3 * DAY - HOUR);
+  await shop.sweep();
+  assert.equal(sentTo('1100', /заканчивается/).length, 0);
+  advance(2 * HOUR);
+  await shop.sweep();
+  await shop.sweep();
+  const reminders = sentTo('1100', /заканчивается/);
+  assert.equal(reminders.length, 1);
+  assert.match(reminders[0].text, /Доступ заканчивается через 3 дня — 06\.12\.2026 12:00 МСК[\s\S]*прибавится к текущему/);
+  assert.deepEqual(reminders[0].buttons.flat().map((b) => b.action), ['buy']);
+  // за 1 день — второе
+  advance(2 * DAY);
+  await shop.sweep();
+  await shop.sweep();
+  assert.equal(sentTo('1100', /заканчивается/).length, 2);
+  assert.match(sentTo('1100', /заканчивается/)[1].text, /Доступ заканчивается завтра — 06\.12\.2026 12:00 МСК/);
+
+  // срок кончился — пауза с датой удаления
+  advance(DAY);
+  await shop.sweep();
+  assert.equal(portal.memberByChat('1100').status, 'paused');
+  assert.match(delivered.at(-1).text, /ключи на паузе[\s\S]*Если не продлить до 20\.12\.2026 12:00 МСК, ключи будут удалены/);
+  assert.match((await tap('1100', 'keys')).text, /Срок доступа закончился 06\.12\.2026 12:00 МСК[\s\S]*Если не продлить до 20\.12\.2026 12:00 МСК, ключи будут удалены/);
+
+  // через 14 дней без продления — ключи и участник удалены, место свободно, покупатель знает
+  advance(14 * DAY - 2 * HOUR);
+  await shop.sweep();
+  assert.ok(portal.memberByChat('1100'), 'ещё не пора');
+  advance(2 * HOUR);
+  await shop.sweep();
+  assert.equal(portal.memberByChat('1100'), null);
+  assert.equal(fake.state.clients.has(device.client_id), false, 'ключ удалён с сервера VPN');
+  assert.match(delivered.at(-1).text, /Доступ не продлили, ключи удалены/);
+  assert.ok(notes.some((n) => new RegExp(`${member.code}: участник удалён`).test(n)));
+  assert.ok(db.prepare("SELECT COUNT(*) AS n FROM events WHERE type = 'access_deleted'").get().n === 1);
+  // купить снова можно — это новый покупатель с новым кодом
+  await grant('1100', 'order:7d:1:100');
+  assert.notEqual(portal.memberByChat('1100').code, member.code);
+
+  // короткий срок: напоминания, которые пришли бы сразу после покупки, не шлются
+  const before = delivered.length;
+  await shop.sweep();
+  assert.equal(delivered.length, before, '7 дней: «за 3 дня» — только на 4-й день');
+  advance(4 * DAY + HOUR);
+  await shop.sweep();
+  assert.match(delivered.at(-1).text, /через 3 дня/);
+  // продление после напоминания — для нового срока напоминания заново
+  await grant('1100', 'order:1m:1:300');
+  // новый срок: 27.12 + 1 месяц = 27.01, до него — 4 дня без часа; через сутки — меньше 3 дней
+  advance(31 * DAY);
+  await shop.sweep();
+  assert.match(delivered.at(-1).text, /через 3 дня/);
+  // подарок отодвигает срок — и напоминания тоже
+  const code = portal.memberByChat('1100').code;
+  await admin.run('/gift', [code, '10']);
+  const count = delivered.length;
+  await shop.sweep();
+  assert.equal(delivered.length, count, 'до нового конца срока 12 дней — напоминать рано');
+
+  // пробный день: ни «за 3 дня», ни «за 1 день» — только конец срока
+  await tap('1200', 'trial');
+  const trialStart = delivered.length;
+  await shop.sweep();
+  advance(12 * HOUR);
+  await shop.sweep();
+  assert.equal(delivered.length, trialStart);
+  advance(13 * HOUR);
+  await shop.sweep();
+  assert.ok(delivered.slice(trialStart).every((d) => !/заканчивается/.test(d.text)));
+  assert.match(delivered.at(-1).text, /ключи на паузе/);
+  db.close();
+});
+
+test('продажи: срок удаления ключей — из админки', async () => {
+  const { db, portal, shop, delivered, prices, configure, tap, advance } = setup();
+  prices([[7, 'day', 100, null, null, null]]);
+  assert.throws(() => configure({ delete_after: '0' }), /Удалять ключи через, дней: целое число от 1 до 365/);
+  configure({ delete_after: '3' });
+  assert.equal(shop.settings().deleteAfterDays, 3);
+  configure();
+  assert.equal(shop.settings().deleteAfterDays, 3, 'форма без поля значение не сбрасывает');
+  shop.setOpen(true);
+  await shop.grantOrder(Number((await tap('1300', 'order:7d:1:100')).text.match(/№(\d+)/)[1]));
+  advance(7 * DAY + HOUR);
+  await shop.sweep();
+  assert.match(delivered.at(-1).text, /Если не продлить до/);
+  advance(3 * DAY);
+  await shop.sweep();
+  assert.equal(portal.memberByChat('1300'), null);
+  db.close();
+});
+
 test('продажи: брошенный заказ отменяется через 3 дня, отмена покупателем и админом', async () => {
   const { db, shop, admin, notes, prices, configure, tap, advance } = setup();
   prices([[1, 'month', 300, null, null, null]]);
@@ -400,6 +507,7 @@ test('админка: раздел «Продажи» — тарифы, наст
     assert.match(page, new RegExp(`№${id} · 1 месяц, 2 устройства · 500 ₽`));
     assert.match(page, /Перевод &lt;b&gt;СБП&lt;\/b&gt;/, 'текст экранируется');
     assert.match(page, /name="price_1_2" min="1" max="1000000" inputmode="numeric" value="500"/);
+    assert.match(page, /name="delete_after" min="1" max="365" value="14"/);
 
     assert.equal((await post(`/admin/orders/${id}/grant`)).status, 303);
     assert.match(delivered.at(-1).text, /Оплата получена/);

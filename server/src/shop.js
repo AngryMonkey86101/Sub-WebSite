@@ -29,6 +29,8 @@ const POLL_FAST = HOUR;
 const POLL_SLOW = 10 * 60 * 1000;
 const PAYMENT_GIVE_UP = 7 * DAY;
 const MSK = 3 * HOUR;
+// Напоминания о конце срока: за 3 дня и за 1 день
+const REMIND = [3, 1];
 
 const DEFAULTS = {
   open: false,
@@ -38,6 +40,8 @@ const DEFAULTS = {
     { count: 3, unit: 'month', prices: [null, null, null, null] }
   ],
   trial: { enabled: true, days: 1, devices: 1 },
+  // через сколько дней после конца срока ключи удаляются, если доступ не продлили
+  deleteAfterDays: 14,
   seats: 100,
   payInfo: ''
 };
@@ -122,6 +126,8 @@ function parseSettingsForm(form) {
       devices: intField(form.get('trial_devices'), { min: 1, max: 4, name: 'Пробный период, устройств' })
     },
     seats: intField(form.get('seats'), { min: 1, max: 10000, name: 'Мест на сервере' }),
+    // поле добавлено позже остальных: без него значение не меняется
+    ...(form.has('delete_after') ? { deleteAfterDays: intField(form.get('delete_after'), { min: 1, max: 365, name: 'Удалять ключи через, дней' }) } : {}),
     payInfo
   };
 }
@@ -151,7 +157,12 @@ function createShop({ db, config, portal, yookassa = null, returnUrl = () => con
     seatsUsed: db.prepare("SELECT COALESCE(SUM(device_limit), 0) AS n FROM members WHERE role = 'client' AND paid_until > ? AND id != ?"),
     clients: db.prepare("SELECT * FROM members WHERE role = 'client' ORDER BY paid_until DESC"),
     expired: db.prepare("SELECT * FROM members WHERE role = 'client' AND paid_until <= ? AND status IN ('active', 'invited')"),
-    extend: db.prepare('UPDATE members SET paid_until = ?, device_limit = ? WHERE id = ?'),
+    extend: db.prepare('UPDATE members SET paid_until = ?, device_limit = ?, reminder_sent = ? WHERE id = ?'),
+    setReminder: db.prepare('UPDATE members SET reminder_sent = ? WHERE id = ?'),
+    // действующий срок кончается скоро — кандидаты на напоминание
+    endingSoon: db.prepare("SELECT * FROM members WHERE role = 'client' AND status IN ('active', 'invited') AND paid_until > ? AND paid_until <= ? AND reminder_sent != 1"),
+    // срок кончился давно и не продлён — ключи удаляются
+    abandoned: db.prepare("SELECT * FROM members WHERE role = 'client' AND status = 'paused' AND paid_until <= ?"),
     trialUsed: db.prepare('SELECT 1 FROM trials WHERE chat_hash = ?'),
     addTrial: db.prepare('INSERT INTO trials (chat_hash, at) VALUES (?, ?)'),
     event: db.prepare('INSERT INTO events (at, type, member_code, details) VALUES (?, ?, ?, ?)')
@@ -293,16 +304,25 @@ function createShop({ db, config, portal, yookassa = null, returnUrl = () => con
     return order;
   }
 
+  // Напоминания, которые для такого срока уже не нужны: при сроке в 1 день «за 3 дня» и «за 1 день»
+  // пришли бы сразу после покупки. Новый срок — напоминания заново.
+  function reminderLevel(paidUntil) {
+    const left = paidUntil - now();
+    return REMIND.reduce((level, days) => (left <= days * DAY ? days : level), 0);
+  }
+
   // Продлить срок покупателя или выдать доступ новому. Внутри транзакции — только база:
   // включение ключей на сервере (если срок кончился) идёт после.
   function extendOrCreate({ chat, period, devices }) {
     const member = memberOf(chat);
     if (member) {
       const paidUntil = addPeriod(Math.max(now(), member.paid_until ?? 0), period);
-      q.extend.run(paidUntil, devices, member.id);
+      q.extend.run(paidUntil, devices, reminderLevel(paidUntil), member.id);
       return { member: { ...member, paid_until: paidUntil, device_limit: devices }, inviteToken: null, wasPaused: member.status === 'paused' };
     }
-    const created = portal.createMember({ role: 'client', deviceLimit: devices, telegramChat: String(chat), paidUntil: addPeriod(now(), period), inTransaction: true });
+    const paidUntil = addPeriod(now(), period);
+    const created = portal.createMember({ role: 'client', deviceLimit: devices, telegramChat: String(chat), paidUntil, inTransaction: true });
+    q.setReminder.run(reminderLevel(paidUntil), created.member.id);
     return { ...created, wasPaused: false };
   }
 
@@ -377,7 +397,7 @@ function createShop({ db, config, portal, yookassa = null, returnUrl = () => con
     if (!member || member.role !== 'client') throw new PortalError(404, `Покупатель ${code} не найден`);
     const count = intField(days, { min: 1, max: 365, name: 'Дней' });
     const paidUntil = addPeriod(Math.max(now(), member.paid_until ?? 0), { count, unit: 'day' });
-    q.extend.run(paidUntil, member.device_limit, member.id);
+    q.extend.run(paidUntil, member.device_limit, reminderLevel(paidUntil), member.id);
     const result = { member: { ...member, paid_until: paidUntil }, inviteToken: null, wasPaused: member.status === 'paused' };
     await resumeIfPaused(result);
     event('gift', member.code, `${count} ${plural(count, UNITS.day.words)}`);
@@ -463,12 +483,28 @@ function createShop({ db, config, portal, yookassa = null, returnUrl = () => con
     return checkPayment(order);
   }
 
-  // Раз в 10 минут (index.js): срок кончился — ключи на паузу; брошенные заказы — отменить
+  const renewButton = [[{ text: '🛒 Продлить', action: 'buy' }]];
+
+  // Раз в 10 минут (index.js): брошенные заказы — отменить; скоро конец срока — напомнить;
+  // срок кончился — ключи на паузу; давно кончился и не продлён — ключи удалить
   async function sweep() {
     for (const order of q.stale.all(now() - ORDER_TTL)) {
       q.cancel.run(now(), order.id);
       event('order_cancelled', null, `№${order.id}: не оплачен за 3 дня`);
     }
+
+    for (const member of q.endingSoon.all(now(), now() + REMIND[0] * DAY)) {
+      const level = reminderLevel(member.paid_until);
+      if (!level || (member.reminder_sent && member.reminder_sent <= level)) continue;
+      q.setReminder.run(level, member.id);
+      event('reminder_sent', member.code, `за ${level} ${plural(level, UNITS.day.words)}`);
+      await tell(member.telegram_chat, {
+        text: `⏳ Доступ заканчивается ${level === 1 ? 'завтра' : `через ${level} ${plural(level, UNITS.day.words)}`} — ${formatMsk(member.paid_until)}. Продлите, чтобы VPN не отключился: новый срок прибавится к текущему.`,
+        buttons: renewButton
+      });
+    }
+
+    const { deleteAfterDays } = settings();
     for (const member of q.expired.all(now())) {
       try {
         await portal.setPaused(member.id, true);
@@ -478,8 +514,22 @@ function createShop({ db, config, portal, yookassa = null, returnUrl = () => con
       }
       event('access_expired', member.code);
       await tell(member.telegram_chat, {
-        text: '⏳ Срок доступа закончился, ключи на паузе. Продлите доступ — ключи на устройствах заработают снова, перенастраивать ничего не нужно.',
-        buttons: [[{ text: '🛒 Продлить', action: 'buy' }]]
+        text: `⏳ Срок доступа закончился, ключи на паузе. Продлите доступ — ключи на устройствах заработают снова, перенастраивать ничего не нужно. Если не продлить до ${formatMsk(member.paid_until + deleteAfterDays * DAY)}, ключи будут удалены.`,
+        buttons: renewButton
+      });
+    }
+
+    for (const member of q.abandoned.all(now() - deleteAfterDays * DAY)) {
+      try {
+        await portal.deleteMember(member.id);
+      } catch (err) {
+        log.error(`Удаление ${member.code} по сроку не удалось:`, err.message);
+        continue;
+      }
+      event('access_deleted', member.code, `срок кончился ${formatMsk(member.paid_until)}`);
+      await tell(member.telegram_chat, {
+        text: `🗑 Доступ не продлили, ключи удалены. Купить доступ снова можно в любой момент — ключи будут новые.`,
+        buttons: [[{ text: '🛒 Купить', action: 'buy' }]]
       });
     }
   }

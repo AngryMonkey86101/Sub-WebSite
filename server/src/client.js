@@ -1,4 +1,5 @@
 import { PortalError } from './portal.js';
+import { DAY } from './config.js';
 import { formatMsk, formatRub, devicesLabel, plural, DEVICE_OPTIONS } from './shop.js';
 
 // Клиентская часть бота: то, что видят в Telegram все, кроме админа (docs/PLAN.md, раздел 14).
@@ -71,7 +72,7 @@ function createClientBot({ config, shop, now = () => Date.now() }) {
       const active = member.paid_until > now() && member.status !== 'paused';
       lines.push(active
         ? `🔑 Доступ до ${formatMsk(member.paid_until)}, ${devicesLabel(member.device_limit)}.`
-        : `⏳ Срок доступа закончился ${formatMsk(member.paid_until)}, ключи на паузе. После продления заработают снова.`);
+        : `⏳ Срок доступа закончился ${formatMsk(member.paid_until)}, ключи на паузе. После продления заработают снова. Если не продлить до ${formatMsk(member.paid_until + shop.settings().deleteAfterDays * DAY)}, ключи будут удалены.`);
       lines.push('', 'Ключи — в личном кабинете по вашей личной ссылке. Потеряли ссылку — кнопка «Новая ссылка на кабинет».');
       rows.push([{ text: '🔗 Новая ссылка на кабинет', action: 'relink' }]);
     }

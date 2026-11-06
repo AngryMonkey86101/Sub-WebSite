@@ -310,6 +310,8 @@ const EVENT_LABELS = {
   trial_started: 'пробный доступ',
   gift: 'добавлены дни',
   access_expired: 'срок доступа закончился',
+  reminder_sent: 'напоминание о конце срока',
+  access_deleted: 'ключи удалены: доступ не продлён',
   payment_failed: 'ЮKassa не создала платёж',
   payment_mismatch: 'платёж ЮKassa не сходится с заказом'
 };
@@ -643,6 +645,10 @@ function shopPage({ admin, shop, notice, nowMs }) {
           <label>Дней <input type="number" name="trial_days" min="1" max="30" value="${shop.trial.days}"></label>
           <label>Устройств <input type="number" name="trial_devices" min="1" max="4" value="${shop.trial.devices}"></label>
         </div>
+        <label>Удалять ключи через, дней после конца срока, если доступ не продлили
+          <input type="number" name="delete_after" min="1" max="365" value="${shop.deleteAfterDays}">
+        </label>
+        <p class="muted">До удаления ключи на паузе: продление включает их снова. Напоминания о конце срока бот шлёт сам — за 3 дня и за 1 день.</p>
         <label>Мест на сервере (устройств на продажу)
           <input type="number" name="seats" min="1" max="10000" value="${shop.seats.total}">
         </label>
