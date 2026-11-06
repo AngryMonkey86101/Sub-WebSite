@@ -6,6 +6,7 @@ import { loadConfig, ConfigError, LIMITS } from './config.js';
 import { createAmneziaClient } from './amnezia.js';
 import { createTelegram } from './telegram.js';
 import { createBotCommands } from './bot.js';
+import { createClientBot } from './client.js';
 import { createWatchdog } from './watchdog.js';
 import { createHeartbeat } from './heartbeat.js';
 import { createBackup } from './backup.js';
@@ -37,7 +38,10 @@ const heartbeat = createHeartbeat({ db, notify: telegram.notify });
 const backup = createBackup({ config, db, amnezia, telegram, notify: telegram.notify });
 // файл-запрос — на томе данных, рядом с базой: его видит служба на сервере (scripts/install-reboot.sh)
 const reboot = createReboot({ dir: dirname(config.dbPath), db, notify: telegram.notify });
-telegram.start(createBotCommands({ portal, config, watchdog, heartbeat, backup, reboot }));
+telegram.start({
+  admin: createBotCommands({ portal, config, watchdog, heartbeat, backup, reboot }),
+  client: createClientBot({ config })
+});
 const server = createServer(createApp({ portal, config, telegram, watchdog, heartbeat, backup, reboot }));
 
 const sweep = async () => {
