@@ -151,3 +151,19 @@ ul.events li { padding: 4px 0; border-bottom: 1px solid var(--border); font-size
 .qr { display: flex; flex-wrap: wrap; gap: 12px; }
 .qr figure { margin: 0; text-align: center; }
 .qr img { width: 260px; max-width: 100%; height: auto; background: #fff; padding: 8px; border-radius: 8px; }
+
+/* Продажи: тарифы — карточка на каждый срок */
+fieldset.tariff { border: 1px solid var(--border); border-radius: 10px; background: var(--card); padding: 10px 12px 12px; margin: 0; min-width: 0; }
+fieldset.tariff legend { font-weight: 600; padding: 0 4px; }
+.tariff-period { display: flex; gap: 8px; align-items: end; margin-bottom: 10px; }
+.tariff-period label { display: grid; gap: 4px; }
+.tariff-period input[type="number"] { width: 5em; }
+.tariff-prices { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px 12px; }
+.tariff-prices label { display: grid; gap: 4px; font-size: 0.9rem; }
+.tariff-prices input { width: 100%; }
+@media (min-width: 560px) { .tariff-prices { grid-template-columns: repeat(4, minmax(0, 1fr)); } }
+form.stack:has(fieldset.tariff) { max-width: 640px; }
+form.stack div.inline { display: flex; flex-wrap: wrap; gap: 12px; }
+form.stack div.inline input[type="number"] { width: 5em; }
+form.stack label.check { display: flex; gap: 8px; align-items: center; }
+form.stack textarea { font-family: inherit; font-size: 1rem; word-break: normal; }

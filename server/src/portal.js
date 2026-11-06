@@ -22,7 +22,8 @@ function createPortal({ db, config, amnezia, notify, now = () => Date.now() }) {
     memberById: db.prepare('SELECT * FROM members WHERE id = ?'),
     memberByCode: db.prepare('SELECT * FROM members WHERE code = ?'),
     members: db.prepare("SELECT * FROM members ORDER BY role = 'admin' DESC, created_at"),
-    insertMember: db.prepare('INSERT INTO members (code, role, device_limit, status, created_at) VALUES (?, ?, ?, ?, ?)'),
+    insertMember: db.prepare('INSERT INTO members (code, role, device_limit, status, created_at, telegram_chat, paid_until) VALUES (?, ?, ?, ?, ?, ?, ?)'),
+    memberByChat: db.prepare('SELECT * FROM members WHERE telegram_chat = ?'),
     setMemberStatus: db.prepare('UPDATE members SET status = ? WHERE id = ?'),
     setDeviceLimit: db.prepare('UPDATE members SET device_limit = ? WHERE id = ?'),
     deleteMember: db.prepare('DELETE FROM members WHERE id = ?'),
@@ -79,19 +80,24 @@ function createPortal({ db, config, amnezia, notify, now = () => Date.now() }) {
     return token;
   }
 
-  // Новый участник и одноразовое приглашение для него
-  function createMember({ role = 'member', deviceLimit = config.defaultDeviceLimit } = {}) {
-    if (role !== 'member' && role !== 'admin') throw new PortalError(400, 'Неизвестная роль');
+  // Новый участник и одноразовое приглашение для него. Покупатель из бота (role 'client',
+  // shop.js) — со своим чатом Telegram и сроком доступа; createMember для него вызывается
+  // внутри транзакции магазина, поэтому своей транзакции тогда не открывает.
+  function createMember({ role = 'member', deviceLimit = config.defaultDeviceLimit, telegramChat = null, paidUntil = null, inTransaction = false } = {}) {
+    if (role !== 'member' && role !== 'admin' && role !== 'client') throw new PortalError(400, 'Неизвестная роль');
     const limit = checkLimit(deviceLimit);
-    return transaction(db, () => {
+    const create = () => {
       let code;
       do code = newMemberCode();
       while (q.memberByCode.get(code));
-      const id = Number(q.insertMember.run(code, role, limit, 'invited', now()).lastInsertRowid);
+      const id = Number(q.insertMember.run(code, role, limit, 'invited', now(), telegramChat, paidUntil).lastInsertRowid);
       log('member_created', code, role);
       return { member: q.memberById.get(id), inviteToken: issueInvite(id) };
-    });
+    };
+    return inTransaction ? create() : transaction(db, create);
   }
+
+  const memberByChat = (chat) => q.memberByChat.get(String(chat)) ?? null;
 
   // Новое приглашение взамен потерянной ссылки: прежние приглашения и личные ссылки
   // перестают работать сразу, ключи на устройствах остаются
@@ -352,6 +358,7 @@ function createPortal({ db, config, amnezia, notify, now = () => Date.now() }) {
     activateInvite,
     memberByToken,
     memberByCode,
+    memberByChat,
     rotateAccessToken,
     devicesOf,
     addDevice,

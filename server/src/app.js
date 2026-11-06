@@ -11,6 +11,7 @@ import {
   inviteCreatedPage,
   telegramLinkPage,
   rebootPage,
+  shopPage,
   errorPage
 } from './pages.js';
 import { createTelegram } from './telegram.js';
@@ -122,6 +123,8 @@ function createApp({
   backup = null,
   // перезагрузка сервера (reboot.js); без неё — «не настроена»
   reboot = null,
+  // продажа доступа через бота (shop.js); без неё раздела «Продажи» нет
+  shop = null,
   now = () => Date.now()
 }) {
   const limit = createRateLimiter(now);
@@ -306,6 +309,40 @@ function createApp({
       const status = await watchdog.takeover();
       if (status.state === 'error') throw new PortalError(502, status.message);
       return redirect('/admin#duckdns');
+    }],
+
+    // Продажи: состояние, тарифы и цены, настройки, заказы
+    ['GET', /^\/admin\/shop$/, ({ req, member }) => {
+      const admin = requireAdmin(member);
+      if (!shop) throw new PortalError(404, 'Продажи не подключены');
+      return page(200, shopPage({ admin, shop: shop.status(), notice: Object.fromEntries(new URL(req.url, config.publicUrl).searchParams), nowMs: now() }));
+    }],
+
+    ['POST', /^\/admin\/shop\/(open|close|catalog|settings)$/, ({ member, params, form }) => {
+      requireAdmin(member);
+      if (!shop) throw new PortalError(404, 'Продажи не подключены');
+      switch (params[0]) {
+        case 'open':
+          shop.setOpen(true);
+          return redirect('/admin/shop#state');
+        case 'close':
+          shop.setOpen(false);
+          return redirect('/admin/shop#state');
+        case 'catalog':
+          shop.saveCatalog(form);
+          return redirect('/admin/shop?saved=1#catalog');
+        default:
+          shop.saveSettings(form);
+          return redirect('/admin/shop?saved=1#settings');
+      }
+    }],
+
+    ['POST', /^\/admin\/orders\/(\d+)\/(grant|cancel)$/, async ({ member, params }) => {
+      requireAdmin(member);
+      if (!shop) throw new PortalError(404, 'Продажи не подключены');
+      if (params[1] === 'grant') await shop.grantOrder(toId(params[0]));
+      else shop.cancelOrder(toId(params[0]));
+      return redirect('/admin/shop#orders');
     }],
 
     // Ключ, который админ выдаёт сам: хранится у него, с меткой «для кого»

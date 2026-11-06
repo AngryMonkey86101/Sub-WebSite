@@ -46,6 +46,24 @@ const SCHEMA = `
     member_code TEXT,
     details TEXT
   );
+  CREATE TABLE IF NOT EXISTS orders (
+    id INTEGER PRIMARY KEY,
+    member_id INTEGER REFERENCES members(id) ON DELETE SET NULL,
+    chat TEXT,
+    kind TEXT NOT NULL,
+    period TEXT NOT NULL,
+    devices INTEGER NOT NULL,
+    amount INTEGER NOT NULL,
+    status TEXT NOT NULL,
+    method TEXT,
+    created_at INTEGER NOT NULL,
+    paid_at INTEGER
+  );
+  CREATE INDEX IF NOT EXISTS orders_status ON orders(status);
+  CREATE TABLE IF NOT EXISTS trials (
+    chat_hash TEXT PRIMARY KEY,
+    at INTEGER NOT NULL
+  );
   CREATE TABLE IF NOT EXISTS settings (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
@@ -54,7 +72,12 @@ const SCHEMA = `
 
 // Колонки, добавленные после первой выкладки: в уже созданную базу их дописывает ALTER TABLE,
 // в новой они есть сразу (SCHEMA)
-const ADDED_COLUMNS = [['devices', 'label', 'TEXT']];
+const ADDED_COLUMNS = [
+  ['devices', 'label', 'TEXT'],
+  // покупатель из бота: его чат Telegram (чтобы доставить ссылку и напоминания) и конец срока
+  ['members', 'telegram_chat', 'TEXT'],
+  ['members', 'paid_until', 'INTEGER']
+];
 
 function openDatabase(path) {
   const db = new DatabaseSync(path);
@@ -66,6 +89,7 @@ function openDatabase(path) {
     const exists = db.prepare(`PRAGMA table_info(${table})`).all().some((c) => c.name === column);
     if (!exists) db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${type}`);
   }
+  db.exec('CREATE UNIQUE INDEX IF NOT EXISTS members_chat ON members(telegram_chat) WHERE telegram_chat IS NOT NULL');
   return db;
 }
 

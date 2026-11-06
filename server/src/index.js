@@ -7,6 +7,7 @@ import { createAmneziaClient } from './amnezia.js';
 import { createTelegram } from './telegram.js';
 import { createBotCommands } from './bot.js';
 import { createClientBot } from './client.js';
+import { createShop } from './shop.js';
 import { createWatchdog } from './watchdog.js';
 import { createHeartbeat } from './heartbeat.js';
 import { createBackup } from './backup.js';
@@ -38,11 +39,12 @@ const heartbeat = createHeartbeat({ db, notify: telegram.notify });
 const backup = createBackup({ config, db, amnezia, telegram, notify: telegram.notify });
 // файл-запрос — на томе данных, рядом с базой: его видит служба на сервере (scripts/install-reboot.sh)
 const reboot = createReboot({ dir: dirname(config.dbPath), db, notify: telegram.notify });
+const shop = createShop({ db, config, portal, notify: telegram.notify, deliver: telegram.deliver });
 telegram.start({
-  admin: createBotCommands({ portal, config, watchdog, heartbeat, backup, reboot }),
-  client: createClientBot({ config })
+  admin: createBotCommands({ portal, config, watchdog, heartbeat, backup, reboot, shop }),
+  client: createClientBot({ config, shop })
 });
-const server = createServer(createApp({ portal, config, telegram, watchdog, heartbeat, backup, reboot }));
+const server = createServer(createApp({ portal, config, telegram, watchdog, heartbeat, backup, reboot, shop }));
 
 const sweep = async () => {
   heartbeat.check();
@@ -52,6 +54,12 @@ const sweep = async () => {
     await portal.sweep();
   } catch (err) {
     console.error('Ошибка уборки:', err?.message);
+  }
+  // конец срока у покупателей и брошенные заказы
+  try {
+    await shop.sweep();
+  } catch (err) {
+    console.error('Ошибка уборки продаж:', err?.message);
   }
 };
 sweep();

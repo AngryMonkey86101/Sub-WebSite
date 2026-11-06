@@ -1,6 +1,7 @@
 import { PortalError } from './portal.js';
 import { memberState, formatAgo } from './pages.js';
 import { describeStatus } from './watchdog.js';
+import { formatMsk, formatRub } from './shop.js';
 
 // Команды бота админа (только из чата админа; остальные видят client.js). Отвечают простым текстом. В ответах — только коды участников:
 // ни меток устройств, ни адресов. Кто управляет чатом с ботом, может приглашать людей,
@@ -13,6 +14,10 @@ const LIST = [
   { command: 'relink', description: 'Новая ссылка участнику: /relink КОД' },
   { command: 'backup', description: 'Бэкап сейчас' },
   { command: 'reboot', description: 'Перезагрузить сервер' },
+  { command: 'shop', description: 'Продажи: состояние, места, выручка' },
+  { command: 'orders', description: 'Заказы, ждущие оплаты' },
+  { command: 'grant', description: 'Заказ оплачен: /grant НОМЕР' },
+  { command: 'gift', description: 'Добавить дни покупателю: /gift КОД ДНИ' },
   { command: 'client', description: 'Меню, которое видят покупатели' },
   { command: 'help', description: 'Что умеет бот' }
 ];
@@ -24,14 +29,21 @@ const HELP = `Команды:
 /relink КОД — новое приглашение участнику, который потерял ссылку
 /backup — бэкап сейчас (файл придёт сюда)
 /reboot — перезагрузить сервер (с подтверждением)
-/client — меню бота, которое видят все, кроме вас
+
+Продажи (тарифы и цены — в админке портала, «Продажи»):
+/shop — открыта ли продажа, места, выручка за 30 дней
+/orders — заказы, ждущие оплаты
+/grant НОМЕР — заказ оплачен: выдать или продлить доступ
+/cancel НОМЕР — отменить заказ
+/gift КОД ДНИ — добавить дни покупателю
+/client — меню бота, которое видят все, кроме вас (заказы из него настоящие)
 
 Остальное — в админке портала.`;
 
 // Подтверждение перезагрузки действует минуту: случайное нажатие на старое сообщение её не вызовет
 const REBOOT_CONFIRM_MS = 60 * 1000;
 
-function createBotCommands({ portal, config, watchdog = null, heartbeat = null, backup = null, reboot = null, now = () => Date.now() }) {
+function createBotCommands({ portal, config, watchdog = null, heartbeat = null, backup = null, reboot = null, shop = null, now = () => Date.now() }) {
   const inviteUrl = (token) => `${config.publicUrl}/i/${token}`;
   let rebootAskedAt = null;
 
@@ -85,7 +97,8 @@ function createBotCommands({ portal, config, watchdog = null, heartbeat = null, 
     return list
       .map((m) => {
         const devices = m.role === 'admin' ? m.devices.length : `${m.devices.length}/${m.device_limit}`;
-        return `${m.code}${m.role === 'admin' ? ' · админ' : ''} · ${memberState(m)} · устройств ${devices}`;
+        const role = m.role === 'admin' ? ' · админ' : m.role === 'client' ? ` · покупатель до ${formatMsk(m.paid_until)}` : '';
+        return `${m.code}${role} · ${memberState(m)} · устройств ${devices}`;
       })
       .join('\n');
   }
@@ -104,8 +117,52 @@ function createBotCommands({ portal, config, watchdog = null, heartbeat = null, 
     return `🔗 Новое приглашение для ${member.code}. Прежняя личная ссылка больше не работает, ключи на устройствах остаются. Приглашение действует 3 дня:\n\n${inviteUrl(inviteToken)}`;
   }
 
+  function shopStatus() {
+    const state = shop.status();
+    const lines = [state.openNow ? '🛒 Продажа открыта' : `🛒 Продажа закрыта${state.whyClosed ? `: ${state.whyClosed}` : ''}`];
+    lines.push(`Места: занято ${state.seats.used} из ${state.seats.total}, свободно ${state.seats.free}`);
+    lines.push(`Покупателей: ${state.clients.length}, ждут оплаты: ${state.pending.length}`);
+    lines.push(`За 30 дней: ${state.month.orders} оплат на ${formatRub(state.month.sum)}`);
+    lines.push(`Пробный период: ${state.trial.enabled ? `${state.trial.days} дн., ${state.trial.devices} устр.` : 'выключен'}`);
+    lines.push('', 'Тарифы и цены — в админке портала, раздел «Продажи».');
+    return lines.join('\n');
+  }
+
+  function orders() {
+    const { pending } = shop.status();
+    if (!pending.length) return 'Неоплаченных заказов нет.';
+    return pending
+      .map((o) => `№${o.id} · ${shop.describeOrder(o)} · ${formatMsk(o.created_at)}`)
+      .join('\n') + '\n\nОплачен: /grant НОМЕР, отменить: /cancel НОМЕР';
+  }
+
+  const orderNumber = (value) => (/^\d{1,9}$/.test(value ?? '') ? Number(value) : null);
+
+  async function grant(args) {
+    const id = orderNumber(args[0]);
+    if (!id) return 'Укажите номер заказа: /grant 12. Номера — в /orders.';
+    const { member } = await shop.grantOrder(id);
+    return `✅ Заказ №${id}: доступ ${member.code} до ${formatMsk(member.paid_until)}. Покупателю отправлено сообщение.`;
+  }
+
+  function cancel(args) {
+    const id = orderNumber(args[0]);
+    if (!id) return 'Укажите номер заказа: /cancel 12. Номера — в /orders.';
+    shop.cancelOrder(id);
+    return `🚫 Заказ №${id} отменён.`;
+  }
+
+  async function gift(args) {
+    if (!args[0] || !args[1]) return 'Укажите код покупателя и число дней: /gift K7M2 7. Коды — в /members.';
+    const member = await shop.gift(args[0].toUpperCase(), args[1]);
+    return `🎁 ${member.code}: доступ до ${formatMsk(member.paid_until)}.`;
+  }
+
+  const SHOP_COMMANDS = { '/shop': shopStatus, '/orders': orders, '/grant': grant, '/cancel': cancel, '/gift': gift };
+
   async function run(command, args) {
     try {
+      if (SHOP_COMMANDS[command]) return shop ? await SHOP_COMMANDS[command](args) : '🛒 Продажи не подключены';
       switch (command) {
         case '/status':
           return await status();
