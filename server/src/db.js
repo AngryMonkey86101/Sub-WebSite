@@ -77,6 +77,8 @@ const ADDED_COLUMNS = [
   // покупатель из бота: его чат Telegram (чтобы доставить ссылку и напоминания) и конец срока
   ['members', 'telegram_chat', 'TEXT'],
   ['members', 'paid_until', 'INTEGER'],
+  // какие напоминания о конце срока уже отправлены: 0 — никаких, 3 — «за 3 дня», 1 — «за 1 день»
+  ['members', 'reminder_sent', 'INTEGER NOT NULL DEFAULT 0'],
   // платёж ЮKassa по заказу: номер, ссылка на оплату; payment_open = 1, пока ЮKassa может
   // сообщить об оплате (даже если заказ уже отменён у нас — тогда он оживает и выполняется)
   ['orders', 'payment_id', 'TEXT'],
