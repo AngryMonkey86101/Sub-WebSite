@@ -21,6 +21,8 @@ services:
       TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID:-}
       DUCKDNS_TOKEN: ${DUCKDNS_TOKEN:-}
       BACKUP_AGE_RECIPIENT: ${BACKUP_AGE_RECIPIENT:-}
+      YOOKASSA_SHOP_ID: ${YOOKASSA_SHOP_ID:-}
+      YOOKASSA_SECRET_KEY: ${YOOKASSA_SECRET_KEY:-}
       # только чтобы попасть в бэкап настроек (backup.js): портал их не использует
       SERVER_ID: ${SERVER_ID:-}
       AMNEZIA_API_VERSION: ${AMNEZIA_API_VERSION:-2.0.0}

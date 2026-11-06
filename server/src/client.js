@@ -77,6 +77,7 @@ function createClientBot({ config, shop, now = () => Date.now() }) {
     }
     if (pending) {
       lines.push('', `🧾 Ждёт оплаты заказ №${pending.id}: ${shop.describeOrder(pending)}.`);
+      if (pending.payment_url) rows.push([{ text: `💳 Оплатить заказ №${pending.id}`, url: pending.payment_url }]);
       rows.push([{ text: `Отменить заказ №${pending.id}`, action: `cancel:${pending.id}` }]);
     }
     if (shop.isOpen()) rows.push([{ text: member ? '🛒 Продлить' : '🛒 Купить', action: 'buy' }]);
@@ -121,14 +122,24 @@ function createClientBot({ config, shop, now = () => Date.now() }) {
     };
   }
 
-  function order(chat, key, devices, price) {
+  async function order(chat, key, devices, price) {
     const found = shop.isOpen() ? shop.priceOf(key, devices) : null;
     // цену поменяли, пока покупатель смотрел старый экран
     if (!found || found.price !== price) {
       const screen = confirm(chat, key, devices);
       return { ...screen, text: `Цена изменилась.\n\n${screen.text}` };
     }
-    const { order: created, payInfo } = shop.createOrder(chat, key, devices);
+    const { order: created, payInfo, paymentUrl } = await shop.createOrder(chat, key, devices);
+    if (paymentUrl) {
+      return {
+        text: [
+          `🧾 Заказ №${created.id}: ${shop.describeOrder(created)}.`,
+          '',
+          'Оплата — на странице ЮKassa, кнопка ниже. Как только платёж пройдёт, бот сам пришлёт ссылку на личный кабинет — обычно за минуту.'
+        ].join('\n'),
+        buttons: [[{ text: `💳 Оплатить ${formatRub(created.amount)}`, url: paymentUrl }], [{ text: 'Отменить заказ', action: `cancel:${created.id}` }], BACK]
+      };
+    }
     return {
       text: [
         `🧾 Заказ №${created.id}: ${shop.describeOrder(created)}.`,

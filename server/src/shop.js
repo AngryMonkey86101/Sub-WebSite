@@ -8,9 +8,12 @@ import { HOUR, DAY } from './config.js';
 // Тарифы и всё остальное админ меняет в админке портала («Продажи»), они хранятся в settings
 // под ключом shop. Срок — «N месяцев» или «N дней», цена — за 1–4 устройства.
 //
-// Этап 2 — без платёжной системы: покупатель оформляет заказ, переводит деньги, как написано
-// в «Как оплатить», админ видит перевод и подтверждает заказ (/grant в боте или кнопка
-// в админке). ЮKassa подтверждать будет сама (этап 4).
+// Оплата:
+// - с ЮKassa (YOOKASSA_* в .env) — заказ сразу получает платёж и кнопку «Оплатить». Об оплате
+//   портал узнаёт сам: HTTP-уведомление ЮKassa (/yookassa/notify) и опрос платежей раз в минуту.
+//   В обоих случаях платёж перепроверяется запросом к API. Оплачен — доступ выдаётся без админа;
+// - без ЮKassa — покупатель переводит деньги, как написано в «Как оплатить», админ подтверждает
+//   заказ (/grant в боте или кнопка в админке).
 //
 // Покупатель — участник с ролью client: код, чат Telegram (без имени и username), срок
 // и лимит устройств. Чат в заказе нужен, пока заказ не закрыт, потом стирается.
@@ -21,6 +24,10 @@ const MAX_PERIODS = 8;
 const PAY_INFO_MAX = 300;
 // Неоплаченный заказ отменяется сам
 const ORDER_TTL = 3 * DAY;
+// Платёж ЮKassa: первый час проверяется каждую минуту, потом раз в 10 минут, через 7 дней — бросаем
+const POLL_FAST = HOUR;
+const POLL_SLOW = 10 * 60 * 1000;
+const PAYMENT_GIVE_UP = 7 * DAY;
 const MSK = 3 * HOUR;
 
 const DEFAULTS = {
@@ -120,7 +127,8 @@ function parseSettingsForm(form) {
 }
 
 // deliver(chat, screen) — сообщение покупателю (telegram.js); inviteUrl(token) — ссылка на кабинет
-function createShop({ db, config, portal, notify = () => {}, deliver = async () => {}, now = () => Date.now(), log = console }) {
+// yookassa — клиент API (yookassa.js) или null; returnUrl() — куда ЮKassa вернёт покупателя
+function createShop({ db, config, portal, yookassa = null, returnUrl = () => config.publicUrl, notify = () => {}, deliver = async () => {}, now = () => Date.now(), log = console }) {
   const q = {
     get: db.prepare("SELECT value FROM settings WHERE key = 'shop'"),
     set: db.prepare("INSERT INTO settings (key, value) VALUES ('shop', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value"),
@@ -130,7 +138,14 @@ function createShop({ db, config, portal, notify = () => {}, deliver = async () 
     pendingOf: db.prepare("SELECT * FROM orders WHERE chat = ? AND status = 'pending' ORDER BY id DESC"),
     pending: db.prepare("SELECT * FROM orders WHERE status = 'pending' ORDER BY id"),
     recent: db.prepare("SELECT o.*, m.code FROM orders o LEFT JOIN members m ON m.id = o.member_id WHERE o.status != 'pending' ORDER BY o.id DESC LIMIT ?"),
-    closeOrder: db.prepare("UPDATE orders SET status = ?, method = ?, paid_at = ?, member_id = COALESCE(?, member_id), chat = NULL WHERE id = ? AND status = 'pending'"),
+    // оплачен: из ожидания или отменённый у нас, но оплаченный в ЮKassa
+    payOrder: db.prepare("UPDATE orders SET status = 'paid', method = ?, paid_at = ?, member_id = ?, chat = NULL, payment_open = 0 WHERE id = ? AND status IN ('pending', 'cancelled')"),
+    // отменён: номер чата остаётся, только пока ЮKassa ещё может сообщить об оплате
+    cancel: db.prepare("UPDATE orders SET status = 'cancelled', paid_at = ?, chat = CASE WHEN payment_open = 1 THEN chat ELSE NULL END WHERE id = ? AND status = 'pending'"),
+    setPayment: db.prepare('UPDATE orders SET payment_id = ?, payment_url = ?, payment_open = 1 WHERE id = ?'),
+    closePayment: db.prepare("UPDATE orders SET payment_open = 0, chat = CASE WHEN status = 'pending' THEN chat ELSE NULL END WHERE id = ?"),
+    byPayment: db.prepare('SELECT * FROM orders WHERE payment_id = ? AND payment_open = 1'),
+    openPayments: db.prepare('SELECT * FROM orders WHERE payment_open = 1 ORDER BY id'),
     stale: db.prepare("SELECT * FROM orders WHERE status = 'pending' AND created_at <= ?"),
     revenue: db.prepare("SELECT COUNT(*) AS n, COALESCE(SUM(amount), 0) AS sum FROM orders WHERE status = 'paid' AND kind = 'paid' AND paid_at > ?"),
     seatsUsed: db.prepare("SELECT COALESCE(SUM(device_limit), 0) AS n FROM members WHERE role = 'client' AND paid_until > ? AND id != ?"),
@@ -166,7 +181,7 @@ function createShop({ db, config, portal, notify = () => {}, deliver = async () 
 
   function whyClosed(value = settings()) {
     if (!value.periods.some((p) => p.prices.some((price) => price !== null))) return 'не задано ни одной цены';
-    if (!value.payInfo) return 'не заполнено «Как оплатить»';
+    if (!value.payInfo && !yookassa) return 'не заполнено «Как оплатить»';
     return null;
   }
 
@@ -196,7 +211,7 @@ function createShop({ db, config, portal, notify = () => {}, deliver = async () 
 
   function saveSettings(form) {
     const value = { ...settings(), ...parseSettingsForm(form) };
-    if (!value.payInfo) value.open = false;
+    if (!value.payInfo && !yookassa) value.open = false;
     save(value);
     event('shop_settings');
   }
@@ -229,20 +244,40 @@ function createShop({ db, config, portal, notify = () => {}, deliver = async () 
   const describeOrder = (order) => `${periodLabel(parsePeriodKey(order.period))}, ${devicesLabel(order.devices)} — ${formatRub(order.amount)}`;
 
   // Заказ покупателя. Прежний неоплаченный заказ этого чата отменяется: висит не больше одного.
-  function createOrder(chat, key, devices) {
+  // С ЮKassa у заказа сразу есть платёж: { order, paymentUrl }; без неё — { order, payInfo }.
+  async function createOrder(chat, key, devices) {
     if (!isOpen()) throw new PortalError(409, 'Продажа сейчас закрыта');
     const found = priceOf(key, devices);
     if (!found) throw new PortalError(409, 'Такого тарифа больше нет');
     const member = memberOf(chat);
     if (seatsFree(member?.id ?? 0) < devices) throw new PortalError(409, 'Свободных мест на сервере сейчас нет');
     const order = transaction(db, () => {
-      for (const old of q.pendingOf.all(String(chat))) q.closeOrder.run('cancelled', null, now(), null, old.id);
+      for (const old of q.pendingOf.all(String(chat))) q.cancel.run(now(), old.id);
       const id = Number(q.insertOrder.run(member?.id ?? null, String(chat), key, devices, found.price, now()).lastInsertRowid);
       return q.order.get(id);
     });
     event('order_created', member?.code ?? null, `№${order.id}: ${describeOrder(order)}`);
-    notify(`🧾 Заказ №${order.id}: ${describeOrder(order)}, ${member ? `продление ${member.code}` : 'новый покупатель'}.\nПосле оплаты: /grant ${order.id}, отменить: /cancel ${order.id}`);
-    return { order, payInfo: settings().payInfo };
+    const who = member ? `продление ${member.code}` : 'новый покупатель';
+    if (!yookassa) {
+      notify(`🧾 Заказ №${order.id}: ${describeOrder(order)}, ${who}.\nПосле оплаты: /grant ${order.id}, отменить: /cancel ${order.id}`);
+      return { order, payInfo: settings().payInfo };
+    }
+    let payment;
+    try {
+      payment = await yookassa.createPayment({
+        orderId: order.id,
+        amount: order.amount,
+        description: `Доступ на ${periodLabel(parsePeriodKey(order.period))}, ${devicesLabel(order.devices)}, заказ №${order.id}`,
+        returnUrl: returnUrl()
+      });
+    } catch (err) {
+      q.cancel.run(now(), order.id);
+      event('payment_failed', null, `№${order.id}: ${err.message}`);
+      notify(`⚠️ Заказ №${order.id}: ЮKassa не создала платёж — ${err.message}`);
+      throw new PortalError(502, 'Оплата сейчас недоступна. Попробуйте через несколько минут.');
+    }
+    q.setPayment.run(payment.id, payment.url, order.id);
+    return { order: q.order.get(order.id), paymentUrl: payment.url };
   }
 
   const pendingOrder = (chat) => q.pendingOf.get(String(chat)) ?? null;
@@ -252,7 +287,7 @@ function createShop({ db, config, portal, notify = () => {}, deliver = async () 
     if (!order || order.status !== 'pending' || (chat !== null && order.chat !== String(chat))) {
       throw new PortalError(404, `Неоплаченного заказа №${orderId} нет`);
     }
-    q.closeOrder.run('cancelled', null, now(), null, order.id);
+    q.cancel.run(now(), order.id);
     event('order_cancelled', null, `№${order.id}: ${by}`);
     if (by === 'покупатель') notify(`🚫 Заказ №${order.id} отменён покупателем`);
     return order;
@@ -300,19 +335,21 @@ function createShop({ db, config, portal, notify = () => {}, deliver = async () 
     }
   }
 
-  // Заказ оплачен: админ подтвердил перевод (этап 2) или ЮKassa (этап 4)
+  // Заказ оплачен: админ подтвердил перевод (method 'manual') или ЮKassa ('yookassa').
+  // Оплату ЮKassa принимаем и по отменённому у нас заказу: деньги уже списаны.
   async function grantOrder(orderId, method = 'manual') {
     const order = q.order.get(orderId);
-    if (!order || order.status !== 'pending') throw new PortalError(404, `Неоплаченного заказа №${orderId} нет`);
+    const payable = order && (order.status === 'pending' || (method === 'yookassa' && order.status === 'cancelled' && order.chat));
+    if (!payable) throw new PortalError(404, `Неоплаченного заказа №${orderId} нет`);
     const period = parsePeriodKey(order.period);
     const result = transaction(db, () => {
       const granted = extendOrCreate({ chat: order.chat, period, devices: order.devices });
-      if (q.closeOrder.run('paid', method, now(), granted.member.id, order.id).changes === 0) throw new PortalError(409, `Заказ №${order.id} уже закрыт`);
+      if (q.payOrder.run(method, now(), granted.member.id, order.id).changes === 0) throw new PortalError(409, `Заказ №${order.id} уже закрыт`);
       return granted;
     });
     await resumeIfPaused(result);
     event('order_paid', result.member.code, `№${order.id}: ${describeOrder(order)}`);
-    notify(`✅ Заказ №${order.id} оплачен: ${result.member.code}, до ${formatMsk(result.member.paid_until)}`);
+    notify(`✅ Заказ №${order.id} оплачен${method === 'yookassa' ? ' через ЮKassa' : ''}: ${result.member.code}, ${describeOrder(order)}, до ${formatMsk(result.member.paid_until)}`);
     await tell(order.chat, accessScreen(result, result.inviteToken ? '✅ Оплата получена, спасибо!' : '✅ Оплата получена, доступ продлён.'));
     return { order, member: result.member };
   }
@@ -355,10 +392,81 @@ function createShop({ db, config, portal, notify = () => {}, deliver = async () 
     return inviteUrl(portal.relinkMember(member.id).inviteToken);
   }
 
+  // Платёж ЮKassa: узнать состояние у API и довести заказ до конца
+  async function checkPayment(order) {
+    const payment = await yookassa.getPayment(order.payment_id);
+    if (payment.orderId !== String(order.id)) {
+      q.closePayment.run(order.id);
+      notify(`⚠️ Платёж ${order.payment_id} не от заказа №${order.id} — проверьте в ЮKassa`);
+      return 'mismatch';
+    }
+    if (payment.status === 'succeeded' && payment.paid) {
+      if (payment.amount?.value !== `${order.amount}.00` || payment.amount?.currency !== 'RUB') {
+        q.closePayment.run(order.id);
+        event('payment_mismatch', null, `№${order.id}: ${payment.amount?.value} ${payment.amount?.currency}`);
+        notify(`⚠️ Заказ №${order.id}: оплачено ${payment.amount?.value} ${payment.amount?.currency} вместо ${order.amount}.00 RUB. Доступ не выдан — разберитесь в ЮKassa, выдать вручную: /gift`);
+        return 'mismatch';
+      }
+      await grantOrder(order.id, 'yookassa');
+      return 'paid';
+    }
+    if (payment.status === 'canceled') {
+      const wasPending = order.status === 'pending';
+      if (wasPending) q.cancel.run(now(), order.id);
+      q.closePayment.run(order.id);
+      if (wasPending) {
+        event('order_cancelled', null, `№${order.id}: оплата не прошла (${payment.cancelReason ?? 'отменена'})`);
+        await tell(order.chat, {
+          text: `Оплата заказа №${order.id} не прошла или время на оплату вышло. Деньги не списаны. Оформите заказ заново.`,
+          buttons: [[{ text: '🛒 Купить', action: 'buy' }]]
+        });
+      }
+      return 'canceled';
+    }
+    return payment.status;
+  }
+
+  const lastCheck = new Map();
+  let polling = false;
+
+  // Раз в минуту (index.js): открытые платежи ЮKassa — на случай, если уведомление не дошло
+  async function poll() {
+    if (!yookassa || polling) return;
+    polling = true;
+    try {
+      for (const order of q.openPayments.all()) {
+        const age = now() - order.created_at;
+        if (age > PAYMENT_GIVE_UP) {
+          q.closePayment.run(order.id);
+          continue;
+        }
+        if (now() - (lastCheck.get(order.id) ?? 0) < (age < POLL_FAST ? 0 : POLL_SLOW)) continue;
+        lastCheck.set(order.id, now());
+        try {
+          await checkPayment(order);
+        } catch (err) {
+          log.error(`Платёж заказа №${order.id} не проверен:`, err.message);
+        }
+      }
+      for (const id of lastCheck.keys()) if (!q.byPayment.get(q.order.get(id)?.payment_id ?? '')) lastCheck.delete(id);
+    } finally {
+      polling = false;
+    }
+  }
+
+  // HTTP-уведомление ЮKassa: только номер платежа, остальное — запросом к API
+  async function paymentNotice(paymentId) {
+    if (!yookassa || typeof paymentId !== 'string') return 'ignored';
+    const order = q.byPayment.get(paymentId);
+    if (!order) return 'ignored';
+    lastCheck.set(order.id, now());
+    return checkPayment(order);
+  }
+
   // Раз в 10 минут (index.js): срок кончился — ключи на паузу; брошенные заказы — отменить
   async function sweep() {
     for (const order of q.stale.all(now() - ORDER_TTL)) {
-      q.closeOrder.run('cancelled', null, now(), null, order.id);
+      q.cancel.run(now(), order.id);
       event('order_cancelled', null, `№${order.id}: не оплачен за 3 дня`);
     }
     for (const member of q.expired.all(now())) {
@@ -378,6 +486,7 @@ function createShop({ db, config, portal, notify = () => {}, deliver = async () 
 
   function status() {
     const value = settings();
+    const payments = yookassa ? { provider: 'yookassa', test: config.yookassa?.test ?? false, notifyUrl: `${config.publicUrl}/yookassa/notify` } : { provider: 'manual' };
     const month = q.revenue.get(now() - 30 * DAY);
     return {
       ...value,
@@ -387,7 +496,8 @@ function createShop({ db, config, portal, notify = () => {}, deliver = async () 
       pending: q.pending.all(),
       recent: q.recent.all(20),
       clients: q.clients.all(),
-      month: { orders: month.n, sum: month.sum }
+      month: { orders: month.n, sum: month.sum },
+      payments
     };
   }
 
@@ -410,6 +520,8 @@ function createShop({ db, config, portal, notify = () => {}, deliver = async () 
     gift,
     relink,
     memberOf,
+    poll,
+    paymentNotice,
     sweep,
     status,
     describeOrder

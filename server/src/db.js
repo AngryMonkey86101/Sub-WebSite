@@ -76,7 +76,12 @@ const ADDED_COLUMNS = [
   ['devices', 'label', 'TEXT'],
   // покупатель из бота: его чат Telegram (чтобы доставить ссылку и напоминания) и конец срока
   ['members', 'telegram_chat', 'TEXT'],
-  ['members', 'paid_until', 'INTEGER']
+  ['members', 'paid_until', 'INTEGER'],
+  // платёж ЮKassa по заказу: номер, ссылка на оплату; payment_open = 1, пока ЮKassa может
+  // сообщить об оплате (даже если заказ уже отменён у нас — тогда он оживает и выполняется)
+  ['orders', 'payment_id', 'TEXT'],
+  ['orders', 'payment_url', 'TEXT'],
+  ['orders', 'payment_open', 'INTEGER NOT NULL DEFAULT 0']
 ];
 
 function openDatabase(path) {
@@ -90,6 +95,7 @@ function openDatabase(path) {
     if (!exists) db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${type}`);
   }
   db.exec('CREATE UNIQUE INDEX IF NOT EXISTS members_chat ON members(telegram_chat) WHERE telegram_chat IS NOT NULL');
+  db.exec('CREATE INDEX IF NOT EXISTS orders_payment ON orders(payment_id) WHERE payment_id IS NOT NULL');
   return db;
 }
 

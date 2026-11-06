@@ -309,7 +309,9 @@ const EVENT_LABELS = {
   order_cancelled: 'заказ отменён',
   trial_started: 'пробный доступ',
   gift: 'добавлены дни',
-  access_expired: 'срок доступа закончился'
+  access_expired: 'срок доступа закончился',
+  payment_failed: 'ЮKassa не создала платёж',
+  payment_mismatch: 'платёж ЮKassa не сходится с заказом'
 };
 
 function memberState(member) {
@@ -564,7 +566,18 @@ const orderLine = (order) => {
 };
 
 const ORDER_STATUS = { paid: 'оплачен', cancelled: 'отменён' };
-const ORDER_METHOD = { manual: 'подтверждён вручную', trial: 'пробный период' };
+
+// Как принимаются деньги: ЮKassa (с адресом для HTTP-уведомлений) или вручную
+function paymentsBlock(payments) {
+  if (payments.provider !== 'yookassa') {
+    return html`<p class="muted">Оплата: вручную — по «Как оплатить», заказ подтверждаете вы. Чтобы бот принимал оплату сам, подключите ЮKassa: README, «Оплата через ЮKassa».</p>`;
+  }
+  return html`
+      <p>💳 Оплата: <b>ЮKassa${payments.test ? ', тестовый магазин' : ''}</b>. Покупатель платит по кнопке в боте, доступ выдаётся сам, вам приходит «✅ Заказ … оплачен».</p>
+      ${payments.test ? html`<p class="warning">Тестовый магазин: настоящие деньги не списываются. Для продаж впишите в .env ключи боевого магазина.</p>` : ''}
+      <p class="muted">Адрес для HTTP-уведомлений (ЮKassa → Интеграция → HTTP-уведомления, события payment.succeeded и payment.canceled): <b>${payments.notifyUrl}</b>. Без уведомлений тоже работает — портал проверяет платежи сам раз в минуту, просто чуть медленнее.</p>`;
+}
+const ORDER_METHOD = { manual: 'подтверждён вручную', trial: 'пробный период', yookassa: 'оплачен через ЮKassa' };
 
 // Продажи: открыть или закрыть, тарифы и цены, пробный период, места, как оплатить, заказы
 function shopPage({ admin, shop, notice, nowMs }) {
@@ -584,13 +597,14 @@ function shopPage({ admin, shop, notice, nowMs }) {
       <form method="post" action="/admin/shop/close" data-confirm="Закрыть продажу? Новые заказы оформить будет нельзя, уже купленный доступ работает."><button type="submit">Закрыть продажу</button></form>`
         : html`<p>⚪ Продажа <b>закрыта</b>${shop.whyClosed ? html`: ${shop.whyClosed}` : ''}. Покупатели видят «Продажа сейчас закрыта», купленный доступ работает.</p>
       ${shop.whyClosed ? '' : html`<form method="post" action="/admin/shop/open"><button type="submit" class="primary">Открыть продажу</button></form>`}`}
+      ${paymentsBlock(shop.payments)}
       <p class="muted">Места: занято ${shop.seats.used} из ${shop.seats.total} (проданные устройства с действующим сроком; семья не считается). За 30 дней: ${shop.month.orders} оплат на ${formatRub(shop.month.sum)}.</p>
 
       <h2 id="orders">Ждут оплаты</h2>
       ${shop.pending.length
         ? html`<ul class="members">${shop.pending.map((order) => html`
         <li>
-          <div class="member-head"><b>${orderLine(order)}</b> <span class="muted">${formatMsk(order.created_at)}${order.member_id ? ' · продление' : ' · новый покупатель'}</span></div>
+          <div class="member-head"><b>${orderLine(order)}</b> <span class="muted">${formatMsk(order.created_at)}${order.member_id ? ' · продление' : ' · новый покупатель'}${order.payment_id ? ' · ждёт оплаты в ЮKassa, доступ выдастся сам' : ''}</span></div>
           <div class="actions">
             <form method="post" action="/admin/orders/${order.id}/grant" data-confirm="Деньги по заказу №${order.id} пришли? Покупатель получит доступ.">
               <button type="submit" class="primary">Оплачен — выдать доступ</button>
@@ -632,10 +646,12 @@ function shopPage({ admin, shop, notice, nowMs }) {
         <label>Мест на сервере (устройств на продажу)
           <input type="number" name="seats" min="1" max="10000" value="${shop.seats.total}">
         </label>
-        <label>Как оплатить — покупатель видит это после заказа
+        <label>Как оплатить — покупатель видит это после заказа${shop.payments.provider === 'yookassa' ? ' (с ЮKassa не нужно: покупатель платит по кнопке)' : ''}
           <textarea name="pay_info" rows="4" maxlength="${PAY_INFO_MAX}" placeholder="Например: перевод по СБП на номер +7…, банк …">${shop.payInfo}</textarea>
         </label>
-        <p class="muted">Номер заказа для комментария к переводу бот добавит сам. Пока ЮKassa не подключена, оплату подтверждаете вы: кнопкой выше или /grant НОМЕР в боте.</p>
+        ${shop.payments.provider === 'yookassa'
+          ? ''
+          : html`<p class="muted">Номер заказа для комментария к переводу бот добавит сам. Пока ЮKassa не подключена, оплату подтверждаете вы: кнопкой выше или /grant НОМЕР в боте.</p>`}
         <button type="submit" class="primary">Сохранить</button>
       </form>
 

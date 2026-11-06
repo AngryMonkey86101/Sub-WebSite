@@ -54,6 +54,13 @@ function loadConfig(env = process.env) {
     throw new ConfigError('DEFAULT_DEVICE_LIMIT: целое число от 1 до 20');
   }
 
+  // ЮKassa (shop.js, yookassa.js): оба ключа или ни одного
+  const shopId = env.YOOKASSA_SHOP_ID?.trim() || '';
+  const secretKey = env.YOOKASSA_SECRET_KEY?.trim() || '';
+  if (Boolean(shopId) !== Boolean(secretKey)) throw new ConfigError('ЮKassa: нужны оба ключа — YOOKASSA_SHOP_ID и YOOKASSA_SECRET_KEY');
+  if (shopId && !/^\d{1,12}$/.test(shopId)) throw new ConfigError('YOOKASSA_SHOP_ID: номер магазина — только цифры (ЮKassa → Интеграция → Ключи API)');
+  if (secretKey && !/^(live|test)_[A-Za-z0-9_-]{10,200}$/.test(secretKey)) throw new ConfigError('YOOKASSA_SECRET_KEY: секретный ключ начинается с live_ или test_');
+
   return {
     port: Number(env.PORT) || 8080,
     dbPath: env.DB_PATH || './data/portal.sqlite',
@@ -77,7 +84,9 @@ function loadConfig(env = process.env) {
     // Сторож IP: обновляет записи DuckDNS при смене IP сервера (watchdog.js)
     duckdns: env.DUCKDNS_TOKEN?.trim() ? { token: env.DUCKDNS_TOKEN.trim() } : null,
     // Бэкап: открытый ключ age админа (backup.js). Пусто — бэкап не делается
-    backup: { recipient: env.BACKUP_AGE_RECIPIENT?.trim() || null }
+    backup: { recipient: env.BACKUP_AGE_RECIPIENT?.trim() || null },
+    // Оплата через ЮKassa. Пусто — заказы подтверждает админ вручную
+    yookassa: shopId ? { shopId, secretKey, test: secretKey.startsWith('test_') } : null
   };
 }
 

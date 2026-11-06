@@ -86,6 +86,23 @@ function createRateLimiter(now) {
   };
 }
 
+// Тело запроса до limit байт
+function readBody(req, limit) {
+  return new Promise((resolve, reject) => {
+    let size = 0;
+    const chunks = [];
+    req.on('data', (chunk) => {
+      size += chunk.length;
+      if (size <= limit) chunks.push(chunk);
+    });
+    req.on('end', () => {
+      if (size > limit) return reject(new PortalError(413, 'Слишком большой запрос'));
+      resolve(Buffer.concat(chunks).toString('utf8'));
+    });
+    req.on('error', reject);
+  });
+}
+
 // Тело формы (application/x-www-form-urlencoded) до 4 КБ
 function readForm(req) {
   return new Promise((resolve, reject) => {
@@ -160,6 +177,25 @@ function createApp({
     } catch (err) {
       return { statuses: null, foreign: null, statusError: err.message };
     }
+  }
+
+  // HTTP-уведомление ЮKassa. Приходит не со страницы портала, поэтому без проверки Origin.
+  // Телу не верим: из него берётся только номер платежа, состояние портал спрашивает у API сам.
+  // Отвечаем сразу 200 — иначе ЮKassa будет повторять уведомление; проверка идёт в фоне.
+  async function yookassaNotice(req, client) {
+    limit(`yookassa:${client}`, 120, MINUTE);
+    let id = null;
+    try {
+      const body = JSON.parse(await readBody(req, 16 * 1024));
+      if (body?.type === 'notification' && typeof body.object?.id === 'string') id = body.object.id;
+    } catch (err) {
+      if (err instanceof PortalError) throw err;
+      id = null;
+    }
+    if (id && shop) {
+      shop.paymentNotice(id).catch((err) => console.error('Уведомление ЮKassa не обработано:', err?.message));
+    }
+    return { status: 200, json: { ok: true } };
   }
 
   const routes = [
@@ -441,6 +477,7 @@ function createApp({
       const row = portal.memberByToken(sessionToken);
       // токен входа нужен странице для ярлыка: манифест ведёт на личную ссылку
       member = row ? { ...row, token: sessionToken } : null;
+      if (req.method === 'POST' && path === '/yookassa/notify') return send(await yookassaNotice(req, client));
       for (const [method, pattern, handler] of routes) {
         const match = pattern.exec(path);
         if (!match || method !== req.method) continue;

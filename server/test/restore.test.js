@@ -124,7 +124,7 @@ function prepare(name, { publicKey = SERVER_KEY } = {}) {
   const recipient = keyText.match(/public key: (age1\w+)/)[1];
   const secret = keyText.match(/AGE-SECRET-KEY-1\w+/)[0];
   const sqlite = randomBytes(4096);
-  const env = 'PORTAL_HOST=m2pr7x.duckdns.org\nVPN_HOST=k4tq9v.duckdns.org\nKEY_ENCRYPTION_KEY=kek\nSERVER_ID=srv-uuid\nTELEGRAM_BOT_TOKEN=7000000001:bot\nDUCKDNS_TOKEN=duck\nDOCKER_GID=\nDOCKER_API_VERSION=\n';
+  const env = 'PORTAL_HOST=m2pr7x.duckdns.org\nVPN_HOST=k4tq9v.duckdns.org\nKEY_ENCRYPTION_KEY=kek\nSERVER_ID=srv-uuid\nTELEGRAM_BOT_TOKEN=7000000001:bot\nDUCKDNS_TOKEN=duck\nYOOKASSA_SHOP_ID=123456\nYOOKASSA_SECRET_KEY=live_secret\nDOCKER_GID=\nDOCKER_API_VERSION=\n';
   const archive = gzipSync(createTar([
     { name: 'README.txt', data: 'бэкап' },
     { name: 'env', data: env },
@@ -285,6 +285,8 @@ test('restore.sh --drill: учения — бот и сторож выключе
   const env = readFileSync(join(t.app, '.env'), 'utf8');
   assert.match(env, /^TELEGRAM_BOT_TOKEN=$/m);
   assert.match(env, /^DUCKDNS_TOKEN=$/m);
+  assert.match(env, /^YOOKASSA_SHOP_ID=$/m);
+  assert.match(env, /^YOOKASSA_SECRET_KEY=$/m, 'на учениях оплаты не принимаются');
   assert.match(env, /^KEY_ENCRYPTION_KEY=kek$/m);
   assert.ok(indexOf(res.calls, /src\/cli\.js restore-vpn$/) >= 0, 'ключи сервера восстанавливаются и на учениях');
   assert.equal(indexOf(res.calls, /src\/cli\.js duckdns/), -1);
