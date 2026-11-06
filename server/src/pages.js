@@ -1,4 +1,5 @@
 import { PROTOCOLS, PLATFORMS } from './config.js';
+import { formatMsk, formatRub, periodLabel, parsePeriodKey, devicesLabel, DEVICE_OPTIONS, MAX_PERIODS, PAY_INFO_MAX } from './shop.js';
 
 // HTML-страницы портала. Всё, что подставляется в разметку, экранируется; сырой HTML —
 // только из других шаблонов этого файла. Внешних шрифтов, CDN и счётчиков нет: браузер
@@ -64,7 +65,7 @@ function deviceStatus(device, peer, nowMs) {
   return device.protocol === 'xray' ? '' : 'ещё не подключался';
 }
 
-// section — раздел для навигации админа: 'cabinet' или 'admin'
+// section — раздел для навигации админа: 'cabinet', 'admin' или 'shop'
 function layout({ title, member, body, section }) {
   const current = (name) => (section === name ? 'page' : 'false');
   return html`<!doctype html>
@@ -90,7 +91,8 @@ ${member?.token ? html`<link rel="manifest" href="/manifest.webmanifest?t=${memb
     <span>Участник <b>${member.code}</b></span>
     ${member.role === 'admin'
       ? html`<a href="/" aria-current="${current('cabinet')}">Мои устройства</a>
-    <a href="/admin" aria-current="${current('admin')}">Админка</a>`
+    <a href="/admin" aria-current="${current('admin')}">Админка</a>
+    <a href="/admin/shop" aria-current="${current('shop')}">Продажи</a>`
       : ''}
   </nav>`
     : ''}
@@ -297,10 +299,25 @@ const EVENT_LABELS = {
   ip_changed: 'IP сервера сменился, DuckDNS обновлён',
   backup_failed: 'бэкап не сделан',
   reboot_requested: 'перезагрузка сервера по команде',
-  duckdns_updated: 'DuckDNS направлен на этот сервер'
+  duckdns_updated: 'DuckDNS направлен на этот сервер',
+  shop_opened: 'продажа открыта',
+  shop_closed: 'продажа закрыта',
+  shop_catalog: 'изменены тарифы',
+  shop_settings: 'изменены настройки продаж',
+  order_created: 'новый заказ',
+  order_paid: 'заказ оплачен',
+  order_cancelled: 'заказ отменён',
+  trial_started: 'пробный доступ',
+  gift: 'добавлены дни',
+  access_expired: 'срок доступа закончился',
+  payment_failed: 'ЮKassa не создала платёж',
+  payment_mismatch: 'платёж ЮKassa не сходится с заказом'
 };
 
 function memberState(member) {
+  if (member.role === 'client' && member.paid_until) {
+    return `${member.status === 'paused' ? 'срок закончился' : 'покупатель'} до ${formatMsk(member.paid_until)}${member.hasAccess ? '' : ', кабинет не открыт'}`;
+  }
   if (member.status === 'invited') {
     return member.inviteExpiresAt ? `приглашение до ${formatDate(member.inviteExpiresAt)}` : 'приглашение истекло';
   }
@@ -543,6 +560,116 @@ function rebootPage({ admin }) {
   });
 }
 
+const orderLine = (order) => {
+  const period = parsePeriodKey(order.period);
+  return html`№${order.id} · ${periodLabel(period)}, ${devicesLabel(order.devices)} · ${order.kind === 'trial' ? 'пробный' : formatRub(order.amount)}`;
+};
+
+const ORDER_STATUS = { paid: 'оплачен', cancelled: 'отменён' };
+
+// Как принимаются деньги: ЮKassa (с адресом для HTTP-уведомлений) или вручную
+function paymentsBlock(payments) {
+  if (payments.provider !== 'yookassa') {
+    return html`<p class="muted">Оплата: вручную — по «Как оплатить», заказ подтверждаете вы. Чтобы бот принимал оплату сам, подключите ЮKassa: README, «Оплата через ЮKassa».</p>`;
+  }
+  return html`
+      <p>💳 Оплата: <b>ЮKassa${payments.test ? ', тестовый магазин' : ''}</b>. Покупатель платит по кнопке в боте, доступ выдаётся сам, вам приходит «✅ Заказ … оплачен».</p>
+      ${payments.test ? html`<p class="warning">Тестовый магазин: настоящие деньги не списываются. Для продаж впишите в .env ключи боевого магазина.</p>` : ''}
+      <p class="muted">Адрес для HTTP-уведомлений (ЮKassa → Интеграция → HTTP-уведомления, события payment.succeeded и payment.canceled): <b>${payments.notifyUrl}</b>. Без уведомлений тоже работает — портал проверяет платежи сам раз в минуту, просто чуть медленнее.</p>`;
+}
+const ORDER_METHOD = { manual: 'подтверждён вручную', trial: 'пробный период', yookassa: 'оплачен через ЮKassa' };
+
+// Продажи: открыть или закрыть, тарифы и цены, пробный период, места, как оплатить, заказы
+function shopPage({ admin, shop, notice, nowMs }) {
+  const rows = [...shop.periods];
+  while (rows.length < Math.min(MAX_PERIODS, shop.periods.length + 2)) rows.push({ count: '', unit: 'month', prices: [null, null, null, null] });
+  const saved = notice?.saved ? html`<p class="notice">Сохранено.</p>` : '';
+  return layout({
+    title: 'Продажи',
+    member: admin,
+    section: 'shop',
+    body: html`
+      <h1>Продажи</h1>
+      ${saved}
+      <h2 id="state">Состояние</h2>
+      ${shop.openNow
+        ? html`<p>🟢 Продажа <b>открыта</b>: покупатели видят в боте «Купить».</p>
+      <form method="post" action="/admin/shop/close" data-confirm="Закрыть продажу? Новые заказы оформить будет нельзя, уже купленный доступ работает."><button type="submit">Закрыть продажу</button></form>`
+        : html`<p>⚪ Продажа <b>закрыта</b>${shop.whyClosed ? html`: ${shop.whyClosed}` : ''}. Покупатели видят «Продажа сейчас закрыта», купленный доступ работает.</p>
+      ${shop.whyClosed ? '' : html`<form method="post" action="/admin/shop/open"><button type="submit" class="primary">Открыть продажу</button></form>`}`}
+      ${paymentsBlock(shop.payments)}
+      <p class="muted">Места: занято ${shop.seats.used} из ${shop.seats.total} (проданные устройства с действующим сроком; семья не считается). За 30 дней: ${shop.month.orders} оплат на ${formatRub(shop.month.sum)}.</p>
+
+      <h2 id="orders">Ждут оплаты</h2>
+      ${shop.pending.length
+        ? html`<ul class="members">${shop.pending.map((order) => html`
+        <li>
+          <div class="member-head"><b>${orderLine(order)}</b> <span class="muted">${formatMsk(order.created_at)}${order.member_id ? ' · продление' : ' · новый покупатель'}${order.payment_id ? ' · ждёт оплаты в ЮKassa, доступ выдастся сам' : ''}</span></div>
+          <div class="actions">
+            <form method="post" action="/admin/orders/${order.id}/grant" data-confirm="Деньги по заказу №${order.id} пришли? Покупатель получит доступ.">
+              <button type="submit" class="primary">Оплачен — выдать доступ</button>
+            </form>
+            <form method="post" action="/admin/orders/${order.id}/cancel" data-confirm="Отменить заказ №${order.id}?">
+              <button type="submit" class="danger">Отменить</button>
+            </form>
+          </div>
+        </li>`)}</ul>`
+        : html`<p class="muted">Неоплаченных заказов нет.</p>`}
+
+      <h2 id="catalog">Тарифы и цены</h2>
+      <p class="muted">Цена в рублях за весь срок. Пустая цена — такой вариант не продаётся. Чтобы убрать срок, очистите в карточке срок и все цены. Новый срок — в пустой карточке внизу. При продлении срок прибавляется к текущему.</p>
+      <form method="post" action="/admin/shop/catalog" class="stack">
+        ${rows.map((period, i) => html`
+        <fieldset class="tariff">
+          <legend>${period.count ? periodLabel(period) : 'Новый срок'}</legend>
+          <div class="tariff-period">
+            <label>Срок <input type="number" name="count_${i}" min="1" max="365" value="${period.count}"></label>
+            <select name="unit_${i}" aria-label="Единица срока">
+              <option value="month"${period.unit === 'month' ? html` selected` : ''}>месяцев</option>
+              <option value="day"${period.unit === 'day' ? html` selected` : ''}>дней</option>
+            </select>
+          </div>
+          <div class="tariff-prices">${DEVICE_OPTIONS.map((n) => html`
+            <label>${devicesLabel(n)}, ₽ <input type="number" name="price_${i}_${n}" min="1" max="1000000" inputmode="numeric" value="${period.prices[n - 1] ?? ''}"></label>`)}
+          </div>
+        </fieldset>`)}
+        <button type="submit" class="primary">Сохранить тарифы</button>
+      </form>
+
+      <h2 id="settings">Пробный период, места, оплата</h2>
+      <form method="post" action="/admin/shop/settings" class="stack">
+        <label class="check"><input type="checkbox" name="trial_enabled" value="1"${shop.trial.enabled ? html` checked` : ''}> Пробный период — один раз на аккаунт Telegram</label>
+        <div class="inline">
+          <label>Дней <input type="number" name="trial_days" min="1" max="30" value="${shop.trial.days}"></label>
+          <label>Устройств <input type="number" name="trial_devices" min="1" max="4" value="${shop.trial.devices}"></label>
+        </div>
+        <label>Мест на сервере (устройств на продажу)
+          <input type="number" name="seats" min="1" max="10000" value="${shop.seats.total}">
+        </label>
+        <label>Как оплатить — покупатель видит это после заказа${shop.payments.provider === 'yookassa' ? ' (с ЮKassa не нужно: покупатель платит по кнопке)' : ''}
+          <textarea name="pay_info" rows="4" maxlength="${PAY_INFO_MAX}" placeholder="Например: перевод по СБП на номер +7…, банк …">${shop.payInfo}</textarea>
+        </label>
+        ${shop.payments.provider === 'yookassa'
+          ? ''
+          : html`<p class="muted">Номер заказа для комментария к переводу бот добавит сам. Пока ЮKassa не подключена, оплату подтверждаете вы: кнопкой выше или /grant НОМЕР в боте.</p>`}
+        <button type="submit" class="primary">Сохранить</button>
+      </form>
+
+      <h2 id="clients">Покупатели</h2>
+      ${shop.clients.length
+        ? html`<ul class="devices compact">${shop.clients.map((m) => html`
+        <li><b>${m.code}</b> · ${devicesLabel(m.device_limit)} <span class="status">${m.paid_until > nowMs && m.status !== 'paused' ? `до ${formatMsk(m.paid_until)}` : `закончился ${formatMsk(m.paid_until)}`}</span></li>`)}</ul>
+      <p class="muted">Пауза, лимит и удаление — в админке, раздел «Участники». Добавить дни — /gift КОД ДНИ в боте.</p>`
+        : html`<p class="muted">Покупателей пока нет.</p>`}
+
+      <h2 id="history">Последние заказы</h2>
+      ${shop.recent.length
+        ? html`<ul class="events">${shop.recent.map((order) => html`
+        <li><span class="muted">${formatMsk(order.paid_at ?? order.created_at)}</span> ${orderLine(order)} · ${order.status === 'paid' ? ORDER_METHOD[order.method] ?? ORDER_STATUS.paid : ORDER_STATUS[order.status] ?? order.status}${order.code ? html` · <b>${order.code}</b>` : ''}</li>`)}</ul>`
+        : html`<p class="muted">Заказов ещё не было.</p>`}`
+  });
+}
+
 function errorPage({ status, message, member }) {
   return layout({
     title: 'Ошибка',
@@ -568,6 +695,7 @@ export {
   inviteCreatedPage,
   telegramLinkPage,
   rebootPage,
+  shopPage,
   errorPage,
   memberState
 };

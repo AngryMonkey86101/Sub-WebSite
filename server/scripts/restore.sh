@@ -198,9 +198,11 @@ sed -e "s|^DOCKER_GID=.*|DOCKER_GID=$(stat -c '%g' "$DOCKER_SOCK")|" \
     "$WORK/env" > "$APP/.env"
 chmod 600 "$APP/.env"
 if [ "$DRILL" -eq 1 ]; then
-  # учения: без бота и сторожа — иначе этот сервер спорил бы с рабочим за бота и имена DuckDNS
-  sed -i -e 's|^TELEGRAM_BOT_TOKEN=.*|TELEGRAM_BOT_TOKEN=|' -e 's|^DUCKDNS_TOKEN=.*|DUCKDNS_TOKEN=|' "$APP/.env"
-  ok "Учения: бот Telegram и сторож DuckDNS на этом сервере выключены"
+  # учения: без бота, сторожа и ЮKassa — иначе этот сервер спорил бы с рабочим за бота и имена
+  # DuckDNS и сам выдавал бы доступ по оплатам
+  sed -i -e 's|^TELEGRAM_BOT_TOKEN=.*|TELEGRAM_BOT_TOKEN=|' -e 's|^DUCKDNS_TOKEN=.*|DUCKDNS_TOKEN=|' \
+    -e 's|^YOOKASSA_SHOP_ID=.*|YOOKASSA_SHOP_ID=|' -e 's|^YOOKASSA_SECRET_KEY=.*|YOOKASSA_SECRET_KEY=|' "$APP/.env"
+  ok "Учения: бот Telegram, сторож DuckDNS и ЮKassa на этом сервере выключены"
 fi
 chown -R "$DEPLOY_USER:$DEPLOY_USER" "$APP" "$DEPLOY_HOME/sub-website"
 compose build portal

@@ -53,6 +53,7 @@ function createTelegram({ settings, db, fetch = globalThis.fetch, now = () => Da
       unlink: off,
       sendTest: off,
       sendDocument: off,
+      deliver: async () => {},
       fetchMe: off,
       handleUpdate: async () => {},
       start: () => {},
@@ -297,9 +298,9 @@ function createTelegram({ settings, db, fetch = globalThis.fetch, now = () => Da
       return;
     }
 
-    if (!isAdmin) return show(chat, handlers.client.command(command));
-    // админ смотрит клиентское меню глазами покупателя
-    if (command === '/client') return show(chat, handlers.client.command('/start'));
+    if (!isAdmin) return show(chat, await handlers.client.command(command, chat));
+    // админ смотрит клиентское меню глазами покупателя; заказы и пробный период из него настоящие
+    if (command === '/client') return show(chat, await handlers.client.command('/start', chat));
     await send(chat, await handlers.admin.run(command, args));
   }
 
@@ -318,7 +319,7 @@ function createTelegram({ settings, db, fetch = globalThis.fetch, now = () => Da
     // без ответа кнопка «крутится» несколько секунд
     await call('answerCallbackQuery', { callback_query_id: query.id }).catch(() => {});
     if (!query.data.startsWith(CLIENT_PREFIX)) return;
-    await show(chat, handlers.client.action(query.data.slice(CLIENT_PREFIX.length)), message.message_id);
+    await show(chat, await handlers.client.action(query.data.slice(CLIENT_PREFIX.length), chat), message.message_id);
   }
 
   // Длинный опрос: Telegram держит запрос до 50 секунд и отвечает сразу, как придёт сообщение.
@@ -385,6 +386,8 @@ function createTelegram({ settings, db, fetch = globalThis.fetch, now = () => Da
     unlink,
     sendTest,
     sendDocument,
+    // экран покупателю (shop.js): ссылка на кабинет, конец срока
+    deliver: (chat, screen) => show(String(chat), screen),
     fetchMe,
     handleUpdate,
     start,

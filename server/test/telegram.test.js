@@ -10,6 +10,7 @@ import { createPortal, PortalError } from '../src/portal.js';
 import { createTelegram } from '../src/telegram.js';
 import { createBotCommands } from '../src/bot.js';
 import { createClientBot } from '../src/client.js';
+import { createShop } from '../src/shop.js';
 import { createApp } from '../src/app.js';
 import { startFakeAmnezia } from './fakeAmnezia.js';
 
@@ -123,7 +124,8 @@ function setup({ chatId = null } = {}) {
   const telegram = createTelegram({ settings: { token: TOKEN, chatId }, db, fetch: tg.fetch, now, log });
   const portal = createPortal({ db, config, amnezia, notify: telegram.notify, now });
   const commands = createBotCommands({ portal, config });
-  const handlers = { admin: commands, client: createClientBot({ config }) };
+  const shop = createShop({ db, config, portal, notify: telegram.notify, deliver: telegram.deliver, now, log });
+  const handlers = { admin: commands, client: createClientBot({ config, shop, now }) };
   const say = (chat, text, type) => telegram.handleUpdate(message(chat, text, type), handlers);
   const press = (chat, data, messageId, type) => telegram.handleUpdate(button(chat, data, messageId, type), handlers);
   async function link(chat) {
@@ -151,7 +153,7 @@ test('Telegram: чат админа подключается одноразов�
 
   // посторонние: команд админа не выполняют, видят клиентское меню
   await say(999, '/status');
-  assert.match(tg.last(), /Здесь можно купить доступ/);
+  assert.match(tg.last(), /Это бот VPN/);
   assert.ok(!tg.sent.some((m) => /Сервер VPN|Участников/.test(m.text)));
   await say(999, '/start wrong-code');
   assert.match(tg.last(), /недействительна или устарела/);
@@ -190,7 +192,7 @@ test('Telegram: чат админа подключается одноразов�
   assert.ok(tg.calls.some((c) => c.method === 'deleteMyCommands' && c.params.scope.chat_id === '42'), 'у прежнего чата — снова клиентское меню команд');
   await say(42, '/status');
   assert.ok(!tg.sent.some((m) => m.chat_id === '42' && /Сервер VPN/.test(m.text)), 'прежний чат больше не управляет');
-  assert.match(tg.last(), /Здесь можно купить доступ/);
+  assert.match(tg.last(), /Это бот VPN/);
 
   await telegram.unlink();
   assert.equal(telegram.chatId(), null);
@@ -270,7 +272,7 @@ test('Telegram: чат из .env — подключать не нужно, ко�
   await say(-100500, '/invite', 'supergroup');
   assert.equal(tg.sent.length, count, 'в группе команды мог бы отправить кто угодно');
   await say(42, '/invite');
-  assert.match(tg.last(), /Здесь можно купить доступ/, 'личный чат — клиентское меню');
+  assert.match(tg.last(), /Это бот VPN/, 'личный чат — клиентское меню');
   assert.equal(tg.sent.at(-1).chat_id, '42');
   db.close();
 });
@@ -324,15 +326,15 @@ test('Telegram: клиентское меню — кнопки, экраны, л
   await say(500, '/start');
   const menu = tg.sent.at(-1);
   assert.equal(menu.chat_id, '500');
-  assert.match(menu.text, /Здесь можно купить доступ на 1, 2 или 3 месяца для 1–4 устройств/);
+  assert.match(menu.text, /Продажа сейчас закрыта/, 'тарифов нет — продажа закрыта (продажи — shop.test.js)');
   const actions = menu.reply_markup.inline_keyboard.flat().map((b) => b.callback_data);
-  assert.deepEqual(actions, ['c:buy', 'c:keys', 'c:help']);
+  assert.deepEqual(actions, ['c:keys', 'c:help']);
 
   // кнопка правит то же сообщение и отвечает на нажатие
   await press(500, 'c:buy', 7);
   assert.equal(tg.edited.at(-1).message_id, 7);
   assert.equal(tg.edited.at(-1).chat_id, '500');
-  assert.match(tg.edited.at(-1).text, /Продажа скоро откроется/);
+  assert.match(tg.edited.at(-1).text, /Продажа сейчас закрыта/);
   assert.ok(tg.calls.some((c) => c.method === 'answerCallbackQuery' && c.params.callback_query_id === `q${updateId}`));
   // повторное нажатие того же экрана — не ошибка и не новое сообщение
   const sentBefore = tg.sent.length;
@@ -343,10 +345,10 @@ test('Telegram: клиентское меню — кнопки, экраны, л
   const download = tg.edited.at(-1).reply_markup.inline_keyboard.flat().find((b) => b.url);
   assert.equal(download.url, config.appDownloadUrl);
   await press(500, 'c:keys', 7);
-  assert.match(tg.edited.at(-1).text, /Ключей пока нет/);
+  assert.match(tg.edited.at(-1).text, /Доступа пока нет/);
   // неизвестная или устаревшая кнопка — меню
   await press(500, 'c:что-то-старое', 7);
-  assert.match(tg.edited.at(-1).text, /Здесь можно купить/);
+  assert.match(tg.edited.at(-1).text, /Это бот VPN/);
 
   // старое сообщение править нельзя — экран приходит новым сообщением
   tg.state.cannotEdit = true;
@@ -358,9 +360,9 @@ test('Telegram: клиентское меню — кнопки, экраны, л
   await say(500, '/help');
   assert.match(tg.last(), /Как подключиться/);
   await say(500, '/keys');
-  assert.match(tg.last(), /Ключей пока нет/);
+  assert.match(tg.last(), /Доступа пока нет/);
   await say(500, 'добрый день');
-  assert.match(tg.last(), /Здесь можно купить/);
+  assert.match(tg.last(), /Это бот VPN/);
 
   // кнопки в группах не работают
   const quietBefore = tg.calls.length;
@@ -369,7 +371,7 @@ test('Telegram: клиентское меню — кнопки, экраны, л
 
   // админ смотрит меню покупателя, кнопки работают и у него; команды админа — по-прежнему
   await say(42, '/client');
-  assert.match(tg.last(), /Здесь можно купить/);
+  assert.match(tg.last(), /Это бот VPN/);
   assert.equal(tg.sent.at(-1).chat_id, '42');
   await press(42, 'c:help', 9);
   assert.equal(tg.edited.at(-1).chat_id, '42');
