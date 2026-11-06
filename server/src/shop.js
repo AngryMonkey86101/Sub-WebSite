@@ -44,6 +44,13 @@ const DEFAULTS = {
   trial: { enabled: true, days: 1, devices: 1 },
   // через сколько дней после конца срока ключи удаляются, если доступ не продлили
   deleteAfterDays: 14,
+  // реклама в меню бота: строка текста и кнопка-ссылка в Telegram. Меняется во вкладке «Продажи»
+  promo: {
+    enabled: true,
+    text: '📝 Попробуйте и наше мини-приложение в Telegram — @spisokvmeste_bot',
+    button: '📝 Открыть @spisokvmeste_bot',
+    url: 'https://t.me/spisokvmeste_bot'
+  },
   seats: 100,
   payInfo: ''
 };
@@ -115,6 +122,22 @@ function parseCatalogForm(form) {
   }
   const days = (p) => (p.unit === 'day' ? p.count : p.count * 30);
   return periods.sort((a, b) => days(a) - days(b));
+}
+
+// Ссылка рекламы — только на Telegram: бот, канал или мини-приложение (t.me/бот/приложение, ?startapp=…)
+const PROMO_URL = /^https:\/\/t\.me\/[A-Za-z0-9_]{4,32}(\/[A-Za-z0-9_]{1,64})?(\?[A-Za-z0-9_=&-]{1,128})?$/;
+const CONTROL = /[\u0000-\u0009\u000b-\u001f\u007f]/;
+
+function parsePromoForm(form) {
+  const text = (form.get('promo_text') ?? '').replace(/\r\n/g, '\n').trim();
+  const button = (form.get('promo_button') ?? '').trim();
+  const url = (form.get('promo_url') ?? '').trim();
+  const enabled = form.get('promo_enabled') === '1';
+  if (text.length > 300 || CONTROL.test(text)) throw new PortalError(400, 'Текст рекламы — до 300 символов');
+  if (button.length > 40 || /[\u0000-\u001f\u007f]/.test(button)) throw new PortalError(400, 'Надпись на кнопке — до 40 символов, в одну строку');
+  if (url && !PROMO_URL.test(url)) throw new PortalError(400, 'Ссылка — на Telegram: https://t.me/имя_бота, можно с /приложение или ?startapp=…');
+  if (enabled && (!url || !button)) throw new PortalError(400, 'Для рекламы нужны ссылка и надпись на кнопке');
+  return { enabled, text, button, url };
 }
 
 function parseSettingsForm(form) {
@@ -193,7 +216,7 @@ function createShop({ db, config, portal, yookassa = null, returnUrl = () => con
     } catch {
       stored = {};
     }
-    return { ...DEFAULTS, ...stored, trial: { ...DEFAULTS.trial, ...stored.trial } };
+    return { ...DEFAULTS, ...stored, trial: { ...DEFAULTS.trial, ...stored.trial }, promo: { ...DEFAULTS.promo, ...stored.promo } };
   }
   const save = (value) => q.set.run(JSON.stringify(value));
 
@@ -239,6 +262,17 @@ function createShop({ db, config, portal, yookassa = null, returnUrl = () => con
     if (!value.payInfo && !yookassa) value.open = false;
     save(value);
     event('shop_settings');
+  }
+
+  function savePromo(form) {
+    save({ ...settings(), promo: parsePromoForm(form) });
+    event('promo_settings');
+  }
+
+  // Реклама для меню бота или null, если выключена
+  function promo() {
+    const value = settings().promo;
+    return value.enabled && value.url && value.button ? value : null;
   }
 
   // Свободные места: проданные устройства с действующим сроком. Семья в счёт не идёт.
@@ -675,6 +709,8 @@ function createShop({ db, config, portal, yookassa = null, returnUrl = () => con
     setOpen,
     saveCatalog,
     saveSettings,
+    savePromo,
+    promo,
     seats,
     seatsFree,
     priceOf,

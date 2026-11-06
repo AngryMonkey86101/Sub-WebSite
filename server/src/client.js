@@ -40,11 +40,14 @@ function createClientBot({ config, shop, now = () => Date.now() }) {
       { text: '🔑 Мой доступ', action: 'keys' },
       { text: '❓ Помощь', action: 'help' }
     ]);
+    // реклама — внизу меню, её видят все, кроме админа, и когда продажа закрыта
+    const ad = shop.promo();
+    if (ad) rows.push([{ text: ad.button, url: ad.url }]);
     const periods = shop.catalog();
     const offer = open && periods.length
       ? `Здесь можно купить доступ: ${periods.map((p) => p.label).join(', ')}, до ${devicesLabel(Math.max(...periods.flatMap((p) => DEVICE_OPTIONS.filter((n) => p.prices[n - 1] !== null))))}.`
       : 'Продажа сейчас закрыта. Загляните позже.';
-    return { text: `Здравствуйте! Это бот VPN на AmneziaVPN.\n\n${offer}`, buttons: rows };
+    return { text: `Здравствуйте! Это бот VPN на AmneziaVPN.\n\n${offer}${ad?.text ? `\n\n${ad.text}` : ''}`, buttons: rows };
   }
 
   function help() {

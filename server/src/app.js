@@ -354,7 +354,7 @@ function createApp({
       return page(200, shopPage({ admin, shop: shop.status(), notice: Object.fromEntries(new URL(req.url, config.publicUrl).searchParams), nowMs: now() }));
     }],
 
-    ['POST', /^\/admin\/shop\/(open|close|catalog|settings)$/, ({ member, params, form }) => {
+    ['POST', /^\/admin\/shop\/(open|close|catalog|settings|promo)$/, ({ member, params, form }) => {
       requireAdmin(member);
       if (!shop) throw new PortalError(404, 'Продажи не подключены');
       switch (params[0]) {
@@ -367,6 +367,9 @@ function createApp({
         case 'catalog':
           shop.saveCatalog(form);
           return redirect('/admin/shop?saved=1#catalog');
+        case 'promo':
+          shop.savePromo(form);
+          return redirect('/admin/shop?saved=1#promo');
         default:
           shop.saveSettings(form);
           return redirect('/admin/shop?saved=1#settings');
