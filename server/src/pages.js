@@ -314,7 +314,8 @@ const EVENT_LABELS = {
   access_deleted: 'ключи удалены: доступ не продлён',
   payment_failed: 'ЮKassa не создала платёж',
   payment_mismatch: 'платёж ЮKassa не сходится с заказом',
-  order_refunded: 'возврат денег'
+  order_refunded: 'возврат денег',
+  promo_settings: 'изменена реклама в боте'
 };
 
 function memberState(member) {
@@ -667,6 +668,22 @@ function shopPage({ admin, shop, notice, nowMs }) {
           ? ''
           : html`<p class="muted">Номер заказа для комментария к переводу бот добавит сам. Пока ЮKassa не подключена, оплату подтверждаете вы: кнопкой выше или /grant НОМЕР в боте.</p>`}
         <button type="submit" class="primary">Сохранить</button>
+      </form>
+
+      <h2 id="promo">Реклама в боте</h2>
+      <p class="muted">Строка текста и кнопка-ссылка внизу меню бота. Её видят все, кроме вас, — покупатели и семья, даже когда продажа закрыта. Посмотреть — /client в боте.</p>
+      <form method="post" action="/admin/shop/promo" class="stack">
+        <label class="check"><input type="checkbox" name="promo_enabled" value="1"${shop.promo.enabled ? html` checked` : ''}> Показывать рекламу</label>
+        <label>Текст под меню (можно оставить пустым — тогда только кнопка)
+          <textarea name="promo_text" rows="3" maxlength="300">${shop.promo.text}</textarea>
+        </label>
+        <label>Надпись на кнопке
+          <input type="text" name="promo_button" maxlength="40" value="${shop.promo.button}">
+        </label>
+        <label>Ссылка — https://t.me/…
+          <input type="text" name="promo_url" maxlength="200" inputmode="url" value="${shop.promo.url}" placeholder="https://t.me/имя_бота">
+        </label>
+        <button type="submit" class="primary">Сохранить рекламу</button>
       </form>
 
       <h2 id="clients">Покупатели</h2>

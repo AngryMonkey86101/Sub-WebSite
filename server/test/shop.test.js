@@ -508,6 +508,11 @@ test('админка: раздел «Продажи» — тарифы, наст
     assert.match(page, /Перевод &lt;b&gt;СБП&lt;\/b&gt;/, 'текст экранируется');
     assert.match(page, /name="price_1_2" min="1" max="1000000" inputmode="numeric" value="500"/);
     assert.match(page, /name="delete_after" min="1" max="365" value="14"/);
+    assert.match(page, /Реклама в боте[\s\S]*name="promo_enabled" value="1" checked[\s\S]*name="promo_url"[^>]*value="https:\/\/t\.me\/spisokvmeste_bot"/);
+    const promoSaved = await post('/admin/shop/promo', { promo_enabled: '1', promo_text: '', promo_button: 'Списки', promo_url: 'https://t.me/spisokvmeste_bot' });
+    assert.equal(promoSaved.status, 303);
+    assert.equal(promoSaved.headers.get('location'), '/admin/shop?saved=1#promo');
+    assert.equal((await post('/admin/shop/promo', { promo_enabled: '1', promo_button: 'x', promo_url: 'http://t.me/x' })).status, 400);
 
     assert.equal((await post(`/admin/orders/${id}/grant`)).status, 303);
     assert.match(delivered.at(-1).text, /Оплата получена/);
@@ -528,3 +533,34 @@ test('админка: раздел «Продажи» — тарифы, наст
     db.close();
   }
 });
+
+test('реклама в боте: по умолчанию — @spisokvmeste_bot, меняется и выключается в админке', async () => {
+  const { db, shop, form, tap, buttons } = setup();
+  const menu = await tap('1400', 'menu');
+  assert.ok(buttons(menu).some((b) => b.url === 'https://t.me/spisokvmeste_bot' && b.text === '📝 Открыть @spisokvmeste_bot'));
+  assert.match(menu.text, /Продажа сейчас закрыта\. Загляните позже\.\n\n📝 Попробуйте и наше мини-приложение в Telegram — @spisokvmeste_bot$/, 'видна и при закрытой продаже');
+
+  const promo = (fields) => shop.savePromo(form({ promo_enabled: '1', promo_text: 'Списки покупок вместе', promo_button: '📝 Списки', promo_url: 'https://t.me/spisokvmeste_bot/app?startapp=vpn', ...fields }));
+  promo();
+  const changed = await tap('1400', 'menu');
+  assert.ok(buttons(changed).some((b) => b.url === 'https://t.me/spisokvmeste_bot/app?startapp=vpn' && b.text === '📝 Списки'));
+  assert.match(changed.text, /Списки покупок вместе$/);
+  promo({ promo_text: '' });
+  assert.ok(!/Списки покупок/.test((await tap('1400', 'menu')).text), 'без текста — только кнопка');
+  assert.ok(buttons(await tap('1400', 'menu')).some((b) => b.text === '📝 Списки'));
+
+  // только ссылки на Telegram и разумной длины
+  assert.throws(() => promo({ promo_url: 'https://evil.example/x' }), /Ссылка — на Telegram/);
+  assert.throws(() => promo({ promo_url: 'javascript:alert(1)' }), /Ссылка — на Telegram/);
+  assert.throws(() => promo({ promo_button: 'x'.repeat(41) }), /до 40 символов/);
+  assert.throws(() => promo({ promo_text: 'x'.repeat(301) }), /до 300 символов/);
+  assert.throws(() => promo({ promo_url: '' }), /нужны ссылка и надпись/);
+
+  shop.savePromo(form({ promo_text: 'Списки', promo_button: '📝 Списки', promo_url: 'https://t.me/spisokvmeste_bot' }));
+  const off = await tap('1400', 'menu');
+  assert.ok(!buttons(off).some((b) => b.url), 'выключена — ни кнопки, ни текста');
+  assert.ok(!/Списки/.test(off.text));
+  assert.equal(shop.settings().promo.button, '📝 Списки', 'выключенная реклама не стирается');
+  db.close();
+});
+

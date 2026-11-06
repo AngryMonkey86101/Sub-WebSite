@@ -327,8 +327,9 @@ test('Telegram: клиентское меню — кнопки, экраны, л
   const menu = tg.sent.at(-1);
   assert.equal(menu.chat_id, '500');
   assert.match(menu.text, /Продажа сейчас закрыта/, 'тарифов нет — продажа закрыта (продажи — shop.test.js)');
-  const actions = menu.reply_markup.inline_keyboard.flat().map((b) => b.callback_data);
-  assert.deepEqual(actions, ['c:keys', 'c:help']);
+  const actions = menu.reply_markup.inline_keyboard.flat().map((b) => b.callback_data ?? b.url);
+  assert.deepEqual(actions, ['c:keys', 'c:help', 'https://t.me/spisokvmeste_bot'], 'реклама — кнопкой-ссылкой внизу меню');
+  assert.match(menu.text, /мини-приложение в Telegram — @spisokvmeste_bot/);
 
   // кнопка правит то же сообщение и отвечает на нажатие
   await press(500, 'c:buy', 7);
