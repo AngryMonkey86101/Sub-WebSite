@@ -167,3 +167,5 @@ form.stack div.inline { display: flex; flex-wrap: wrap; gap: 12px; }
 form.stack div.inline input[type="number"] { width: 5em; }
 form.stack label.check { display: flex; gap: 8px; align-items: center; }
 form.stack textarea { font-family: inherit; font-size: 1rem; word-break: normal; }
+ul.events form.refund { margin: 4px 0 2px; }
+ul.events form.refund input[type="number"] { width: 6em; }

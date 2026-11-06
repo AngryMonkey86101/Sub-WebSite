@@ -18,6 +18,8 @@ const LIST = [
   { command: 'orders', description: 'Заказы, ждущие оплаты' },
   { command: 'grant', description: 'Заказ оплачен: /grant НОМЕР' },
   { command: 'gift', description: 'Добавить дни покупателю: /gift КОД ДНИ' },
+  { command: 'refund', description: 'Вернуть деньги: /refund НОМЕР [СУММА]' },
+  { command: 'sales', description: 'Отчёт о продажах: /sales [ДНЕЙ]' },
   { command: 'client', description: 'Меню, которое видят покупатели' },
   { command: 'help', description: 'Что умеет бот' }
 ];
@@ -36,6 +38,8 @@ const HELP = `Команды:
 /grant НОМЕР — заказ оплачен: выдать или продлить доступ
 /cancel НОМЕР — отменить заказ
 /gift КОД ДНИ — добавить дни покупателю
+/refund НОМЕР [СУММА] — вернуть деньги по заказу (с подтверждением)
+/sales [ДНЕЙ] — отчёт о продажах, по умолчанию за 30 дней
 /client — меню бота, которое видят все, кроме вас (заказы из него настоящие)
 
 Остальное — в админке портала.`;
@@ -46,6 +50,8 @@ const REBOOT_CONFIRM_MS = 60 * 1000;
 function createBotCommands({ portal, config, watchdog = null, heartbeat = null, backup = null, reboot = null, shop = null, now = () => Date.now() }) {
   const inviteUrl = (token) => `${config.publicUrl}/i/${token}`;
   let rebootAskedAt = null;
+  // возврат ждёт подтверждения минуту: { orderId, amount, at }
+  let refundAsked = null;
 
   function askReboot() {
     if (!reboot?.available()) return `⚠️ ${reboot?.NOT_SET_UP ?? 'Перезагрузка по команде не настроена'}`;
@@ -158,7 +164,60 @@ function createBotCommands({ portal, config, watchdog = null, heartbeat = null, 
     return `🎁 ${member.code}: доступ до ${formatMsk(member.paid_until)}.`;
   }
 
-  const SHOP_COMMANDS = { '/shop': shopStatus, '/orders': orders, '/grant': grant, '/cancel': cancel, '/gift': gift };
+  // Возврат денег — необратим, поэтому сначала показывается, что произойдёт
+  function askRefund(args) {
+    const id = orderNumber(args[0]);
+    if (!id) return 'Укажите номер заказа: /refund 12 — вернуть всё, /refund 12 200 — вернуть 200 ₽. Номера — в /sales и во вкладке «Продажи».';
+    const preview = shop.refundPreview(id, args[1] ?? null);
+    refundAsked = { orderId: id, amount: preview.amount, at: now() };
+    const { order } = preview;
+    const lines = [`Вернуть ${formatRub(preview.amount)} по заказу №${id} (${order.code ?? 'покупатель удалён'}, ${shop.describeOrder(order)})?`];
+    lines.push(preview.viaYooKassa ? 'Деньги вернёт ЮKassa — туда, откуда была оплата.' : 'Заказ оплачен вручную: деньги верните покупателю сами, бот только учтёт возврат.');
+    if (preview.newUntil !== null) {
+      lines.push(preview.newUntil <= now() ? 'Возврат полный: доступ закончится сразу, ключи встанут на паузу.' : `Возврат полный: срок уменьшится на ${preview.periodLabel} — до ${formatMsk(preview.newUntil)}.`);
+    } else if (!preview.full) {
+      lines.push('Возврат частичный: срок доступа не меняется.');
+    }
+    lines.push('', 'Подтвердить: /refund_confirm (в течение минуты)');
+    return lines.join('\n');
+  }
+
+  async function confirmRefund() {
+    const asked = refundAsked;
+    refundAsked = null;
+    if (!asked || now() - asked.at > REBOOT_CONFIRM_MS) return 'Подтверждение устарело. Сначала /refund НОМЕР.';
+    const result = await shop.refundOrder(asked.orderId, String(asked.amount));
+    const lines = [`💸 Заказ №${asked.orderId}: возвращено ${formatRub(result.amount)}${result.pending ? ' (ЮKassa ещё обрабатывает возврат)' : ''}. Покупателю отправлено сообщение.`];
+    if (result.newUntil !== null) lines.push(result.newUntil <= now() ? 'Доступ закончен, ключи на паузе.' : `Срок теперь до ${formatMsk(result.newUntil)}.`);
+    return lines.join('\n');
+  }
+
+  function sales(args) {
+    const days = args[0] ? Number(args[0]) : 30;
+    if (!Number.isInteger(days) || days < 1 || days > 3660) return 'Укажите число дней: /sales 7. Без числа — за 30 дней.';
+    const r = shop.salesReport(days);
+    const lines = [`📊 Продажи за ${days} дн.`];
+    lines.push(`Оплат: ${r.orders} на ${formatRub(r.gross)}${r.refunds.count ? `, возвратов: ${r.refunds.count} на ${formatRub(r.refunds.sum)}` : ''}`);
+    lines.push(`Итого: ${formatRub(r.net)}`);
+    if (r.orders) lines.push(`Новых покупателей: ${r.newClients}, продлений: ${r.orders - r.newClients}`);
+    if (r.orders) lines.push(`Через ЮKassa: ${r.byMethod.yookassa}, вручную: ${r.byMethod.manual}`);
+    if (r.byTariff.length) lines.push('', ...r.byTariff.map((t) => `${t.label}: ${t.count} шт., ${formatRub(t.sum)}`));
+    if (r.trials) lines.push('', `Пробный период: ${r.trials}, из них купили: ${r.trialsConverted}`);
+    lines.push('', `Сейчас: ${r.activeClients} покупателей с действующим сроком, мест занято ${r.seats.used} из ${r.seats.total}`);
+    lines.push(`${r.year.nearLimit ? '⚠️ ' : ''}Доход за ${r.year.year} год: ${formatRub(r.year.sum)} из ${formatRub(r.year.limit)} — лимит самозанятого`);
+    return lines.join('\n');
+  }
+
+  const SHOP_COMMANDS = {
+    '/shop': shopStatus,
+    '/orders': orders,
+    '/grant': grant,
+    '/cancel': cancel,
+    '/gift': gift,
+    '/refund': askRefund,
+    '/refund_confirm': confirmRefund,
+    '/sales': sales
+  };
 
   async function run(command, args) {
     try {

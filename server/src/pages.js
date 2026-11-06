@@ -313,7 +313,8 @@ const EVENT_LABELS = {
   reminder_sent: 'напоминание о конце срока',
   access_deleted: 'ключи удалены: доступ не продлён',
   payment_failed: 'ЮKassa не создала платёж',
-  payment_mismatch: 'платёж ЮKassa не сходится с заказом'
+  payment_mismatch: 'платёж ЮKassa не сходится с заказом',
+  order_refunded: 'возврат денег'
 };
 
 function memberState(member) {
@@ -585,7 +586,8 @@ const ORDER_METHOD = { manual: 'подтверждён вручную', trial: '
 function shopPage({ admin, shop, notice, nowMs }) {
   const rows = [...shop.periods];
   while (rows.length < Math.min(MAX_PERIODS, shop.periods.length + 2)) rows.push({ count: '', unit: 'month', prices: [null, null, null, null] });
-  const saved = notice?.saved ? html`<p class="notice">Сохранено.</p>` : '';
+  const saved = notice?.saved ? html`<p class="notice">Сохранено.</p>` : notice?.refunded ? html`<p class="notice">Возврат сделан, покупателю отправлено сообщение.</p>` : '';
+  const r = shop.report;
   return layout({
     title: 'Продажи',
     member: admin,
@@ -600,7 +602,13 @@ function shopPage({ admin, shop, notice, nowMs }) {
         : html`<p>⚪ Продажа <b>закрыта</b>${shop.whyClosed ? html`: ${shop.whyClosed}` : ''}. Покупатели видят «Продажа сейчас закрыта», купленный доступ работает.</p>
       ${shop.whyClosed ? '' : html`<form method="post" action="/admin/shop/open"><button type="submit" class="primary">Открыть продажу</button></form>`}`}
       ${paymentsBlock(shop.payments)}
-      <p class="muted">Места: занято ${shop.seats.used} из ${shop.seats.total} (проданные устройства с действующим сроком; семья не считается). За 30 дней: ${shop.month.orders} оплат на ${formatRub(shop.month.sum)}.</p>
+      <p class="muted">Места: занято ${shop.seats.used} из ${shop.seats.total} (проданные устройства с действующим сроком; семья не считается).</p>
+
+      <h2 id="report">Отчёт за 30 дней</h2>
+      <p>Оплат: <b>${r.orders}</b> на ${formatRub(r.gross)}${r.refunds.count ? html`, возвратов: ${r.refunds.count} на ${formatRub(r.refunds.sum)}` : ''}. Итого: <b>${formatRub(r.net)}</b>.</p>
+      ${r.orders ? html`<p class="muted">Новых покупателей: ${r.newClients}, продлений: ${r.orders - r.newClients}. Через ЮKassa: ${r.byMethod.yookassa}, вручную: ${r.byMethod.manual}.${r.trials ? ` Пробный период: ${r.trials}, из них купили: ${r.trialsConverted}.` : ''}</p>` : ''}
+      ${r.byTariff.length ? html`<ul class="devices compact">${r.byTariff.map((t) => html`<li>${t.label} <span class="status">${t.count} шт., ${formatRub(t.sum)}</span></li>`)}</ul>` : ''}
+      <p class="${r.year.nearLimit ? 'warning' : 'muted'}">Доход за ${r.year.year} год: ${formatRub(r.year.sum)} из ${formatRub(r.year.limit)} — лимит дохода самозанятого за год.${r.year.nearLimit ? ' Лимит почти исчерпан: при превышении статус самозанятого теряется.' : ''} Подробнее и за другой срок — /sales ДНЕЙ в боте.</p>
 
       <h2 id="orders">Ждут оплаты</h2>
       ${shop.pending.length
@@ -671,7 +679,15 @@ function shopPage({ admin, shop, notice, nowMs }) {
       <h2 id="history">Последние заказы</h2>
       ${shop.recent.length
         ? html`<ul class="events">${shop.recent.map((order) => html`
-        <li><span class="muted">${formatMsk(order.paid_at ?? order.created_at)}</span> ${orderLine(order)} · ${order.status === 'paid' ? ORDER_METHOD[order.method] ?? ORDER_STATUS.paid : ORDER_STATUS[order.status] ?? order.status}${order.code ? html` · <b>${order.code}</b>` : ''}</li>`)}</ul>`
+        <li>
+          <span class="muted">${formatMsk(order.paid_at ?? order.created_at)}</span> ${orderLine(order)} · ${order.status === 'paid' ? ORDER_METHOD[order.method] ?? ORDER_STATUS.paid : ORDER_STATUS[order.status] ?? order.status}${order.code ? html` · <b>${order.code}</b>` : ''}${order.refunded ? html` · <b>возвращено ${formatRub(order.refunded)}</b>` : ''}
+          ${order.status === 'paid' && order.kind === 'paid' && order.refunded < order.amount
+            ? html`<form method="post" action="/admin/orders/${order.id}/refund" class="inline refund" data-confirm="Вернуть деньги по заказу №${order.id}? Пустая сумма — всё, что ещё не вернули (${order.amount - order.refunded} ₽): срок покупателя уменьшится на срок заказа. Возврат не отменить.">
+            <input type="number" name="amount" min="1" max="${order.amount - order.refunded}" placeholder="${order.amount - order.refunded}" aria-label="Сумма возврата, ₽">
+            <button type="submit" class="danger">Вернуть деньги</button>
+          </form>`
+            : ''}
+        </li>`)}</ul>`
         : html`<p class="muted">Заказов ещё не было.</p>`}`
   });
 }
