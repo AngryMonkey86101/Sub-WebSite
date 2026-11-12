@@ -39,6 +39,8 @@ const ENV_KEYS = [
   'TELEGRAM_CHAT_ID',
   'DUCKDNS_TOKEN',
   'BACKUP_AGE_RECIPIENT',
+  'DISPATCHER_AGE_RECIPIENT',
+  'DISPATCHER_SSH_KEY',
   'YOOKASSA_SHOP_ID',
   'YOOKASSA_SECRET_KEY',
   'APP_DOWNLOAD_URL'
@@ -54,10 +56,12 @@ const kilobytes = (size) => `${Math.max(1, Math.round(size / 1024))} КБ`;
 const shortKey = (recipient) => `${recipient.slice(0, 10)}…${recipient.slice(-6)}`;
 
 // Шифрование программой age (пакет в образе портала). Её сообщения об ошибках не содержат данных.
-function encryptWithAge(recipient) {
+// Несколько получателей: расшифровать сможет любой из их закрытых ключей.
+function encryptWithAge(recipients) {
+  const args = [recipients].flat().flatMap((r) => ['-r', r]);
   return (data) =>
     new Promise((resolve, reject) => {
-      const child = spawn('age', ['-r', recipient], { stdio: ['pipe', 'pipe', 'pipe'] });
+      const child = spawn('age', args, { stdio: ['pipe', 'pipe', 'pipe'] });
       const out = [];
       const err = [];
       child.stdout.on('data', (chunk) => out.push(chunk));
@@ -76,11 +80,15 @@ function encryptWithAge(recipient) {
 
 function createBackup({ config, db, amnezia, telegram, notify, env = process.env, encrypt = null, now = () => Date.now(), log = console }) {
   const recipient = config.backup?.recipient ?? null;
+  // ключ диспетчера в РФ: он забирает бэкап каждый час и при блокировке переезжает сам
+  const dispatcher = config.backup?.dispatcher ?? null;
   const problem = recipient && !RECIPIENT.test(recipient)
     ? 'BACKUP_AGE_RECIPIENT не похож на открытый ключ age: нужна строка age1… из 62 символов'
-    : null;
+    : dispatcher && !RECIPIENT.test(dispatcher)
+      ? 'DISPATCHER_AGE_RECIPIENT не похож на открытый ключ age: нужна строка age1… из 62 символов'
+      : null;
   const configured = Boolean(recipient) && !problem;
-  const seal = encrypt ?? (configured ? encryptWithAge(recipient) : null);
+  const seal = encrypt ?? (configured ? encryptWithAge(dispatcher ? [recipient, dispatcher] : [recipient]) : null);
   let running = null;
 
   const q = {
@@ -152,7 +160,7 @@ portal.sqlite  база портала: участники, выданные к�
     return {
       data,
       filename: `family-vpn-${stamp(time)}.tar.gz.age`,
-      caption: `💾 Бэкап ${stamp(time)} ${clock(time)} UTC: участников ${q.members.get().n}, ключей на сервере ${keys}, ${kilobytes(data.length)}. Зашифрован ключом ${shortKey(recipient)}. Восстановление — server/README.md, «Восстановление из бэкапа».`
+      caption: `💾 Бэкап ${stamp(time)} ${clock(time)} UTC: участников ${q.members.get().n}, ключей на сервере ${keys}, ${kilobytes(data.length)}. Зашифрован ключом ${shortKey(recipient)}${dispatcher ? ` и ключом диспетчера ${shortKey(dispatcher)}` : ''}. Восстановление — server/README.md, «Восстановление из бэкапа».`
     };
   }
 
@@ -205,6 +213,7 @@ portal.sqlite  база портала: участники, выданные к�
       configured,
       problem,
       key: configured ? shortKey(recipient) : null,
+      dispatcherKey: configured && dispatcher ? shortKey(dispatcher) : null,
       lastAt,
       lastSize: Number(setting('backup_last_size')) || null,
       error: failedAt && failedAt > (lastAt ?? 0) ? setting('backup_error') : null

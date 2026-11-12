@@ -280,3 +280,67 @@ test('Telegram: файл бэкапа уходит формой с файлом,
   assert.equal(Buffer.from(await file.arrayBuffer()).toString(), 'зашифровано');
   db.close();
 });
+
+test('бэкап: второй ключ — диспетчера в РФ: расшифровать может и он, и админ', { skip: !HAS_AGE && 'нет программы age' }, async () => {
+  const dispatcherFile = join(dir, 'dispatcher.txt');
+  spawnSync('age-keygen', ['-o', dispatcherFile]);
+  const dispatcher = readFileSync(dispatcherFile, 'utf8').match(/public key: (age1\w+)/)[1];
+  const sshKey = 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl family-vpn-dispatcher';
+  const { db, sent, backup } = setup({ envExtra: { DISPATCHER_AGE_RECIPIENT: dispatcher, DISPATCHER_SSH_KEY: sshKey } });
+  assert.match(backup.status().dispatcherKey, /^age1/);
+  await backup.run();
+  const archive = sent.at(-1);
+  assert.match(archive.caption, /и ключом диспетчера age1/);
+  for (const identity of [identityFile, dispatcherFile]) {
+    const res = spawnSync('age', ['-d', '-i', identity], { input: archive.data });
+    assert.equal(res.status, 0, res.stderr.toString());
+    const env = readFileSync(join(unpack(res.stdout), 'env'), 'utf8');
+    assert.match(env, new RegExp(`^DISPATCHER_AGE_RECIPIENT=${dispatcher}$`, 'm'), 'ключ диспетчера переезжает вместе с .env');
+    assert.match(env, /^DISPATCHER_SSH_KEY=ssh-ed25519 AAAA\S+ family-vpn-dispatcher$/m);
+  }
+  db.close();
+
+  const broken = setup({ envExtra: { DISPATCHER_AGE_RECIPIENT: 'age1oops' } });
+  assert.equal(broken.backup.configured, false);
+  assert.match(broken.backup.status().problem, /DISPATCHER_AGE_RECIPIENT не похож/);
+  broken.db.close();
+});
+
+test('install-dispatcher-key.sh: ключ диспетчера — только команда бэкапа, прежняя строка заменяется', () => {
+  const script = new URL('../scripts/install-dispatcher-key.sh', import.meta.url).pathname;
+  const home = mkdtempSync(join(dir, 'deploy-'));
+  const app = join(home, 'family-vpn');
+  const scripts = join(app, 'scripts');
+  spawnSync('mkdir', ['-p', scripts]);
+  spawnSync('cp', [script, scripts]);
+  const auth = join(home, '.ssh', 'authorized_keys');
+  const run = (key) => {
+    writeFileSync(join(app, '.env'), `PORTAL_HOST=x\nDISPATCHER_SSH_KEY=${key}\n`);
+    return spawnSync('bash', [join(scripts, 'install-dispatcher-key.sh')], { env: { PATH: process.env.PATH, DEPLOY_USER: 'nobody-here' } });
+  };
+  spawnSync('mkdir', ['-p', join(home, '.ssh')]);
+  writeFileSync(auth, 'ssh-ed25519 AAAAadminkey admin@laptop\n');
+  const key1 = 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl';
+  const key2 = 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBx3qL2u5o3yK1J1uS1d0Q7oQm9sJ2bHq2t8m9r5Wq4z';
+  let res = run(`${key1} family-vpn-dispatcher`);
+  assert.equal(res.status, 0, res.stderr.toString());
+  let lines = readFileSync(auth, 'utf8').trim().split('\n');
+  assert.equal(lines[0], 'ssh-ed25519 AAAAadminkey admin@laptop', 'чужие ключи не трогаются');
+  assert.equal(lines[1], `command="cd ${app} && docker compose exec -T portal node --disable-warning=ExperimentalWarning src/cli.js backup --stdout",restrict ${key1} family-vpn-dispatcher`);
+  // новый ключ заменяет прежний, а не добавляется вторым
+  res = run(`"${key2} other-comment"`);
+  assert.equal(res.status, 0, res.stderr.toString());
+  lines = readFileSync(auth, 'utf8').trim().split('\n');
+  assert.equal(lines.length, 2);
+  assert.ok(lines[1].includes(key2) && !lines.join('\n').includes(key1));
+  // мусор вместо ключа — отказ, файл прежний
+  for (const bad of ['ssh-rsa AAAAB3Nza', 'ssh-ed25519 short', 'ssh-ed25519 AAAA";rm -rf ~']) {
+    res = run(bad);
+    assert.equal(res.status, 1);
+    assert.equal(readFileSync(auth, 'utf8').trim().split('\n').length, 2);
+  }
+  // пусто — доступ убран
+  res = run('');
+  assert.equal(res.status, 0);
+  assert.deepEqual(readFileSync(auth, 'utf8').trim().split('\n'), ['ssh-ed25519 AAAAadminkey admin@laptop']);
+});

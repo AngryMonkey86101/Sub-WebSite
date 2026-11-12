@@ -21,6 +21,9 @@ services:
       TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID:-}
       DUCKDNS_TOKEN: ${DUCKDNS_TOKEN:-}
       BACKUP_AGE_RECIPIENT: ${BACKUP_AGE_RECIPIENT:-}
+      DISPATCHER_AGE_RECIPIENT: ${DISPATCHER_AGE_RECIPIENT:-}
+      # только чтобы попасть в бэкап: на новом сервере restore.sh даст диспетчеру доступ к бэкапу
+      DISPATCHER_SSH_KEY: ${DISPATCHER_SSH_KEY:-}
       YOOKASSA_SHOP_ID: ${YOOKASSA_SHOP_ID:-}
       YOOKASSA_SECRET_KEY: ${YOOKASSA_SECRET_KEY:-}
       # только чтобы попасть в бэкап настроек (backup.js): портал их не использует
