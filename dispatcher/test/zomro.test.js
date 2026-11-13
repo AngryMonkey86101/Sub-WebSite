@@ -26,8 +26,21 @@ function billmanager(params, { sessions = true } = {}) {
   switch (func) {
     case 'whoami':
       return { doc: { user: { $id: '777', $level: '16', $: USER } } };
+    // как у настоящей Zomro: облачные VPS — func=instances (модуль Fleio), v2.instances нет
+    case 'instances':
+      return {
+        doc: {
+          elem: [
+            { id: v(7269056), name: v('Blitz Intel| NL-3 #7269056'), servername: v('vless-2'), instance_status: v('active'), ip: v('45.12.34.56'), cost: v('0.31 EUR / День'), period: v(-50), billhourly: v('on'), datacenter: v(17), datacentername: v('Netherlands-3 [Cloud]'), pricelist_id: v(7920), pricelist: v('Blitz Intel| NL-3'), os_distro: v('Ubuntu'), os_version: v('22.04 x64'), createdate: v('2026-11-12 19:27:08'), email: v('owner@mail.ru') },
+            { id: v(7232925), name: v('Starter AMD| NL-3 v.3 #7232925'), period: v(1), datacenter: v(17), pricelist_id: v(7864), ip: v('77.1.2.3') }
+          ]
+        }
+      };
+    case 'instances.edit':
+      return { doc: { elid: v(params.get('elid')), domain: v('vless-2'), password: v('root-Pa55'), ostempl: v('Ubuntu 22.04') } };
     case 'v2.instances':
-      return { doc: { elem: [{ id: v(101), name: v('family-vpn-1'), ip: v('185.12.34.56'), status: v(2), email: v('owner@mail.ru') }] } };
+    case 'v2.instances.order':
+      return { doc: { error: { $type: 'missing', msg: v(`Не удалось найти функцию '${func}'`) } } };
     case 'vds':
       return { doc: { error: { $type: 'access', msg: v('Нет доступа') } } };
     case 'dashboard.info':
@@ -35,22 +48,21 @@ function billmanager(params, { sessions = true } = {}) {
     case 'subaccount':
       return { doc: { elem: { id: v(1), balance: v('12.34'), currency: v('EUR') } } };
     // как у настоящей Zomro: без дата-центра тарифов нет
+    case 'instances.order':
+      return { doc: { slist: [{ $name: 'datacenter', val: [{ $key: '17', $: 'Netherlands-3 [Cloud]' }, { $key: '2', $: 'Германия' }] }] } };
+    case 'instances.order.pricelist':
     case 'v2.instances.order.pricelist':
-      if (!params.get('datacenter')) return { doc: {} };
-      return { doc: { elem: [{ id: v(55), name: v('Cloud-1'), price: v('0.17 EUR/день') }, { id: v(56), name: v('Cloud-2'), price: v('0.30 EUR/день') }] } };
-    case 'v2.instances.order':
-      return { doc: { slist: [{ $name: 'datacenter', val: [{ $key: '1', $: 'Нидерланды' }, { $key: '2', $: 'Германия' }] }] } };
+      if (params.get('datacenter') !== '17') return { doc: {} };
+      return { doc: { elem: [{ id: v(7920), name: v('Blitz Intel| NL-3'), price: v('0.31 EUR/день') }, { id: v(7864), name: v('Starter AMD| NL-3 v.3'), price: v('6.95 EUR/месяц') }] } };
     case 'vds.order.pricelist':
       return { doc: { error: { $type: 'value', msg: v('Нет доступных для заказа тарифных планов') } } };
-    case 'instances':
-      return { doc: { elem: [{ id: v(7232925), name: v('starter-amd-nl-3'), ip: v('185.12.34.56'), status: v(2) }] } };
-    case 'v2.instances.order.param':
+    case 'instances.order.param':
       return {
         doc: {
           pricelist: v(params.get('pricelist')),
           order_period: v(-50),
           slist: [
-            { $name: 'datacenter', val: [{ $key: '1', $: 'Нидерланды' }, { $key: '2', $: 'Германия' }] },
+            { $name: 'ostempl', val: [{ $key: 'ubuntu-24', $: 'Ubuntu 24.04' }] },
             { $name: 'order_period', val: [{ $key: '-50', $: 'Посуточно' }, { $key: '1', $: 'Месяц' }] }
           ]
         }
@@ -83,8 +95,8 @@ test('Zomro: вход — сессия вместо пароля в каждом
   assert.equal(zomro.base, 'https://api.zomro.com/');
   await zomro.login();
   assert.equal(zomro.hasSession(), true);
-  const items = await zomro.list('v2.instances');
-  assert.equal(items[0].ip, '185.12.34.56');
+  const items = await zomro.list('instances');
+  assert.equal(items[0].ip, '45.12.34.56');
   const after = calls.at(-1);
   assert.equal(after.get('auth'), SESSION);
   assert.equal(after.get('authinfo'), null, 'после входа пароль не уходит');
@@ -94,7 +106,7 @@ test('Zomro: вход — сессия вместо пароля в каждом
   const legacy = fakeFetch({ sessions: false });
   const plainAuth = createZomro({ settings: { user: USER, password: PASSWORD }, fetch: legacy.fetch });
   await assert.rejects(plainAuth.login(), (err) => err instanceof ZomroError && /Функция недоступна/.test(err.message));
-  assert.equal((await plainAuth.list('v2.instances.order.pricelist', { datacenter: '1' })).length, 2);
+  assert.equal((await plainAuth.list('instances.order.pricelist', { datacenter: '17' })).length, 2);
   assert.equal(legacy.calls.at(-1).get('authinfo'), `${USER}:${PASSWORD}`);
 });
 
@@ -140,16 +152,18 @@ test('шаг 0: скрипт проверки — только чтение, в 
     assert.equal(status, 0, out);
     assert.match(out, /Только чтение/);
     assert.match(out, /✓ Вход \(func=auth\)/);
-    assert.match(out, /✓ Услуги \(func=v2\.instances\)[\s\S]*"всего": 1/);
-    assert.match(out, /✗ Услуги \(func=vds\): Zomro: Нет доступа/);
-    assert.match(out, /"ip": "185\.x\.x\.x"/, 'IP укорочен');
-    assert.match(out, /✓ Услуги \(func=instances\)[\s\S]*starter-amd-nl-3/, 'перебор находит, где лежат серверы');
-    assert.match(out, /✓ Первый шаг заказа \(func=v2\.instances\.order\)[\s\S]*"datacenter": \[\s*"1=Нидерланды"/);
-    assert.match(out, /✓ Тарифы \(func=v2\.instances\.order\.pricelist, datacenter=1\)[\s\S]*Cloud-1/, 'тарифы — по дата-центрам');
-    assert.match(out, /Форма заказа \(func=v2\.instances\.order\.param, pricelist=55\) — без заказа/);
+    assert.match(out, /✓ Услуги \(func=instances\)[\s\S]*"servername": "vless-2"[\s\S]*"pricelist": "7920 Blitz Intel\| NL-3"/);
+    assert.match(out, /"ip": "45\.x\.x\.x"/, 'IP укорочен');
+    assert.match(out, /"billhourly": "on"/);
+    assert.match(out, /✓ Карточка сервера \(func=instances\.edit, elid=7269056\) — только просмотр[\s\S]*"password": "\[скрыто\]"/);
+    assert.ok(!out.includes('root-Pa55'), 'пароль сервера не выводится');
+    assert.ok(!out.includes('[телефон]'), 'даты и номера услуг — не «телефоны»');
+    assert.match(out, /✓ Первый шаг заказа \(func=instances\.order\)[\s\S]*"datacenter": \[\s*"17=Netherlands-3 \[Cloud\]"/);
+    assert.match(out, /✓ Тарифы \(func=instances\.order\.pricelist, datacenter=17\)[\s\S]*Blitz Intel/, 'тарифы — по дата-центрам');
+    assert.match(out, /Форма заказа \(func=instances\.order\.param, pricelist=7920\) — без заказа/);
     assert.match(out, /"order_period": \[\s*"-50=Посуточно"/);
-    const form = requests.find((p) => p.get('func') === 'v2.instances.order.param');
-    assert.equal(form.get('datacenter'), '1', 'форма — с дата-центром тарифа');
+    const form = requests.find((p) => p.get('func') === 'instances.order.param');
+    assert.equal(form.get('datacenter'), '17', 'форма — с дата-центром тарифа');
     // секреты и личное
     assert.ok(!out.includes(PASSWORD), 'пароль не выводится');
     assert.ok(!out.includes(SESSION), 'ключ сессии не выводится');
@@ -161,11 +175,11 @@ test('шаг 0: скрипт проверки — только чтение, в 
     assert.ok(requests.every((p) => !/delete|del$|stop|basket|finish|payment|prolong/.test(p.get('func'))));
 
     // точечный запрос — тоже только чтение
-    const call = await run({ ZOMRO_USER: USER, ZOMRO_PASSWORD: PASSWORD, ZOMRO_API_URL: url }, ['call', 'v2.instances.order.pricelist', 'datacenter=2', 'sok=ok']);
+    const call = await run({ ZOMRO_USER: USER, ZOMRO_PASSWORD: PASSWORD, ZOMRO_API_URL: url }, ['call', 'instances.order.pricelist', 'datacenter=17', 'sok=ok']);
     assert.equal(call.status, 0, call.out);
-    assert.match(call.out, /✓ func=v2\.instances\.order\.pricelist datacenter=2\n[\s\S]*"элементов": 2/);
+    assert.match(call.out, /✓ func=instances\.order\.pricelist datacenter=17\n[\s\S]*"элементов": 2/);
     assert.equal(requests.at(-1).get('sok'), null, 'sok из командной строки отбрасывается');
-    for (const unsafe of ['vds.delete', 'v2.instances.order.param', 'payment.add', 'vds.reboot']) {
+    for (const unsafe of ['instances.delete', 'instances.order.param', 'payment.add', 'instances.reboot']) {
       const refused = await run({ ZOMRO_USER: USER, ZOMRO_PASSWORD: PASSWORD, ZOMRO_API_URL: url }, ['call', unsafe]);
       assert.equal(refused.status, 2);
       assert.match(refused.out, /скрипт не вызывает/);
