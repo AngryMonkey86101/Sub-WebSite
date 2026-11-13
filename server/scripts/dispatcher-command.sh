@@ -10,7 +10,10 @@
 #             AmneziaWG и amnezia-api работают дальше: туннели семьи не рвутся, пока новый сервер
 #             не примет их. Повторный freeze отдаёт архив заново — на случай обрыва связи;
 #   unfreeze  откат: снова запустить портал и Caddy;
-#   status    frozen или active.
+#   status    frozen или active;
+#   notify    сообщение админу (текст — в stdin, до 4 КБ) через бота портала: из РФ Telegram
+#             недоступен, а отсюда — да. Ответ «sent», иначе — ошибка, и диспетчер оставит
+#             сообщение в своей очереди.
 #
 # Всё зашифровано ключами age из .env (BACKUP_AGE_RECIPIENT и DISPATCHER_AGE_RECIPIENT) —
 # программой age из образа портала: на самом сервере она не нужна.
@@ -70,7 +73,15 @@ case "$COMMAND" in
   status)
     if [ -f "$MARK" ]; then echo "frozen"; else echo "active"; fi
     ;;
+  notify)
+    # замороженный портал остановлен — тогда разовым контейнером; бот при этом не читается
+    if [ -f "$MARK" ]; then
+      head -c 4096 | compose run --rm --no-deps -T portal "${CLI[@]}" relay
+    else
+      head -c 4096 | compose exec -T portal "${CLI[@]}" relay
+    fi
+    ;;
   *)
-    die "Команда не разрешена: ${COMMAND:0:40}. Можно: backup, freeze, unfreeze, status"
+    die "Команда не разрешена: ${COMMAND:0:40}. Можно: backup, freeze, unfreeze, status, notify"
     ;;
 esac

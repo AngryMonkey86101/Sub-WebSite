@@ -47,6 +47,7 @@ function createTelegram({ settings, db, fetch = globalThis.fetch, now = () => Da
     return {
       configured: false,
       notify: async (text) => log.log('Уведомление:', text),
+      relay: off,
       info: () => ({ configured: false }),
       chatId: () => null,
       createLink: off,
@@ -152,6 +153,13 @@ function createTelegram({ settings, db, fetch = globalThis.fetch, now = () => Da
   }
 
   // Уведомление не должно ломать выдачу ключа: ошибки только в журнал контейнера
+  // Отправить и сообщить, если не вышло (relay от диспетчера: ему нужно знать, оставить ли в очереди)
+  async function relay(text) {
+    const chat = chatId();
+    if (!chat) throw new TelegramError('чат админа не подключён (админка → «Telegram»)', 'no-chat');
+    await send(chat, text);
+  }
+
   async function notify(text) {
     const chat = chatId();
     if (!chat) return log.log('Уведомление:', text);
@@ -380,6 +388,7 @@ function createTelegram({ settings, db, fetch = globalThis.fetch, now = () => Da
   return {
     configured: true,
     notify,
+    relay,
     info,
     chatId,
     createLink,

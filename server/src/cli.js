@@ -26,7 +26,9 @@ const USAGE = `Команды:
                                   (используется scripts/restore.sh)
   restore-vpn < amnezia.json      загрузить ключи сервера VPN из бэкапа в amnezia-api
   check [--keys]                  имена DuckDNS, бот Telegram и связь с amnezia-api; с --keys —
-                                  пробный ключ каждого протокола (создаётся и сразу удаляется)`;
+                                  пробный ключ каждого протокола (создаётся и сразу удаляется)
+  relay < текст                   сообщение админу через бота — для диспетчера в РФ, откуда
+                                  Telegram недоступен (scripts/dispatcher-command.sh notify)`;
 
 // Состояние, которое относится к серверу, а не к семье. После переноса базы на новый сервер его
 // нужно забыть: иначе сторож, увидев в базе IP старого сервера, сам направил бы DuckDNS на новый
@@ -195,6 +197,14 @@ async function main(argv, {
         // ключи прежние — первый бэкап с этого сервера придёт в течение 10 минут
         db.prepare("DELETE FROM settings WHERE key = 'backup_last_at'").run();
         return;
+      case 'relay': {
+        // текст от диспетчера — как есть, без разметки; длиннее лимита Telegram — обрезать
+        const text = (await readAll(stdin)).replace(/[\u0000-\u0008\u000b-\u001f\u007f]/g, '').trim().slice(0, 4000);
+        if (!text) throw new PortalError(400, 'Пустое сообщение');
+        await telegram.relay(text);
+        out('sent');
+        return;
+      }
       case 'check':
         await checkNames({ config, dns, publicIp, out });
         await checkTelegram({ telegram, out });
