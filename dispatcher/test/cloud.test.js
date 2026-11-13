@@ -16,7 +16,8 @@ const PASSWORD = 'Zomro-Pa55';
 const v = (x) => ({ $: String(x) });
 
 // hidden — заказанные серверы пока не видны в списке (Zomro ещё обрабатывает заказ)
-function fakeZomro({ activateAfter = 2, deleteFails = false, balance = '4.1502 EUR', hidden = false } = {}) {
+// busyWhileCreating — как живая Zomro: пока сервер собирается, удаление — «Услуга не активна»
+function fakeZomro({ activateAfter = 2, deleteFails = false, balance = '4.1502 EUR', hidden = false, busyWhileCreating = false } = {}) {
   const flags = { hidden };
   const servers = [
     { id: '7232925', servername: 'proxyizi', ip: '77.1.2.3', instance_status: 'active', pricelist_id: '7864', datacenter: '17', cost: '6.95 EUR / Месяц' },
@@ -45,6 +46,7 @@ function fakeZomro({ activateAfter = 2, deleteFails = false, balance = '4.1502 E
       }
       case 'instances.delete': {
         if (deleteFails) return reply({ error: { $type: 'access', msg: v('Удаление недоступно') } });
+        if (busyWhileCreating && servers.find((s) => s.id === p.get('elid'))?.instance_status === 'creating') return reply({ error: { $type: 'value', msg: v('Услуга не активна') } });
         deleted.push(p.get('elid'));
         servers.splice(servers.findIndex((s) => s.id === p.get('elid')), 1);
         return reply({ ok: v('ok') });
@@ -236,6 +238,51 @@ test('брошенный заказ: тест не дождался сервер
     const cloudOk = createCloud({ settings, fetch: ok.fetch, now, wait });
     await zomroTest({ cloud: cloudOk, run: async () => ({ code: 0, stdout: Buffer.from('Linux\n'), stderr: '' }), notify, orders, out: () => {}, now, wait, tcp: async () => true });
     assert.deepEqual(orders.list(), []);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('сервер не собрался вовремя: Zomro не даёт удалить («Услуга не активна») — дождаться сборки и удалить', async () => {
+  // опрос раз в 15 с: 10 мин ожидания — 40 опросов; сервер активен на 45-м — уже после того,
+  // как ждать перестали, во время повторов удаления (раз в минуту)
+  const z = fakeZomro({ activateAfter: 45, busyWhileCreating: true });
+  let clock = Date.UTC(2026, 10, 13, 7, 52);
+  const now = () => clock;
+  const wait = async (ms) => { clock += ms; };
+  const cloud = createCloud({ settings, fetch: z.fetch, now, wait });
+  const lines = [];
+  const notes = [];
+  await assert.rejects(
+    zomroTest({ cloud, run: async () => ({ code: 0, stdout: Buffer.alloc(0), stderr: '' }), notify: async (t) => notes.push(t), out: (l) => lines.push(l), now, wait, tcp: async () => true, buildTimeoutMs: 10 * 60000 }),
+    /не стал активным за 10 мин/
+  );
+  const text = lines.join('\n');
+  assert.match(text, /✗ Сервер family-vpn-\S+ не стал активным за 10 мин \(состояние: creating\) \(через 10 мин после заказа\)/, 'причина не теряется');
+  assert.match(text, /Zomro не даёт удалить сервер \d+, пока он собирается — жду конца сборки/);
+  assert.match(text, /✓ Удаление сервера \d+ отправлено/);
+  assert.equal(z.servers.some((s) => s.servername.startsWith(PREFIX)), false, 'сервер удалён после сборки');
+  assert.deepEqual(notes, []);
+
+  // не собрался и за второй срок — сообщение: удалит служба
+  const stuck = fakeZomro({ activateAfter: 1e9, busyWhileCreating: true });
+  const dir = mkdtempSync(join(tmpdir(), 'dispatcher-orders-'));
+  try {
+    const cloud2 = createCloud({ settings, fetch: stuck.fetch, now, wait });
+    const orders = createOrders(dir, { now });
+    await assert.rejects(
+      zomroTest({ cloud: cloud2, run: async () => ({ code: 0, stdout: Buffer.alloc(0), stderr: '' }), notify: async (t) => notes.push(t), orders, out: () => {}, now, wait, tcp: async () => true, buildTimeoutMs: 10 * 60000 }),
+      /Услуга не активна/
+    );
+    assert.match(notes.at(-1), /всё ещё собирается, Zomro не даёт его удалить\. Диспетчер удалит его сам/);
+    const [entry] = orders.list();
+    // уборка: пока собирается — молча ждёт; собрался — удаляет
+    clock = entry.until + 1;
+    const before = notes.length;
+    assert.deepEqual((await orders.sweep({ cloud: cloud2, notify: async (t) => notes.push(t) })).removed, []);
+    assert.equal(notes.length, before, 'пока собирается — без сообщений');
+    stuck.servers.find((s) => s.servername === entry.name).instance_status = 'active';
+    assert.deepEqual((await orders.sweep({ cloud: cloud2, notify: async (t) => notes.push(t) })).removed, [entry.name]);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

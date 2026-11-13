@@ -18,6 +18,9 @@ import { createZomro, ZomroError } from './zomro.js';
 // он видит в списке, но удалить не может.
 
 const PREFIX = 'family-vpn-';
+
+// Zomro не удаляет сервер, пока он собирается: «Услуга не активна». Это «подождать», а не сбой
+const notReady = (err) => /не активн|not active|inactive/i.test(String(err?.message ?? ''));
 const NAME = /^family-vpn-[a-z0-9-]{1,40}$/;
 
 // Пароль root нового сервера: 24 символа, есть строчные, заглавные и цифры
@@ -127,7 +130,22 @@ function createCloud({ settings, fetch = globalThis.fetch, now = () => Date.now(
     return true;
   }
 
-  return { servers, server, balance, order, waitFor, remove };
+  // Удалить, как только Zomro позволит: пока сервер собирается, она отвечает «Услуга не активна» —
+  // тогда повторять раз в everyMs до timeoutMs. Прочие ошибки — сразу наверх.
+  async function removeWhenReady(id, { timeoutMs = settings.buildTimeout ?? 90 * 60000, everyMs = 60000, progress = null, ...rest } = {}) {
+    const deadline = now() + timeoutMs;
+    for (let attempt = 1; ; attempt++) {
+      try {
+        return await remove(id, rest);
+      } catch (err) {
+        if (!notReady(err) || now() >= deadline) throw err;
+        if (attempt === 1) progress?.();
+        await wait(everyMs);
+      }
+    }
+  }
+
+  return { servers, server, balance, order, waitFor, remove, removeWhenReady };
 }
 
-export { createCloud, newPassword, serverName, shape, PREFIX };
+export { createCloud, newPassword, serverName, shape, notReady, PREFIX };

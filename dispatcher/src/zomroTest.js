@@ -1,5 +1,6 @@
 import { createConnection } from 'node:net';
 import { setTimeout as sleep } from 'node:timers/promises';
+import { notReady } from './cloud.js';
 
 // Пробный заказ у Zomro (команда zomro-test, этап 4): заказать сервер, дождаться IP, войти по
 // паролю root, удалить. Проверяет на живом аккаунте то, что без денег не проверить: подтверждение
@@ -54,17 +55,28 @@ async function zomroTest({ cloud, run, notify, orders = null, out = console.log,
     });
     if (res.code !== 0) throw new Error(`вход root по паролю не удался: ${res.missing ? 'нет sshpass — пересоберите образ' : res.stderr.trim().split('\n').at(-1) || `код ${res.code}`}`);
     out(`✓ Вход root по паролю: ${res.stdout.toString().trim().replace(/\n/g, ', ')}`);
+  } catch (err) {
+    // причину — сразу в вывод: дальше её не заслонит ошибка удаления
+    out(`✗ ${err.message} (через ${minutes()} после заказа)`);
+    throw err;
   } finally {
-    // удалить в любом случае: и после успеха, и после ошибки
+    // удалить в любом случае: и после успеха, и после ошибки. Пока сервер собирается, Zomro
+    // удалять его не даёт — тогда ждать конца сборки и удалить
     const target = server ?? (await cloud.servers()).find((s) => s.name === ordered.name);
     if (target) {
       try {
-        await cloud.remove(target.id);
+        await cloud.removeWhenReady(target.id, {
+          timeoutMs: buildTimeoutMs,
+          progress: () => out(`  … Zomro не даёт удалить сервер ${target.id}, пока он собирается — жду конца сборки (до ${Math.round(buildTimeoutMs / 60000)} мин)`)
+        });
         orders?.done(ordered.name);
-        out(`✓ Удаление сервера ${target.id} отправлено`);
+        out(`✓ Удаление сервера ${target.id} отправлено — через ${minutes()} после заказа`);
       } catch (err) {
         out(`✗ Сервер ${target.id} не удалился: ${err.message}`);
-        await notify(`⚠️ Пробный сервер ${ordered.name} (id ${target.id}) не удалился: ${err.message}. Удалите его в кабинете Zomro — он стоит денег.`);
+        const later = orders && notReady(err);
+        await notify(later
+          ? `⚠️ Пробный сервер ${ordered.name} (id ${target.id}) всё ещё собирается, Zomro не даёт его удалить. Диспетчер удалит его сам, как только сборка закончится (проверяет раз в час).`
+          : `⚠️ Пробный сервер ${ordered.name} (id ${target.id}) не удалился: ${err.message}. Удалите его в кабинете Zomro — он стоит денег.`);
         throw err;
       }
     } else {

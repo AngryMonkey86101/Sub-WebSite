@@ -1,5 +1,6 @@
 import { mkdirSync, readdirSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
+import { notReady } from './cloud.js';
 
 // Заказанные диспетчером серверы, которые ещё могут понадобиться удалить. Zomro собирает сервер
 // долго, а заказ может прерваться: оборвалась сессия с zomro-test, перезапустился контейнер,
@@ -21,9 +22,13 @@ function createOrders(dataDir, { now = () => Date.now() } = {}) {
   };
 
   // until — до какого времени заказ ещё ждут: раньше служба сервер не трогает
-  function track(name, { until, purpose = 'test' }) {
+  function write(entry) {
     mkdirSync(dir, { recursive: true, mode: 0o700 });
-    writeFileSync(file(name), `${JSON.stringify({ name, purpose, orderedAt: now(), until })}\n`, { mode: 0o600 });
+    writeFileSync(file(entry.name), `${JSON.stringify(entry)}\n`, { mode: 0o600 });
+  }
+
+  function track(name, { until, purpose = 'test' }) {
+    write({ name, purpose, orderedAt: now(), until });
   }
 
   function done(name) {
@@ -67,7 +72,12 @@ function createOrders(dataDir, { now = () => Date.now() } = {}) {
           await notify(`🧹 Удалил брошенный сервер ${entry.name} (id ${server.id}, ${server.ip ?? 'без IP'}): заказ не довели до конца, а сервер у Zomro стоит денег.`);
         } catch (err) {
           log.error?.(`Уборка: ${entry.name} не удалился: ${err.message}`);
-          await notify(`⚠️ Брошенный сервер ${entry.name} (id ${server.id}) не удалился: ${err.message}. Удалите его в кабинете Zomro — он стоит денег.`);
+          // ещё собирается — попробовать через час, без сообщения; иначе — сообщить один раз
+          if (notReady(err) && entry.until + 6 * 60 * 60 * 1000 > now()) continue;
+          if (!entry.alerted) {
+            write({ ...entry, alerted: now() });
+            await notify(`⚠️ Брошенный сервер ${entry.name} (id ${server.id}) не удалился: ${err.message}. Диспетчер будет пробовать раз в час; если не выйдет — удалите его в кабинете Zomro, он стоит денег.`);
+          }
         }
       } else if (entry.until + DAY <= now()) {
         done(entry.name);
