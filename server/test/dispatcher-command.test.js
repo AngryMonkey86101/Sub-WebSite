@@ -35,11 +35,13 @@ case "$*" in
   "compose --ansi never run --rm --no-deps -T portal node --disable-warning=ExperimentalWarning src/cli.js backup --stdout") printf 'BACKUP-FROZEN' ;;
   "compose --ansi never run --rm --no-deps -T --entrypoint tar caddy czf - -C /data .") printf 'CADDY-CERTS' ;;
   "compose --ansi never run --rm --no-deps -T --entrypoint age portal"*) printf 'AGE[%s]:' "$*"; cat ;;
+  *" src/cli.js relay") printf 'RELAY[%s]:' "$4"; cat ;;
 esac
 `);
   chmodSync(join(bin, 'docker'), 0o755);
-  const run = (command) => {
+  const run = (command, input) => {
     const res = spawnSync('bash', [join(app, 'scripts', 'dispatcher-command.sh')], {
+      input,
       env: { PATH: `${bin}:${process.env.PATH}`, CALLS: calls, ...(command === undefined ? {} : { SSH_ORIGINAL_COMMAND: command }) }
     });
     return { status: res.status, stdout: res.stdout, stderr: res.stderr.toString() };
@@ -106,6 +108,17 @@ test('dispatcher-command.sh: без ключей age в .env — freeze не о�
   assert.equal(res.status, 1);
   assert.match(res.stderr, /нет ключей age/);
   assert.ok(!res.stdout.toString().includes('CADDY-CERTS'));
+});
+
+test('dispatcher-command.sh: notify — сообщение админу через бота портала, не больше 4 КБ', () => {
+  const t = setup('notify');
+  let res = t.run('notify', '🛰 Сервер недоступен из РФ');
+  assert.equal(res.status, 0, res.stderr);
+  assert.equal(res.stdout.toString(), 'RELAY[exec]:🛰 Сервер недоступен из РФ', 'работающий портал — exec');
+  // замороженный портал остановлен — разовым контейнером
+  writeFileSync(join(t.app, '.frozen'), '');
+  res = t.run('notify', 'x'.repeat(10000));
+  assert.equal(res.stdout.toString(), `RELAY[run]:${'x'.repeat(4096)}`, 'длинное обрезается до 4 КБ');
 });
 
 test('dispatcher-command.sh: shellcheck без замечаний', { skip: spawnSync('shellcheck', ['--version']).status !== 0 && 'нет shellcheck' }, () => {

@@ -13,10 +13,22 @@ async function createDispatcher({ config, fetch = globalThis.fetch, run = defaul
   mkdirSync(config.dataDir, { recursive: true, mode: 0o700 });
   const state = createState(config.dataDir);
   if (!state.get('startedAt')) state.set('startedAt', now());
-  const notify = createNotifier({ settings: config.telegram, fetch, log });
+  // сообщения: напрямую, иначе через сервер VPN, иначе в очередь (telegram.js). Сервер и монитор
+  // создаются ниже — сюда они попадают к моменту первой отправки
+  let backups = null;
+  let monitor = null;
+  const notify = createNotifier({
+    settings: config.telegram,
+    fetch,
+    log,
+    relay: (text) => backups.relay(text),
+    canRelay: () => Boolean(backups) && (monitor?.isUp() ?? true),
+    dataDir: config.dataDir,
+    now
+  });
   const keys = await ensureKeys(config.dataDir, { run });
-  const monitor = createMonitor({ config, state, notify, fetch, ...(lookup ? { lookup } : {}), now, log });
-  const backups = createBackups({ config, keys, state, notify, isServerUp: monitor.isUp, run, now, log });
+  monitor = createMonitor({ config, state, notify, fetch, ...(lookup ? { lookup } : {}), now, log });
+  backups = createBackups({ config, keys, state, notify, isServerUp: monitor.isUp, run, now, log });
   const cloud = config.zomro ? createCloud({ settings: config.zomro, fetch, now }) : null;
   const orders = createOrders(config.dataDir, { now });
   return { config, state, notify, keys, monitor, backups, cloud, orders, run };

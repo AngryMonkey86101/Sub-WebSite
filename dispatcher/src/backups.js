@@ -192,6 +192,14 @@ function createBackups({ config, keys, state, notify, isServerUp = () => true, r
 
   const remoteStatus = async () => (await remote('status')).toString().trim();
 
+  // Сообщение админу через бота портала на сервере (из РФ Telegram недоступен; telegram.js)
+  async function relay(text) {
+    const res = await run('ssh', sshArgs('notify'), { input: Buffer.from(text), timeoutMs: 90000 });
+    if (res.code !== 0) throw new Error(sshReason(res, config.portalHost));
+    if (!/\bsent\b/.test(res.stdout.toString())) throw new Error('сервер не подтвердил отправку — портал на сервере старый? обновите его');
+    return true;
+  }
+
   // Забыть ключ сервера SSH — после переезда на новый сервер
   async function trustHost() {
     const res = await run('ssh-keygen', ['-R', config.ssh.port === 22 ? config.portalHost : `[${config.portalHost}]:${config.ssh.port}`, '-f', knownHosts]);
@@ -200,7 +208,7 @@ function createBackups({ config, keys, state, notify, isServerUp = () => true, r
 
   const status = () => ({ ...(state.get('backup') ?? {}), latest: latest() });
 
-  return { pull, tick, latest, status, trustHost, verify, freeze, unfreeze, remoteStatus };
+  return { pull, tick, latest, status, trustHost, verify, freeze, unfreeze, remoteStatus, relay };
 }
 
 export { createBackups, tarNames, tarEntries, sshReason };

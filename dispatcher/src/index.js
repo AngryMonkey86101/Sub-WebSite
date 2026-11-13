@@ -29,8 +29,12 @@ async function cycle() {
   busy = true;
   try {
     const result = await d.monitor.tick();
-    // бэкап — только когда сервер отвечает: с недоступного не забрать
-    if (result.status === 'up') await d.backups.tick();
+    if (result.status === 'up') {
+      // накопленные сообщения — через сервер, пока он на связи (telegram.js)
+      await d.notify.flush();
+      // бэкап — только когда сервер отвечает: с недоступного не забрать
+      await d.backups.tick();
+    }
   } catch (err) {
     console.error('Ошибка цикла:', err?.message);
   }

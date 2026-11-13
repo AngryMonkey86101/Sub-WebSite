@@ -5,6 +5,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
+import { Readable } from 'node:stream';
 import { decodeVpnKey, encodeVpnKey, hostOfKey, isIpAddress } from '../src/vpnKey.js';
 import { openDatabase } from '../src/db.js';
 import { encryptSecret, decryptSecret, newMemberCode, CODE } from '../src/crypto.js';
@@ -212,6 +213,25 @@ test('CLI: приглашение админа, список, проверка �
     lines.length = 0;
     await main(['check'], { out, dns: healthy, publicIp: async () => '198.51.100.20', fetch: telegramReply(401, { ok: false, description: 'Unauthorized' }) });
     assert.ok(lines.includes('⚠️ Telegram не принял токен бота — проверьте TELEGRAM_BOT_TOKEN в .env'), lines.join('\n'));
+
+    // relay: сообщение диспетчера из РФ — через бота; без чата или при сбое Telegram — ошибка
+    // (диспетчер тогда оставит сообщение в очереди)
+    const stdin = (text) => Readable.from([Buffer.from(text)]);
+    await assert.rejects(main(['relay'], { out, stdin: stdin('🛰 тест') }), /чат админа не подключён/);
+    process.env.TELEGRAM_CHAT_ID = '42';
+    const sent = [];
+    const telegram = async (url, init) => {
+      sent.push(JSON.parse(init.body));
+      return new Response(JSON.stringify({ ok: true, result: {} }), { status: 200 });
+    };
+    lines.length = 0;
+    await main(['relay'], { out, fetch: telegram, stdin: stdin('🛰 Сервер недоступен из РФ\u0007\n') });
+    assert.deepEqual(lines, ['sent']);
+    assert.equal(sent[0].chat_id, '42');
+    assert.equal(sent[0].text, '🛰 Сервер недоступен из РФ', 'управляющие символы и пробелы по краям убраны');
+    await assert.rejects(main(['relay'], { out, fetch: telegram, stdin: stdin('  \n') }), /Пустое сообщение/);
+    await assert.rejects(main(['relay'], { out, fetch: telegramReply(500, { ok: false, description: 'Internal' }), stdin: stdin('x') }), /Telegram/);
+    delete process.env.TELEGRAM_CHAT_ID;
     delete process.env.TELEGRAM_BOT_TOKEN;
 
     lines.length = 0;

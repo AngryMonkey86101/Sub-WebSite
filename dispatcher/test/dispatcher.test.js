@@ -61,10 +61,15 @@ test('диспетчер: tar и причины ошибок ssh', () => {
 function world({ dataDir }) {
   let clock = Date.UTC(2026, 10, 12, 9, 0, 0);
   const sent = [];
-  const net = { selfOnline: true, portal: 'ok', ip: '185.12.34.56', ssh: 'ok', sshStderr: '', backup: null };
+  const net = { selfOnline: true, portal: 'ok', ip: '185.12.34.56', ssh: 'ok', sshStderr: '', backup: null, telegram: 'ok', relayReply: 'sent\n' };
+  const relayed = [];
+  let telegramTries = 0;
   const fetch = async (url, init) => {
     const u = new URL(url);
     if (u.hostname === 'api.telegram.org') {
+      telegramTries += 1;
+      // из РФ Telegram недоступен
+      if (net.telegram === 'down') throw new TypeError('fetch failed', { cause: { code: 'ETIMEDOUT' } });
       sent.push(JSON.parse(init.body));
       return new Response(JSON.stringify({ ok: true, result: {} }), { status: 200 });
     }
@@ -94,6 +99,11 @@ function world({ dataDir }) {
       if (asked === 'freeze') return { code: 0, stdout: net.bundle, stderr: '' };
       if (asked === 'unfreeze') return { code: 0, stdout: Buffer.from(net.unfreezeReply ?? 'active\n'), stderr: '' };
       if (asked === 'status') return { code: 0, stdout: Buffer.from('frozen\n'), stderr: '' };
+      if (asked === 'notify') {
+        if (net.ssh === 'down') return { code: 255, stdout: Buffer.alloc(0), stderr: 'ssh: connect to host m2pr7x.duckdns.org port 22: Connection timed out' };
+        relayed.push(options.input.toString());
+        return { code: 0, stdout: Buffer.from(net.relayReply), stderr: '' };
+      }
       if (net.ssh === 'denied') return { code: 255, stdout: Buffer.alloc(0), stderr: 'deploy@m2pr7x.duckdns.org: Permission denied (publickey).' };
       if (net.ssh === 'changed') return { code: 255, stdout: Buffer.alloc(0), stderr: 'WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED!\nHost key verification failed.' };
       return { code: 0, stdout: net.backup, stderr: '' };
@@ -101,7 +111,7 @@ function world({ dataDir }) {
     return realRun(command, args, options);
   };
   const config = loadConfig(baseEnv({ DATA_DIR: dataDir }));
-  return { config, sent, net, calls, fetch, lookup, run, now: () => clock, advance: (ms) => (clock += ms), texts: () => sent.map((m) => m.text) };
+  return { config, sent, relayed, telegramTries: () => telegramTries, net, calls, fetch, lookup, run, now: () => clock, advance: (ms) => (clock += ms), texts: () => sent.map((m) => m.text) };
 }
 
 // Бэкап, как его отдаёт портал: tar.gz, зашифрованный age на указанные ключи
@@ -312,3 +322,56 @@ test('диспетчер: заморозка старого сервера — �
   assert.ok(!w.calls.filter((c) => c.command === 'ssh').slice(-1)[0].args.includes('--yes'));
 });
 
+
+test('диспетчер: Telegram из РФ недоступен — через сервер VPN; сервер недоступен — очередь до связи', { skip: !HAS_TOOLS && 'нет age или ssh-keygen' }, async () => {
+  const w = world({ dataDir: join(dir, 'relay') });
+  const d = await createDispatcher({ config: w.config, fetch: w.fetch, run: w.run, lookup: w.lookup, now: w.now, log: { log() {}, error() {} } });
+  w.net.telegram = 'down';
+
+  // напрямую не вышло — ушло через сервер: ssh … notify, текст — в stdin
+  assert.equal(await d.notify('Бэкап не получен'), true);
+  assert.deepEqual(w.relayed, ['🛰 Бэкап не получен']);
+  const ssh = w.calls.filter((c) => c.command === 'ssh').at(-1);
+  assert.equal(ssh.args.at(-1), 'notify');
+  assert.ok(!ssh.args.join(' ').includes('Бэкап'), 'текст не в аргументах ssh');
+  // после неудачи прямой путь не пробуется полчаса — не ждать таймаут на каждом сообщении
+  const tries = w.telegramTries();
+  await d.notify('второе');
+  assert.equal(w.telegramTries(), tries);
+  assert.deepEqual(w.relayed.at(-1), '🛰 второе');
+
+  // сервер заблокирован (монитор: down) — в очередь, ssh даже не пробуется
+  d.state.set('monitor', { status: 'down' });
+  const sshCalls = w.calls.filter((c) => c.command === 'ssh').length;
+  assert.equal(await d.notify('🔴 Из РФ сервер недоступен'), false);
+  w.advance(10 * MINUTE);
+  assert.equal(await d.notify('Заказан новый сервер'), false);
+  assert.equal(w.calls.filter((c) => c.command === 'ssh').length, sshCalls);
+  assert.equal(d.notify.queued(), 2);
+  assert.equal(readdirSync(join(w.config.dataDir, 'outbox')).length, 2);
+
+  // связь появилась (новый сервер) — очередь уходит по порядку, с пометкой задержки
+  w.advance(80 * MINUTE);
+  d.state.set('monitor', { status: 'up' });
+  assert.equal(await d.notify.flush(), 2);
+  assert.match(w.relayed.at(-2), /^⏱ 12\.11 09:00 UTC — задержано: не было связи\n🛰 🔴 Из РФ сервер недоступен$/);
+  assert.match(w.relayed.at(-1), /^⏱ 12\.11 09:10 UTC — задержано: не было связи\n🛰 Заказан новый сервер$/);
+  assert.equal(d.notify.queued(), 0);
+
+  // сервер на связи, но портал на нём старый (нет relay) — сообщение остаётся в очереди
+  w.net.relayReply = '';
+  assert.equal(await d.notify('третье'), false);
+  assert.equal(d.notify.queued(), 1);
+  // пока в очереди что-то есть, новое встаёт за ним — порядок не ломается
+  w.net.relayReply = 'sent\n';
+  assert.equal(await d.notify('четвёртое'), true);
+  assert.deepEqual(w.relayed.slice(-2), ['🛰 третье', '🛰 четвёртое']);
+
+  // Telegram снова доступен — через полчаса прямой путь пробуется опять
+  w.net.telegram = 'ok';
+  w.advance(31 * MINUTE);
+  const before = w.relayed.length;
+  await d.notify('напрямую');
+  assert.equal(w.sent.at(-1).text, '🛰 напрямую');
+  assert.equal(w.relayed.length, before);
+});
