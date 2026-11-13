@@ -34,8 +34,16 @@ function billmanager(params, { sessions = true } = {}) {
       return { doc: { balance: v('12.34 EUR'), realname: v('Иван Иванов'), phone: v('+7 900 123-45-67') } };
     case 'subaccount':
       return { doc: { elem: { id: v(1), balance: v('12.34'), currency: v('EUR') } } };
+    // как у настоящей Zomro: без дата-центра тарифов нет
     case 'v2.instances.order.pricelist':
+      if (!params.get('datacenter')) return { doc: {} };
       return { doc: { elem: [{ id: v(55), name: v('Cloud-1'), price: v('0.17 EUR/день') }, { id: v(56), name: v('Cloud-2'), price: v('0.30 EUR/день') }] } };
+    case 'v2.instances.order':
+      return { doc: { slist: [{ $name: 'datacenter', val: [{ $key: '1', $: 'Нидерланды' }, { $key: '2', $: 'Германия' }] }] } };
+    case 'vds.order.pricelist':
+      return { doc: { error: { $type: 'value', msg: v('Нет доступных для заказа тарифных планов') } } };
+    case 'instances':
+      return { doc: { elem: [{ id: v(7232925), name: v('starter-amd-nl-3'), ip: v('185.12.34.56'), status: v(2) }] } };
     case 'v2.instances.order.param':
       return {
         doc: {
@@ -86,7 +94,7 @@ test('Zomro: вход — сессия вместо пароля в каждом
   const legacy = fakeFetch({ sessions: false });
   const plainAuth = createZomro({ settings: { user: USER, password: PASSWORD }, fetch: legacy.fetch });
   await assert.rejects(plainAuth.login(), (err) => err instanceof ZomroError && /Функция недоступна/.test(err.message));
-  assert.equal((await plainAuth.list('v2.instances.order.pricelist')).length, 2);
+  assert.equal((await plainAuth.list('v2.instances.order.pricelist', { datacenter: '1' })).length, 2);
   assert.equal(legacy.calls.at(-1).get('authinfo'), `${USER}:${PASSWORD}`);
 });
 
@@ -118,10 +126,10 @@ test('шаг 0: скрипт проверки — только чтение, в 
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
   try {
     const script = fileURLToPath(new URL('../scripts/zomro-probe.mjs', import.meta.url));
-    const run = (env) =>
+    const run = (env, args = []) =>
       new Promise((resolve) => {
         // не spawnSync: он заблокировал бы цикл событий, и поддельный сервер не смог бы ответить
-        const child = spawn(process.execPath, [script], { env: { PATH: process.env.PATH, ...env } });
+        const child = spawn(process.execPath, [script, ...args], { env: { PATH: process.env.PATH, ...env } });
         let out = '';
         child.stdout.on('data', (d) => (out += d));
         child.stderr.on('data', (d) => (out += d));
@@ -135,10 +143,13 @@ test('шаг 0: скрипт проверки — только чтение, в 
     assert.match(out, /✓ Услуги \(func=v2\.instances\)[\s\S]*"всего": 1/);
     assert.match(out, /✗ Услуги \(func=vds\): Zomro: Нет доступа/);
     assert.match(out, /"ip": "185\.x\.x\.x"/, 'IP укорочен');
-    assert.match(out, /✓ Тарифы \(func=v2\.instances\.order\.pricelist\)[\s\S]*Cloud-1/);
+    assert.match(out, /✓ Услуги \(func=instances\)[\s\S]*starter-amd-nl-3/, 'перебор находит, где лежат серверы');
+    assert.match(out, /✓ Первый шаг заказа \(func=v2\.instances\.order\)[\s\S]*"datacenter": \[\s*"1=Нидерланды"/);
+    assert.match(out, /✓ Тарифы \(func=v2\.instances\.order\.pricelist, datacenter=1\)[\s\S]*Cloud-1/, 'тарифы — по дата-центрам');
     assert.match(out, /Форма заказа \(func=v2\.instances\.order\.param, pricelist=55\) — без заказа/);
     assert.match(out, /"order_period": \[\s*"-50=Посуточно"/);
-    assert.match(out, /"datacenter": \[\s*"1=Нидерланды"/);
+    const form = requests.find((p) => p.get('func') === 'v2.instances.order.param');
+    assert.equal(form.get('datacenter'), '1', 'форма — с дата-центром тарифа');
     // секреты и личное
     assert.ok(!out.includes(PASSWORD), 'пароль не выводится');
     assert.ok(!out.includes(SESSION), 'ключ сессии не выводится');
@@ -146,7 +157,19 @@ test('шаг 0: скрипт проверки — только чтение, в 
     assert.ok(!out.includes('Иван') && !out.includes('123-45-67'), 'имя и телефон скрыты');
     // ничего не заказано: ни sok=ok, ни функций удаления
     assert.ok(requests.every((p) => p.get('sok') === null), 'форма заказа не подтверждается');
-    assert.ok(requests.every((p) => !/delete|del$|stop|order$/.test(p.get('func'))));
+    // первый шаг заказа (*.order) и форма (*.order.param без sok) — только показывают варианты
+    assert.ok(requests.every((p) => !/delete|del$|stop|basket|finish|payment|prolong/.test(p.get('func'))));
+
+    // точечный запрос — тоже только чтение
+    const call = await run({ ZOMRO_USER: USER, ZOMRO_PASSWORD: PASSWORD, ZOMRO_API_URL: url }, ['call', 'v2.instances.order.pricelist', 'datacenter=2', 'sok=ok']);
+    assert.equal(call.status, 0, call.out);
+    assert.match(call.out, /✓ func=v2\.instances\.order\.pricelist datacenter=2\n[\s\S]*"элементов": 2/);
+    assert.equal(requests.at(-1).get('sok'), null, 'sok из командной строки отбрасывается');
+    for (const unsafe of ['vds.delete', 'v2.instances.order.param', 'payment.add', 'vds.reboot']) {
+      const refused = await run({ ZOMRO_USER: USER, ZOMRO_PASSWORD: PASSWORD, ZOMRO_API_URL: url }, ['call', unsafe]);
+      assert.equal(refused.status, 2);
+      assert.match(refused.out, /скрипт не вызывает/);
+    }
 
     const missing = await run({});
     assert.equal(missing.status, 2);
