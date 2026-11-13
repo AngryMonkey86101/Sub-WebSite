@@ -19,7 +19,8 @@ function tcpOpen(host, port, timeoutMs = 5000) {
   });
 }
 
-async function zomroTest({ cloud, run, notify, out = console.log, now = () => Date.now(), wait = sleep, tcp = tcpOpen, sshTimeoutMs = 5 * 60000 }) {
+// orders — учёт заказов (orders.js): если тест прервётся, служба удалит брошенный сервер сама
+async function zomroTest({ cloud, run, notify, orders = null, out = console.log, now = () => Date.now(), wait = sleep, tcp = tcpOpen, buildTimeoutMs = 90 * 60000, sshTimeoutMs = 20 * 60000 }) {
   const started = now();
   const minutes = () => `${Math.max(1, Math.round((now() - started) / 60000))} мин`;
   const { amount, currency } = await cloud.balance();
@@ -27,10 +28,15 @@ async function zomroTest({ cloud, run, notify, out = console.log, now = () => Da
   if (amount < 0.5) throw new Error(`На балансе ${amount} ${currency} — пополните хотя бы до 1 EUR`);
 
   const ordered = await cloud.order();
-  out(`✓ Заказ отправлен: ${ordered.name}`);
+  // до этого срока заказ ждёт сам тест; потом, если сервер так и остался, его удалит служба
+  orders?.track(ordered.name, { until: now() + buildTimeoutMs + sshTimeoutMs + 15 * 60000 });
+  out(`✓ Заказ отправлен: ${ordered.name}. Жду сборку до ${Math.round(buildTimeoutMs / 60000)} мин`);
   let server = null;
   try {
-    server = await cloud.waitFor(ordered.name);
+    server = await cloud.waitFor(ordered.name, {
+      timeoutMs: buildTimeoutMs,
+      progress: ({ minutes: m, status }) => out(`  … собирается ${m} мин, состояние: ${status}`)
+    });
     out(`✓ Сервер активен: id ${server.id}, IP ${server.ip} — через ${minutes()}`);
 
     // SSH открывается не сразу: облако ещё ставит систему
@@ -54,6 +60,7 @@ async function zomroTest({ cloud, run, notify, out = console.log, now = () => Da
     if (target) {
       try {
         await cloud.remove(target.id);
+        orders?.done(ordered.name);
         out(`✓ Удаление сервера ${target.id} отправлено`);
       } catch (err) {
         out(`✗ Сервер ${target.id} не удалился: ${err.message}`);
@@ -61,7 +68,9 @@ async function zomroTest({ cloud, run, notify, out = console.log, now = () => Da
         throw err;
       }
     } else {
-      out(`⚠️ Сервер ${ordered.name} не найден в списке — проверьте кабинет Zomro: если он есть, удалите вручную`);
+      out(orders
+        ? `⚠️ Сервер ${ordered.name} так и не появился в списке. Если Zomro соберёт его позже, диспетчер удалит его сам (проверяет раз в час)`
+        : `⚠️ Сервер ${ordered.name} не найден в списке — проверьте кабинет Zomro: если он есть, удалите вручную`);
     }
   }
   // удалился ли на самом деле

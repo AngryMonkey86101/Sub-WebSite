@@ -95,12 +95,19 @@ function createCloud({ settings, fetch = globalThis.fetch, now = () => Date.now(
     return { name, password, response: Object.keys(doc ?? {}) };
   }
 
-  // Ждать, пока заказанный сервер станет активным и получит IPv4
-  async function waitFor(name, { timeoutMs = 20 * 60000, everyMs = 15000 } = {}) {
-    const deadline = now() + timeoutMs;
+  // Ждать, пока заказанный сервер станет активным и получит IPv4. Zomro собирает долго — предел
+  // по умолчанию из настроек (ZOMRO_BUILD_MIN). progress — раз в reportMs: сколько ждём и состояние.
+  async function waitFor(name, { timeoutMs = settings.buildTimeout ?? 90 * 60000, everyMs = 15000, reportMs = 5 * 60000, progress = null } = {}) {
+    const started = now();
+    const deadline = started + timeoutMs;
+    let reported = started;
     for (;;) {
       const found = (await servers()).find((s) => s.name === name);
       if (found?.ip && found.status === 'active') return found;
+      if (progress && now() - reported >= reportMs) {
+        reported = now();
+        progress({ minutes: Math.round((now() - started) / 60000), status: found ? found.status ?? '?' : 'ещё нет в списке' });
+      }
       if (now() >= deadline) {
         throw new ZomroError(found ? `Сервер ${name} не стал активным за ${Math.round(timeoutMs / 60000)} мин (состояние: ${found.status ?? '?'})` : `Сервер ${name} не появился в списке за ${Math.round(timeoutMs / 60000)} мин — заказ не прошёл? Проверьте баланс и кабинет Zomro`);
       }

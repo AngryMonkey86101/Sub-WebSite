@@ -15,8 +15,9 @@ const HELP = `Команды:
               VPN работает; финальный бэкап и сертификаты — в томе диспетчера
   unfreeze    разморозить: портал, бот и сайт на сервере снова работают
   servers     серверы у Zomro и баланс (свои — с именем family-vpn-…)
+  remove ID --yes  удалить свой сервер у Zomro (только с именем family-vpn-…)
   zomro-test --yes  пробный заказ: заказать сервер, дождаться IP, войти по паролю, удалить
-              (несколько центов с баланса)`;
+              (несколько центов с баланса). Надёжнее запускать в фоне — см. README`;
 
 const fmt = (ms) => (ms ? new Date(ms).toISOString().replace('T', ' ').slice(0, 16) + ' UTC' : '—');
 
@@ -77,6 +78,24 @@ async function main(argv, { env = process.env, out = console.log, deps = {} } = 
       out(`Баланс Zomro: ${amount} ${currency}`);
       for (const s of await d.cloud.servers()) out(`${s.ours ? '◆' : ' '} ${s.id}  ${s.name || '—'}  ${s.ip ?? 'без IPv4'}  ${s.status ?? '?'}  ${s.cost ?? ''}`);
       out('◆ — серверы диспетчера (только их он может удалить)');
+      const pending = d.orders.list();
+      if (pending.length) out(`Ждут уборки, если их не довели до конца: ${pending.map((o) => `${o.name} (после ${fmt(o.until)})`).join(', ')}`);
+      return 0;
+    }
+    case 'remove': {
+      if (!d.cloud) throw new ConfigError('Zomro не настроен: впишите ZOMRO_USER и ZOMRO_PASSWORD в .env');
+      const id = argv[1];
+      if (!/^\d{1,12}$/.test(id ?? '') || !argv.includes('--yes')) {
+        out('Удалить свой сервер у Zomro: remove ID --yes (ID — число из списка servers, сервер с ◆)');
+        return 2;
+      }
+      const target = await d.cloud.server(id);
+      if (!(await d.cloud.remove(id))) {
+        out(`Сервера ${id} у Zomro нет`);
+        return 1;
+      }
+      if (target?.name) d.orders.done(target.name);
+      out(`✓ Удаление сервера ${id} (${target?.name ?? '?'}) отправлено. Проверка — servers через минуту`);
       return 0;
     }
     case 'zomro-test': {
@@ -85,13 +104,13 @@ async function main(argv, { env = process.env, out = console.log, deps = {} } = 
         out('Пробный заказ: сервер у Zomro будет заказан (тариф из ZOMRO_PRICELIST, посуточно), проверен и сразу удалён.\nСтоит несколько центов с баланса. Если уверены: zomro-test --yes');
         return 2;
       }
-      const r = await zomroTest({ cloud: d.cloud, run: d.run, notify: d.notify, out });
+      const r = await zomroTest({ cloud: d.cloud, run: d.run, notify: d.notify, orders: d.orders, out, buildTimeoutMs: config.zomro.buildTimeout, sshTimeoutMs: config.zomro.sshTimeout });
       await d.notify(r.ok ? 'Пробный заказ у Zomro прошёл: сервер заказан, активирован, вход по паролю работает, сервер удалён.' : '⚠️ Пробный заказ у Zomro: сервер удалён не до конца — проверьте кабинет.');
       return r.ok ? 0 : 1;
     }
     case 'trust-host': {
       const ok = await d.backups.trustHost();
-      out(ok ? `Ключ SSH ${config.portalHost} забыт: при следующем бэкапе запомнится новый` : 'Ключа не было или ssh-keygen не сработал');
+      out(ok ? `Ключ SSH ${config.portalHost} забыт: при следующем бэкапе запомнится новый` : 'Забывать нечего: диспетчер ещё не запоминал ключ этого сервера — запомнит при первом бэкапе');
       return 0;
     }
     default:

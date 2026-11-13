@@ -3,6 +3,10 @@ import assert from 'node:assert/strict';
 import { createCloud, newPassword, serverName, PREFIX } from '../src/cloud.js';
 import { zomroTest } from '../src/zomroTest.js';
 import { loadConfig, ConfigError } from '../src/config.js';
+import { createOrders } from '../src/orders.js';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 // Серверы у Zomro (этап 4) поверх поддельного BILLmanager, который ведёт себя как живой аккаунт:
 // func=instances, заказ instances.order.param с sok=ok, сервер активируется не сразу, удаление.
@@ -11,7 +15,9 @@ const USER = 'user@example.com';
 const PASSWORD = 'Zomro-Pa55';
 const v = (x) => ({ $: String(x) });
 
-function fakeZomro({ activateAfter = 2, deleteFails = false, balance = '4.1502 EUR' } = {}) {
+// hidden — заказанные серверы пока не видны в списке (Zomro ещё обрабатывает заказ)
+function fakeZomro({ activateAfter = 2, deleteFails = false, balance = '4.1502 EUR', hidden = false } = {}) {
+  const flags = { hidden };
   const servers = [
     { id: '7232925', servername: 'proxyizi', ip: '77.1.2.3', instance_status: 'active', pricelist_id: '7864', datacenter: '17', cost: '6.95 EUR / Месяц' },
     { id: '7269056', servername: 'vless-2', ip: '45.1.2.3', instance_status: 'active', pricelist_id: '7920', datacenter: '17', cost: '0.31 EUR / День' }
@@ -30,7 +36,7 @@ function fakeZomro({ activateAfter = 2, deleteFails = false, balance = '4.1502 E
       case 'instances': {
         polls += 1;
         for (const s of servers) if (s.instance_status === 'creating' && polls - s.orderedAt >= activateAfter) Object.assign(s, { instance_status: 'active', ip: `203.0.113.${s.id % 200}` });
-        return reply({ elem: servers.map((s) => Object.fromEntries(Object.entries(s).map(([k, val]) => [k, v(val)]))) });
+        return reply({ elem: servers.filter((s) => !(flags.hidden && s.orderedAt !== undefined)).map((s) => Object.fromEntries(Object.entries(s).map(([k, val]) => [k, v(val)]))) });
       }
       case 'instances.order.param': {
         orders.push(Object.fromEntries(p));
@@ -47,7 +53,7 @@ function fakeZomro({ activateAfter = 2, deleteFails = false, balance = '4.1502 E
         return reply({ error: { $type: 'missing', msg: v(`нет функции ${p.get('func')}`) } });
     }
   };
-  return { fetch, servers, orders, deleted };
+  return { fetch, servers, orders, deleted, flags };
 }
 
 const settings = { user: USER, password: PASSWORD, pricelist: '7920', datacenter: '17', os: '2140c514-fa2b-4b38-90e4-f9ff394245d1' };
@@ -55,7 +61,11 @@ const noWait = async () => {};
 
 test('Zomro: настройки диспетчера — тариф, дата-центр и образ по умолчанию', () => {
   const config = loadConfig({ PORTAL_HOST: 'm2pr7x.duckdns.org', ZOMRO_USER: USER, ZOMRO_PASSWORD: PASSWORD });
-  assert.deepEqual(config.zomro, { url: 'https://api.zomro.com/', user: USER, password: PASSWORD, pricelist: '7920', datacenter: '17', os: '2140c514-fa2b-4b38-90e4-f9ff394245d1' });
+  assert.deepEqual(config.zomro, { url: 'https://api.zomro.com/', user: USER, password: PASSWORD, pricelist: '7920', datacenter: '17', os: '2140c514-fa2b-4b38-90e4-f9ff394245d1', buildTimeout: 90 * 60000, sshTimeout: 20 * 60000 });
+  const slow = loadConfig({ PORTAL_HOST: 'm2pr7x.duckdns.org', ZOMRO_USER: USER, ZOMRO_PASSWORD: PASSWORD, ZOMRO_BUILD_MIN: '180', ZOMRO_SSH_MIN: '30' }).zomro;
+  assert.equal(slow.buildTimeout, 180 * 60000);
+  assert.equal(slow.sshTimeout, 30 * 60000);
+  assert.throws(() => loadConfig({ PORTAL_HOST: 'a.duckdns.org', ZOMRO_USER: USER, ZOMRO_PASSWORD: 'x', ZOMRO_BUILD_MIN: '5' }), /ZOMRO_BUILD_MIN/);
   assert.equal(loadConfig({ PORTAL_HOST: 'm2pr7x.duckdns.org' }).zomro, null);
   assert.throws(() => loadConfig({ PORTAL_HOST: 'a.duckdns.org', ZOMRO_USER: USER }), (err) => err instanceof ConfigError && /нужны оба/.test(err.message));
   assert.throws(() => loadConfig({ PORTAL_HOST: 'a.duckdns.org', ZOMRO_USER: USER, ZOMRO_PASSWORD: 'x', ZOMRO_OS: 'ubuntu' }), /ZOMRO_OS/);
@@ -125,7 +135,7 @@ test('zomro-test: заказ → IP → вход по паролю → удал�
   const r = await zomroTest({ cloud, run, notify: async (t) => notes.push(t), out: (l) => lines.push(l), now, wait, tcp: async () => ++tcpTries >= 3 });
   assert.equal(r.ok, true, lines.join('\n'));
   const text = lines.join('\n');
-  assert.match(text, /Баланс: 4\.1502 EUR\n✓ Заказ отправлен: family-vpn-20261113-0100\n✓ Сервер активен: id \d+, IP 203\.0\.113\.\d+[\s\S]*✓ Порт SSH открыт[\s\S]*✓ Вход root по паролю: Linux 6\.8\.0, Ubuntu 24\.04 LTS[\s\S]*✓ Сервер удалён/);
+  assert.match(text, /Баланс: 4\.1502 EUR\n✓ Заказ отправлен: family-vpn-20261113-0100\. Жду сборку до 90 мин\n✓ Сервер активен: id \d+, IP 203\.0\.113\.\d+[\s\S]*✓ Порт SSH открыт[\s\S]*✓ Вход root по паролю: Linux 6\.8\.0, Ubuntu 24\.04 LTS[\s\S]*✓ Сервер удалён/);
   const ssh = calls.find((c) => c.command === 'sshpass');
   const password = z.orders.at(-1).password;
   assert.equal(ssh.sshpass, password, 'пароль — через SSHPASS');
@@ -156,4 +166,77 @@ test('zomro-test: сбой входа — сервер всё равно уда�
   const cloud3 = createCloud({ settings, fetch: poor.fetch, now: () => clock, wait });
   await assert.rejects(zomroTest({ cloud: cloud3, run: failingRun, notify: async () => {}, out: () => {}, now: () => clock, wait }), /пополните/);
   assert.equal(poor.orders.length, 0);
+});
+
+test('Zomro собирает долго: ждём до предела, пишем о ходе сборки', async () => {
+  // активен только через 40 опросов по 15 с — 10 минут
+  const z = fakeZomro({ activateAfter: 40 });
+  let clock = Date.UTC(2026, 10, 13, 1, 0);
+  const cloud = createCloud({ settings: { ...settings, buildTimeout: 60 * 60000 }, fetch: z.fetch, now: () => clock, wait: async (ms) => { clock += ms; } });
+  const ordered = await cloud.order();
+  const reports = [];
+  const server = await cloud.waitFor(ordered.name, { progress: (p) => reports.push(p) });
+  assert.equal(server.status, 'active');
+  assert.deepEqual(reports.map((r) => r.minutes), [5]);
+  assert.equal(reports[0].status, 'creating');
+
+  // предел — из настроек (ZOMRO_BUILD_MIN), а не прежние 20 минут
+  const z2 = fakeZomro({ activateAfter: 1e9 });
+  const cloud2 = createCloud({ settings: { ...settings, buildTimeout: 60 * 60000 }, fetch: z2.fetch, now: () => clock, wait: async (ms) => { clock += ms; } });
+  const started = clock;
+  const o2 = await cloud2.order();
+  await assert.rejects(cloud2.waitFor(o2.name), /не стал активным за 60 мин/);
+  assert.ok(clock - started >= 60 * 60000);
+});
+
+test('брошенный заказ: тест не дождался сервера — служба удаляет его, когда он появится', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'dispatcher-orders-'));
+  try {
+    const z = fakeZomro({ hidden: true });
+    let clock = Date.UTC(2026, 10, 13, 1, 0);
+    const now = () => clock;
+    const wait = async (ms) => { clock += ms; };
+    const cloud = createCloud({ settings, fetch: z.fetch, now, wait });
+    const orders = createOrders(dir, { now });
+    const lines = [];
+    const notes = [];
+    const notify = async (t) => notes.push(t);
+    await assert.rejects(
+      zomroTest({ cloud, run: async () => ({ code: 0, stdout: Buffer.alloc(0), stderr: '' }), notify, orders, out: (l) => lines.push(l), now, wait, tcp: async () => true, buildTimeoutMs: 30 * 60000, sshTimeoutMs: 10 * 60000 }),
+      /не появился в списке за 30 мин/
+    );
+    assert.match(lines.join('\n'), /так и не появился в списке\. Если Zomro соберёт его позже, диспетчер удалит его сам/);
+    const [entry] = orders.list();
+    assert.match(entry.name, /^family-vpn-/);
+
+    // срок ещё не вышел — служба сервер не трогает, даже если он уже появился
+    z.flags.hidden = false;
+    assert.deepEqual(await orders.sweep({ cloud, notify }), { removed: [], forgotten: [] });
+    assert.ok(z.servers.some((s) => s.servername === entry.name));
+
+    // срок вышел — удаляет и сообщает; запись вычёркнута
+    clock = entry.until + 1;
+    const r = await orders.sweep({ cloud, notify });
+    assert.deepEqual(r.removed, [entry.name]);
+    assert.equal(z.servers.some((s) => s.servername === entry.name), false);
+    assert.match(notes.at(-1), /🧹 Удалил брошенный сервер family-vpn-\S+ \(id \d+/);
+    assert.deepEqual(orders.list(), []);
+
+    // заказ так и не выполнился — через сутки после срока запись забывается
+    orders.track('family-vpn-20261113-0200', { until: clock - 1 });
+    assert.deepEqual((await orders.sweep({ cloud, notify })).forgotten, []);
+    clock += 24 * 60 * 60 * 1000;
+    assert.deepEqual((await orders.sweep({ cloud, notify })).forgotten, ['family-vpn-20261113-0200']);
+
+    // чужие имена в учёт не попадают
+    assert.throws(() => orders.track('proxyizi', { until: 0 }), /Странное имя/);
+
+    // успешный тест сам вычёркивает свой заказ
+    const ok = fakeZomro();
+    const cloudOk = createCloud({ settings, fetch: ok.fetch, now, wait });
+    await zomroTest({ cloud: cloudOk, run: async () => ({ code: 0, stdout: Buffer.from('Linux\n'), stderr: '' }), notify, orders, out: () => {}, now, wait, tcp: async () => true });
+    assert.deepEqual(orders.list(), []);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
