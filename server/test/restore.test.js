@@ -41,12 +41,14 @@ const AMNEZIA_JSON = {
   serverId: 'srv-uuid',
   protocols: ['amneziawg3', 'xray'],
   amneziaWg3: {
-    wgConfig: '[Interface]\nPrivateKey = server-private-key\nAddress = 10.8.1.0/24\nListenPort = 51234\nJc = 4\n\n[Peer]\nPublicKey = a\n\n[Peer]\nPublicKey = b\n',
+    wgConfig: '[Interface]\nPrivateKey = server-private-key\nAddress = 10.8.1.0/24\nListenPort = 51234\nJc = 4\n\n[Peer]\nPublicKey = peer-a\n\n[Peer]\nPublicKey = peer-b\n',
     presharedKey: 'psk',
     serverPublicKey: SERVER_KEY,
     clients: [
       { clientId: 'peer-a', userData: { clientName: 'K7M2-1' } },
-      { clientId: 'peer-b', userData: { clientName: 'K7M2-2' } }
+      { clientId: 'peer-b', userData: { clientName: 'K7M2-2' } },
+      // запись удалённого раньше устройства: в таблице осталась, пира в awg0.conf нет
+      { clientId: 'peer-old', userData: { clientName: 'K7M2-3' } }
     ]
   },
   xray: { serverConfig: '{}' }
@@ -97,8 +99,16 @@ test('CLI restore-vpn: ключи сервера из бэкапа — в amnezi
     assert.equal(fake.state.imported.amneziaWg3.serverPublicKey, SERVER_KEY);
     assert.match(lines.join('\n'), /⚠️ Не восстановлены — их нет на этом сервере: amneziawg/);
     assert.match(lines.join('\n'), /Ключи сервера VPN восстановлены: клиентов 2 из 2 в бэкапе/);
+    assert.match(lines.join('\n'), /В таблице клиентов ещё 1 без ключа в awg0\.conf — это удалённые раньше устройства/);
     assert.equal(value('backup_last_at'), null, 'ключи прежние — бэкап можно делать');
     after.close();
+
+    // ключ клиента не попал в AmneziaWG — переезд останавливается
+    fake.state.dropOnImport = 1;
+    lines.length = 0;
+    await assert.rejects(run(['restore-vpn'], JSON.stringify(AMNEZIA_JSON)), /Не все ключи клиентов из бэкапа есть в AmneziaWG/);
+    assert.match(lines.join('\n'), /клиентов 1 из 2 в бэкапе/);
+    fake.state.dropOnImport = 0;
 
     // amnezia-api не поднялся — понятная ошибка после ожидания
     process.env.AMNEZIA_API_URL = 'http://127.0.0.1:9';

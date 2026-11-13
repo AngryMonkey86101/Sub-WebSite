@@ -182,7 +182,8 @@ AWG_ADDRESS=$(sed -n 's/^[[:space:]]*Address[[:space:]]*=[[:space:]]*\([^,[:spac
 AWG_SUBNET=${AWG_ADDRESS%/*}
 AWG_CIDR=${AWG_ADDRESS#*/}
 SERVER_KEY=$(jq -r '.amneziaWg3.serverPublicKey' "$WORK/amnezia.json")
-CLIENTS=$(jq '.amneziaWg3.clients | length' "$WORK/amnezia.json")
+# клиенты — ключи в разделах [Peer] awg0.conf; в таблице клиентов бывают записи удалённых устройств
+CLIENTS=$(jq '[.amneziaWg3.wgConfig | splits("\n") | select(test("^\\s*PublicKey\\s*=")) | sub("^\\s*PublicKey\\s*=\\s*"; "") | sub("\\s+$"; "")] | unique | length' "$WORK/amnezia.json")
 OTHER=$(jq -r '[.protocols[] | select(. != "amneziawg3")] | join(", ")' "$WORK/amnezia.json")
 ok "Бэкап от $(jq -r '.generatedAt' "$WORK/amnezia.json")"
 ok "Портал: $PORTAL_HOST, VPN: $VPN_HOST"

@@ -11,6 +11,13 @@ class AmneziaError extends Error {
 
 const PAGE = 100;
 
+// Ключи клиентов в awg0.conf — открытые ключи из разделов [Peer], без повторов. Именно они попадают
+// в AmneziaWG (awg syncconf). Таблица клиентов (clientsTable) — только подписи к ним, и в ней
+// остаются записи удалённых раньше устройств: считать клиентов по ней нельзя.
+function wgPeers(wgConfig) {
+  return [...new Set([...String(wgConfig ?? '').matchAll(/^[ \t]*PublicKey[ \t]*=[ \t]*(\S+)/gm)].map((m) => m[1]))];
+}
+
 function createAmneziaClient({ baseUrl, apiKey, timeoutMs = 30000, fetch = globalThis.fetch }) {
   async function request(method, path, body) {
     let res;
@@ -114,4 +121,4 @@ function createAmneziaClient({ baseUrl, apiKey, timeoutMs = 30000, fetch = globa
   };
 }
 
-export { createAmneziaClient, AmneziaError };
+export { createAmneziaClient, AmneziaError, wgPeers };
