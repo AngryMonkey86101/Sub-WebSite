@@ -5,6 +5,7 @@ import { ensureKeys } from './keys.js';
 import { createBackups } from './backups.js';
 import { createMonitor } from './monitor.js';
 import { run as defaultRun } from './run.js';
+import { createCloud } from './cloud.js';
 
 // Сборка диспетчера из частей — общая для службы (index.js) и команд (cli.js)
 async function createDispatcher({ config, fetch = globalThis.fetch, run = defaultRun, lookup, now = () => Date.now(), log = console }) {
@@ -15,7 +16,8 @@ async function createDispatcher({ config, fetch = globalThis.fetch, run = defaul
   const keys = await ensureKeys(config.dataDir, { run });
   const monitor = createMonitor({ config, state, notify, fetch, ...(lookup ? { lookup } : {}), now, log });
   const backups = createBackups({ config, keys, state, notify, isServerUp: monitor.isUp, run, now, log });
-  return { config, state, notify, keys, monitor, backups };
+  const cloud = config.zomro ? createCloud({ settings: config.zomro, fetch, now }) : null;
+  return { config, state, notify, keys, monitor, backups, cloud, run };
 }
 
 // Подсказка, что вписать в .env сервера: открытые ключи диспетчера

@@ -1,5 +1,6 @@
 import { loadConfig, ConfigError } from './config.js';
 import { createDispatcher, keysHelp } from './app.js';
+import { zomroTest } from './zomroTest.js';
 
 // Команды диспетчера: docker compose exec dispatcher node src/cli.js <команда>
 
@@ -12,7 +13,10 @@ const HELP = `Команды:
   server      состояние портала на сервере: active или frozen
   freeze --yes  заморозить портал на сервере (плановая смена): бот, оплаты и сайт остановятся,
               VPN работает; финальный бэкап и сертификаты — в томе диспетчера
-  unfreeze    разморозить: портал, бот и сайт на сервере снова работают`;
+  unfreeze    разморозить: портал, бот и сайт на сервере снова работают
+  servers     серверы у Zomro и баланс (свои — с именем family-vpn-…)
+  zomro-test --yes  пробный заказ: заказать сервер, дождаться IP, войти по паролю, удалить
+              (несколько центов с баланса)`;
 
 const fmt = (ms) => (ms ? new Date(ms).toISOString().replace('T', ' ').slice(0, 16) + ' UTC' : '—');
 
@@ -66,6 +70,24 @@ async function main(argv, { env = process.env, out = console.log, deps = {} } = 
       await d.backups.unfreeze();
       out('✓ Портал на сервере снова работает');
       return 0;
+    }
+    case 'servers': {
+      if (!d.cloud) throw new ConfigError('Zomro не настроен: впишите ZOMRO_USER и ZOMRO_PASSWORD в .env');
+      const { amount, currency } = await d.cloud.balance();
+      out(`Баланс Zomro: ${amount} ${currency}`);
+      for (const s of await d.cloud.servers()) out(`${s.ours ? '◆' : ' '} ${s.id}  ${s.name || '—'}  ${s.ip ?? 'без IPv4'}  ${s.status ?? '?'}  ${s.cost ?? ''}`);
+      out('◆ — серверы диспетчера (только их он может удалить)');
+      return 0;
+    }
+    case 'zomro-test': {
+      if (!d.cloud) throw new ConfigError('Zomro не настроен: впишите ZOMRO_USER и ZOMRO_PASSWORD в .env');
+      if (!argv.includes('--yes')) {
+        out('Пробный заказ: сервер у Zomro будет заказан (тариф из ZOMRO_PRICELIST, посуточно), проверен и сразу удалён.\nСтоит несколько центов с баланса. Если уверены: zomro-test --yes');
+        return 2;
+      }
+      const r = await zomroTest({ cloud: d.cloud, run: d.run, notify: d.notify, out });
+      await d.notify(r.ok ? 'Пробный заказ у Zomro прошёл: сервер заказан, активирован, вход по паролю работает, сервер удалён.' : '⚠️ Пробный заказ у Zomro: сервер удалён не до конца — проверьте кабинет.');
+      return r.ok ? 0 : 1;
     }
     case 'trust-host': {
       const ok = await d.backups.trustHost();

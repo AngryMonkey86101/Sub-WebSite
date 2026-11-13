@@ -36,6 +36,16 @@ function loadConfig(env = process.env) {
     if (!/^https:\/\/[^\s/]+\//.test(`${url}/`)) throw new ConfigError(`REFERENCE_URLS: ${url} — нужен адрес https://…`);
   }
 
+  // Zomro (cloud.js): логин и пароль кабинета — для заказа и удаления серверов VPN. Пусто — без них
+  const zomroUser = env.ZOMRO_USER?.trim() || '';
+  const zomroPassword = env.ZOMRO_PASSWORD ?? '';
+  if (Boolean(zomroUser) !== Boolean(zomroPassword)) throw new ConfigError('Zomro: нужны оба — ZOMRO_USER и ZOMRO_PASSWORD');
+  const zomroId = (name, fallback, pattern) => {
+    const value = env[name]?.trim() || fallback;
+    if (!pattern.test(value)) throw new ConfigError(`${name}: неверное значение`);
+    return value;
+  };
+
   return {
     portalHost,
     dataDir: env.DATA_DIR?.trim() || '/data',
@@ -50,7 +60,19 @@ function loadConfig(env = process.env) {
     backupInterval: number('BACKUP_INTERVAL_MIN', 60, { min: 10, max: 1440 }) * MINUTE,
     backupKeep: number('BACKUP_KEEP', 48, { min: 1, max: 1000 }),
     // сообщение, если свежего бэкапа нет дольше этого, а сервер при этом доступен
-    backupAlertAfter: number('BACKUP_ALERT_AFTER_HOURS', 3, { min: 1, max: 168 }) * HOUR
+    backupAlertAfter: number('BACKUP_ALERT_AFTER_HOURS', 3, { min: 1, max: 168 }) * HOUR,
+    // тариф, дата-центр и образ ОС новых серверов — по проверке API (docs/PLAN.md, раздел 15):
+    // 7920 «Blitz Intel | NL-3» — 0,31 EUR в день, 17 — Netherlands-3, образ — Ubuntu 24.04
+    zomro: zomroUser
+      ? {
+          url: env.ZOMRO_API_URL?.trim() || 'https://api.zomro.com/',
+          user: zomroUser,
+          password: zomroPassword,
+          pricelist: zomroId('ZOMRO_PRICELIST', '7920', /^\d{1,9}$/),
+          datacenter: zomroId('ZOMRO_DATACENTER', '17', /^\d{1,9}$/),
+          os: zomroId('ZOMRO_OS', '2140c514-fa2b-4b38-90e4-f9ff394245d1', /^[0-9a-f-]{36}$/)
+        }
+      : null
   };
 }
 

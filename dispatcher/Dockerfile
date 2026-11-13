@@ -5,7 +5,8 @@ ARG NODE_IMAGE=node:22.23.4-alpine3.24
 FROM ${NODE_IMAGE}
 
 # age — проверка и (на этапе 5) расшифровка бэкапа; ssh — забрать бэкап с сервера VPN
-RUN apk add --no-cache 'age~1.3' openssh-client openssh-keygen
+# sshpass — первый вход на новый сервер по паролю root, заданному при заказе
+RUN apk add --no-cache 'age~1.3' openssh-client openssh-keygen sshpass
 
 WORKDIR /app
 COPY package.json ./
