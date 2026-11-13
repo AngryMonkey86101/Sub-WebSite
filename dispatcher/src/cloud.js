@@ -18,6 +18,9 @@ import { createZomro, ZomroError } from './zomro.js';
 // он видит в списке, но удалить не может.
 
 const PREFIX = 'family-vpn-';
+
+// Zomro не удаляет сервер, пока он собирается: «Услуга не активна». Это «подождать», а не сбой
+const notReady = (err) => /не активн|not active|inactive/i.test(String(err?.message ?? ''));
 const NAME = /^family-vpn-[a-z0-9-]{1,40}$/;
 
 // Пароль root нового сервера: 24 символа, есть строчные, заглавные и цифры
@@ -95,12 +98,19 @@ function createCloud({ settings, fetch = globalThis.fetch, now = () => Date.now(
     return { name, password, response: Object.keys(doc ?? {}) };
   }
 
-  // Ждать, пока заказанный сервер станет активным и получит IPv4
-  async function waitFor(name, { timeoutMs = 20 * 60000, everyMs = 15000 } = {}) {
-    const deadline = now() + timeoutMs;
+  // Ждать, пока заказанный сервер станет активным и получит IPv4. Zomro собирает долго — предел
+  // по умолчанию из настроек (ZOMRO_BUILD_MIN). progress — раз в reportMs: сколько ждём и состояние.
+  async function waitFor(name, { timeoutMs = settings.buildTimeout ?? 90 * 60000, everyMs = 15000, reportMs = 5 * 60000, progress = null } = {}) {
+    const started = now();
+    const deadline = started + timeoutMs;
+    let reported = started;
     for (;;) {
       const found = (await servers()).find((s) => s.name === name);
       if (found?.ip && found.status === 'active') return found;
+      if (progress && now() - reported >= reportMs) {
+        reported = now();
+        progress({ minutes: Math.round((now() - started) / 60000), status: found ? found.status ?? '?' : 'ещё нет в списке' });
+      }
       if (now() >= deadline) {
         throw new ZomroError(found ? `Сервер ${name} не стал активным за ${Math.round(timeoutMs / 60000)} мин (состояние: ${found.status ?? '?'})` : `Сервер ${name} не появился в списке за ${Math.round(timeoutMs / 60000)} мин — заказ не прошёл? Проверьте баланс и кабинет Zomro`);
       }
@@ -120,7 +130,22 @@ function createCloud({ settings, fetch = globalThis.fetch, now = () => Date.now(
     return true;
   }
 
-  return { servers, server, balance, order, waitFor, remove };
+  // Удалить, как только Zomro позволит: пока сервер собирается, она отвечает «Услуга не активна» —
+  // тогда повторять раз в everyMs до timeoutMs. Прочие ошибки — сразу наверх.
+  async function removeWhenReady(id, { timeoutMs = settings.buildTimeout ?? 90 * 60000, everyMs = 60000, progress = null, ...rest } = {}) {
+    const deadline = now() + timeoutMs;
+    for (let attempt = 1; ; attempt++) {
+      try {
+        return await remove(id, rest);
+      } catch (err) {
+        if (!notReady(err) || now() >= deadline) throw err;
+        if (attempt === 1) progress?.();
+        await wait(everyMs);
+      }
+    }
+  }
+
+  return { servers, server, balance, order, waitFor, remove, removeWhenReady };
 }
 
-export { createCloud, newPassword, serverName, shape, PREFIX };
+export { createCloud, newPassword, serverName, shape, notReady, PREFIX };

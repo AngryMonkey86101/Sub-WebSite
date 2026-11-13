@@ -70,7 +70,11 @@ function loadConfig(env = process.env) {
           password: zomroPassword,
           pricelist: zomroId('ZOMRO_PRICELIST', '7920', /^\d{1,9}$/),
           datacenter: zomroId('ZOMRO_DATACENTER', '17', /^\d{1,9}$/),
-          os: zomroId('ZOMRO_OS', '2140c514-fa2b-4b38-90e4-f9ff394245d1', /^[0-9a-f-]{36}$/)
+          os: zomroId('ZOMRO_OS', '2140c514-fa2b-4b38-90e4-f9ff394245d1', /^[0-9a-f-]{36}$/),
+          // Zomro собирает серверы долго: сколько ждать, пока сервер станет активным и получит IP,
+          // и потом — пока на нём откроется SSH
+          buildTimeout: number('ZOMRO_BUILD_MIN', 90, { min: 10, max: 360 }) * MINUTE,
+          sshTimeout: number('ZOMRO_SSH_MIN', 20, { min: 1, max: 120 }) * MINUTE
         }
       : null
   };

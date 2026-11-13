@@ -21,6 +21,8 @@ if (d.keys.created.length) {
   await d.notify(`Диспетчер запущен: проверяю ${config.portalHost} из РФ, бэкап — раз в ${Math.round(config.backupInterval / 60000)} мин.`);
 }
 
+const SWEEP_EVERY = 60 * 60 * 1000;
+let lastSweep = 0;
 let busy = false;
 async function cycle() {
   if (busy) return;
@@ -31,9 +33,17 @@ async function cycle() {
     if (result.status === 'up') await d.backups.tick();
   } catch (err) {
     console.error('Ошибка цикла:', err?.message);
-  } finally {
-    busy = false;
   }
+  // раз в час — брошенные заказы у Zomro (orders.js): сервер стоит денег, пока его не удалят
+  if (d.cloud && Date.now() - lastSweep >= SWEEP_EVERY) {
+    lastSweep = Date.now();
+    try {
+      await d.orders.sweep({ cloud: d.cloud, notify: d.notify });
+    } catch (err) {
+      console.error('Уборка заказов:', err?.message);
+    }
+  }
+  busy = false;
 }
 cycle();
 const timer = setInterval(cycle, config.checkInterval);

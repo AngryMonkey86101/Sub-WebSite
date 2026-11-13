@@ -1,5 +1,6 @@
 import { createConnection } from 'node:net';
 import { setTimeout as sleep } from 'node:timers/promises';
+import { notReady } from './cloud.js';
 
 // Пробный заказ у Zomro (команда zomro-test, этап 4): заказать сервер, дождаться IP, войти по
 // паролю root, удалить. Проверяет на живом аккаунте то, что без денег не проверить: подтверждение
@@ -19,7 +20,8 @@ function tcpOpen(host, port, timeoutMs = 5000) {
   });
 }
 
-async function zomroTest({ cloud, run, notify, out = console.log, now = () => Date.now(), wait = sleep, tcp = tcpOpen, sshTimeoutMs = 5 * 60000 }) {
+// orders — учёт заказов (orders.js): если тест прервётся, служба удалит брошенный сервер сама
+async function zomroTest({ cloud, run, notify, orders = null, out = console.log, now = () => Date.now(), wait = sleep, tcp = tcpOpen, buildTimeoutMs = 90 * 60000, sshTimeoutMs = 20 * 60000 }) {
   const started = now();
   const minutes = () => `${Math.max(1, Math.round((now() - started) / 60000))} мин`;
   const { amount, currency } = await cloud.balance();
@@ -27,10 +29,15 @@ async function zomroTest({ cloud, run, notify, out = console.log, now = () => Da
   if (amount < 0.5) throw new Error(`На балансе ${amount} ${currency} — пополните хотя бы до 1 EUR`);
 
   const ordered = await cloud.order();
-  out(`✓ Заказ отправлен: ${ordered.name}`);
+  // до этого срока заказ ждёт сам тест; потом, если сервер так и остался, его удалит служба
+  orders?.track(ordered.name, { until: now() + buildTimeoutMs + sshTimeoutMs + 15 * 60000 });
+  out(`✓ Заказ отправлен: ${ordered.name}. Жду сборку до ${Math.round(buildTimeoutMs / 60000)} мин`);
   let server = null;
   try {
-    server = await cloud.waitFor(ordered.name);
+    server = await cloud.waitFor(ordered.name, {
+      timeoutMs: buildTimeoutMs,
+      progress: ({ minutes: m, status }) => out(`  … собирается ${m} мин, состояние: ${status}`)
+    });
     out(`✓ Сервер активен: id ${server.id}, IP ${server.ip} — через ${minutes()}`);
 
     // SSH открывается не сразу: облако ещё ставит систему
@@ -48,20 +55,34 @@ async function zomroTest({ cloud, run, notify, out = console.log, now = () => Da
     });
     if (res.code !== 0) throw new Error(`вход root по паролю не удался: ${res.missing ? 'нет sshpass — пересоберите образ' : res.stderr.trim().split('\n').at(-1) || `код ${res.code}`}`);
     out(`✓ Вход root по паролю: ${res.stdout.toString().trim().replace(/\n/g, ', ')}`);
+  } catch (err) {
+    // причину — сразу в вывод: дальше её не заслонит ошибка удаления
+    out(`✗ ${err.message} (через ${minutes()} после заказа)`);
+    throw err;
   } finally {
-    // удалить в любом случае: и после успеха, и после ошибки
+    // удалить в любом случае: и после успеха, и после ошибки. Пока сервер собирается, Zomro
+    // удалять его не даёт — тогда ждать конца сборки и удалить
     const target = server ?? (await cloud.servers()).find((s) => s.name === ordered.name);
     if (target) {
       try {
-        await cloud.remove(target.id);
-        out(`✓ Удаление сервера ${target.id} отправлено`);
+        await cloud.removeWhenReady(target.id, {
+          timeoutMs: buildTimeoutMs,
+          progress: () => out(`  … Zomro не даёт удалить сервер ${target.id}, пока он собирается — жду конца сборки (до ${Math.round(buildTimeoutMs / 60000)} мин)`)
+        });
+        orders?.done(ordered.name);
+        out(`✓ Удаление сервера ${target.id} отправлено — через ${minutes()} после заказа`);
       } catch (err) {
         out(`✗ Сервер ${target.id} не удалился: ${err.message}`);
-        await notify(`⚠️ Пробный сервер ${ordered.name} (id ${target.id}) не удалился: ${err.message}. Удалите его в кабинете Zomro — он стоит денег.`);
+        const later = orders && notReady(err);
+        await notify(later
+          ? `⚠️ Пробный сервер ${ordered.name} (id ${target.id}) всё ещё собирается, Zomro не даёт его удалить. Диспетчер удалит его сам, как только сборка закончится (проверяет раз в час).`
+          : `⚠️ Пробный сервер ${ordered.name} (id ${target.id}) не удалился: ${err.message}. Удалите его в кабинете Zomro — он стоит денег.`);
         throw err;
       }
     } else {
-      out(`⚠️ Сервер ${ordered.name} не найден в списке — проверьте кабинет Zomro: если он есть, удалите вручную`);
+      out(orders
+        ? `⚠️ Сервер ${ordered.name} так и не появился в списке. Если Zomro соберёт его позже, диспетчер удалит его сам (проверяет раз в час)`
+        : `⚠️ Сервер ${ordered.name} не найден в списке — проверьте кабинет Zomro: если он есть, удалите вручную`);
     }
   }
   // удалился ли на самом деле
