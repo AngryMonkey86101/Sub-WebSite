@@ -306,7 +306,7 @@ test('бэкап: второй ключ — диспетчера в РФ: рас
   broken.db.close();
 });
 
-test('install-dispatcher-key.sh: ключ диспетчера — только команда бэкапа, прежняя строка заменяется', () => {
+test('install-dispatcher-key.sh: ключ диспетчера — только dispatcher-command.sh, прежняя строка заменяется', () => {
   const script = new URL('../scripts/install-dispatcher-key.sh', import.meta.url).pathname;
   const home = mkdtempSync(join(dir, 'deploy-'));
   const app = join(home, 'family-vpn');
@@ -326,7 +326,7 @@ test('install-dispatcher-key.sh: ключ диспетчера — только 
   assert.equal(res.status, 0, res.stderr.toString());
   let lines = readFileSync(auth, 'utf8').trim().split('\n');
   assert.equal(lines[0], 'ssh-ed25519 AAAAadminkey admin@laptop', 'чужие ключи не трогаются');
-  assert.equal(lines[1], `command="cd ${app} && docker compose exec -T portal node --disable-warning=ExperimentalWarning src/cli.js backup --stdout",restrict ${key1} family-vpn-dispatcher`);
+  assert.equal(lines[1], `command="bash ${app}/scripts/dispatcher-command.sh",restrict ${key1} family-vpn-dispatcher`);
   // новый ключ заменяет прежний, а не добавляется вторым
   res = run(`"${key2} other-comment"`);
   assert.equal(res.status, 0, res.stderr.toString());

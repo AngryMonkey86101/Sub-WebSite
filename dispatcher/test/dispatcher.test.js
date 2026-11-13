@@ -89,6 +89,11 @@ function world({ dataDir }) {
   const run = async (command, args, options) => {
     calls.push({ command, args });
     if (command === 'ssh') {
+      // просьба серверу — последний аргумент после user@host (без неё — бэкап)
+      const asked = args.at(-1).includes('@') ? 'backup' : args.at(-1);
+      if (asked === 'freeze') return { code: 0, stdout: net.bundle, stderr: '' };
+      if (asked === 'unfreeze') return { code: 0, stdout: Buffer.from(net.unfreezeReply ?? 'active\n'), stderr: '' };
+      if (asked === 'status') return { code: 0, stdout: Buffer.from('frozen\n'), stderr: '' };
       if (net.ssh === 'denied') return { code: 255, stdout: Buffer.alloc(0), stderr: 'deploy@m2pr7x.duckdns.org: Permission denied (publickey).' };
       if (net.ssh === 'changed') return { code: 255, stdout: Buffer.alloc(0), stderr: 'WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED!\nHost key verification failed.' };
       return { code: 0, stdout: net.backup, stderr: '' };
@@ -268,3 +273,42 @@ test('диспетчер: бэкап раз в час — проверка кл�
   assert.ok(w.calls.some((c) => c.command === 'ssh-keygen' && c.args[0] === '-R' && c.args[1] === 'm2pr7x.duckdns.org'));
   assert.equal(await main(['nope'], { env, out: () => {} }), 2);
 });
+
+test('диспетчер: заморозка старого сервера — финальный бэкап и сертификаты проверены и сохранены; откат', { skip: !HAS_TOOLS && 'нет age или ssh-keygen' }, async () => {
+  const dataDir = join(dir, 'freeze');
+  const w = world({ dataDir });
+  const d = await createDispatcher({ config: w.config, fetch: w.fetch, run: w.run, lookup: w.lookup, now: w.now, log: { log() {}, error() {} } });
+  const backup = makeBackup([d.keys.recipient]);
+  const caddy = spawnSync('age', ['-r', d.keys.recipient], { input: gzipSync(Buffer.from('certs')) }).stdout;
+  w.net.bundle = createTar([{ name: 'backup.tar.gz.age', data: backup }, { name: 'caddy.tar.gz.age', data: caddy }]);
+
+  const r = await d.backups.freeze();
+  const ssh = w.calls.filter((c) => c.command === 'ssh').at(-1).args;
+  assert.equal(ssh.at(-1), 'freeze');
+  assert.equal(ssh.at(-2), 'deploy@m2pr7x.duckdns.org');
+  assert.deepEqual(readFileSync(r.backup), backup);
+  assert.deepEqual(readFileSync(r.caddy), caddy);
+  assert.equal(statSync(r.caddy).mode & 0o077, 0);
+  assert.equal(d.backups.latest().size, backup.length, 'финальный бэкап — и самый свежий');
+  assert.equal(await d.backups.remoteStatus(), 'frozen');
+
+  // плохой ответ сервера — ошибка, ничего не сохраняется как финальное
+  w.net.bundle = createTar([{ name: 'backup.tar.gz.age', data: backup }]);
+  await assert.rejects(d.backups.freeze(), /не отдал финальный бэкап и сертификаты/);
+  w.net.bundle = createTar([{ name: 'backup.tar.gz.age', data: backup }, { name: 'caddy.tar.gz.age', data: gzipSync(Buffer.from('plain')) }]);
+  await assert.rejects(d.backups.freeze(), /незашифрованными/);
+  w.net.bundle = createTar([{ name: 'backup.tar.gz.age', data: Buffer.from('nope') }, { name: 'caddy.tar.gz.age', data: caddy }]);
+  await assert.rejects(d.backups.freeze(), /не бэкап age/);
+
+  assert.equal(await d.backups.unfreeze(), true);
+  w.net.unfreezeReply = 'Error\n';
+  await assert.rejects(d.backups.unfreeze(), /вместо active/);
+
+  // команда freeze без --yes — только предупреждение
+  const lines = [];
+  const code = await main(['freeze'], { env: baseEnv({ DATA_DIR: dataDir }), out: (l) => lines.push(l), deps: { fetch: w.fetch, run: w.run, lookup: w.lookup } });
+  assert.equal(code, 2);
+  assert.match(lines.join('\n'), /freeze --yes/);
+  assert.ok(!w.calls.filter((c) => c.command === 'ssh').slice(-1)[0].args.includes('--yes'));
+});
+

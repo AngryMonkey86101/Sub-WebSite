@@ -22,19 +22,22 @@ function stamp(ms) {
   return `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())}-${pad(d.getUTCHours())}${pad(d.getUTCMinutes())}`;
 }
 
-// Имена файлов в архиве tar (ustar): заголовки по 512 байт, имя — 0..100, размер (восьмеричный) — 124..136
-function tarNames(tar) {
-  const names = [];
+// Файлы архива tar (ustar): заголовки по 512 байт, имя — 0..100, размер (восьмеричный) — 124..136,
+// тип — 156 ('0' или пусто — обычный файл)
+function tarEntries(tar) {
+  const entries = [];
   for (let offset = 0; offset + 512 <= tar.length; ) {
     const header = tar.subarray(offset, offset + 512);
     if (header.every((b) => b === 0)) break;
-    const name = header.subarray(0, 100).toString('utf8').replace(/\0.*$/s, '');
+    const name = header.subarray(0, 100).toString('utf8').replace(/\0.*$/s, '').replace(/^\.\//, '');
     const size = parseInt(header.subarray(124, 136).toString('ascii').replace(/\0.*$/s, '').trim() || '0', 8);
-    names.push(name);
+    const type = String.fromCharCode(header[156] || 48);
+    entries.push({ name, type, data: tar.subarray(offset + 512, offset + 512 + size) });
     offset += 512 + Math.ceil(size / 512) * 512;
   }
-  return names;
+  return entries;
 }
+const tarNames = (tar) => tarEntries(tar).map((e) => e.name);
 
 // Понятная причина по тексту ssh
 function sshReason(res, host) {
@@ -57,7 +60,7 @@ function createBackups({ config, keys, state, notify, isServerUp = () => true, r
   const knownHosts = join(config.dataDir, 'known_hosts');
   let running = null;
 
-  const sshArgs = () => [
+  const sshArgs = (command = null) => [
     '-F', '/dev/null',
     '-i', keys.sshFile,
     '-p', String(config.ssh.port),
@@ -68,7 +71,9 @@ function createBackups({ config, keys, state, notify, isServerUp = () => true, r
     '-o', 'StrictHostKeyChecking=accept-new',
     '-o', 'ConnectTimeout=20',
     '-o', 'ServerAliveInterval=15',
-    `${config.ssh.user}@${config.portalHost}`
+    `${config.ssh.user}@${config.portalHost}`,
+    // на сервере ключ диспетчера всё равно выполнит только dispatcher-command.sh; команда — просьба ему
+    ...(command ? [command] : [])
   ];
 
   async function verify(data) {
@@ -149,6 +154,44 @@ function createBackups({ config, keys, state, notify, isServerUp = () => true, r
     return pull();
   }
 
+  // Команда на сервере: backup, freeze, unfreeze, status (server/scripts/dispatcher-command.sh)
+  async function remote(command, timeoutMs = 60000) {
+    const res = await run('ssh', sshArgs(command), { timeoutMs });
+    if (res.code !== 0) throw new Error(sshReason(res, config.portalHost));
+    return res.stdout;
+  }
+
+  // Плановая смена (этап 7): заморозить старый сервер — портал и Caddy остановлены, AmneziaWG работает.
+  // Ответ — финальный бэкап и сертификаты Caddy; оба проверяются и сохраняются в rotation/<время>/.
+  async function freeze() {
+    const bundle = await remote('freeze', 10 * 60000);
+    const files = Object.fromEntries(tarEntries(bundle).filter((e) => e.type === '0').map((e) => [e.name, e.data]));
+    const backup = files['backup.tar.gz.age'];
+    const caddy = files['caddy.tar.gz.age'];
+    if (!backup || !caddy) throw new Error('сервер не отдал финальный бэкап и сертификаты — старый портал на сервере? обновите его');
+    await verify(backup);
+    if (caddy.subarray(0, MAGIC.length).toString('latin1') !== MAGIC) throw new Error('сертификаты Caddy пришли незашифрованными или повреждёнными');
+    const time = now();
+    const rotation = join(config.dataDir, 'rotation', stamp(time));
+    mkdirSync(rotation, { recursive: true, mode: 0o700 });
+    for (const [name, data] of [['backup.tar.gz.age', backup], ['caddy.tar.gz.age', caddy]]) writeFileSync(join(rotation, name), data, { mode: 0o600 });
+    // финальный бэкап — и самый свежий обычный
+    const name = `family-vpn-${stamp(time)}.tar.gz.age`;
+    writeFileSync(join(dir, name), backup, { mode: 0o600 });
+    prune();
+    state.set('backup', { ...(state.get('backup') ?? {}), lastAt: time, size: backup.length, file: name, failedAt: null, error: null, alerted: false });
+    return { dir: rotation, backup: join(rotation, 'backup.tar.gz.age'), caddy: join(rotation, 'caddy.tar.gz.age') };
+  }
+
+  // Откат: портал и Caddy на старом сервере снова работают
+  async function unfreeze() {
+    const out = (await remote('unfreeze', 3 * 60000)).toString().trim();
+    if (out !== 'active') throw new Error(`сервер ответил «${out.slice(0, 80)}» вместо active`);
+    return true;
+  }
+
+  const remoteStatus = async () => (await remote('status')).toString().trim();
+
   // Забыть ключ сервера SSH — после переезда на новый сервер
   async function trustHost() {
     const res = await run('ssh-keygen', ['-R', config.ssh.port === 22 ? config.portalHost : `[${config.portalHost}]:${config.ssh.port}`, '-f', knownHosts]);
@@ -157,7 +200,7 @@ function createBackups({ config, keys, state, notify, isServerUp = () => true, r
 
   const status = () => ({ ...(state.get('backup') ?? {}), latest: latest() });
 
-  return { pull, tick, latest, status, trustHost, verify };
+  return { pull, tick, latest, status, trustHost, verify, freeze, unfreeze, remoteStatus };
 }
 
-export { createBackups, tarNames, sshReason };
+export { createBackups, tarNames, tarEntries, sshReason };
