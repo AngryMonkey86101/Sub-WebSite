@@ -1,0 +1,34 @@
+# Диспетчер в РФ (dispatcher/): тесты на каждый пуш и пул-реквест с изменениями в dispatcher/.
+name: Dispatcher
+
+on:
+  push:
+    branches: [main]
+    paths: ['dispatcher/**', '.github/workflows/dispatcher.yml']
+  pull_request:
+    paths: ['dispatcher/**', '.github/workflows/dispatcher.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+      - name: Программы age и ssh-keygen для тестов
+        run: sudo apt-get install -y --no-install-recommends age openssh-client && age --version
+      - name: Тесты диспетчера
+        working-directory: dispatcher
+        run: npm test
+      - name: Сборка Docker-образа
+        working-directory: dispatcher
+        run: docker build -t family-vpn-dispatcher .
+      - name: Проверка образа
+        run: |
+          docker run --rm --entrypoint sh family-vpn-dispatcher -c 'age --version && ssh -V && ssh-keygen -? 2>&1 | head -1; node src/cli.js help | head -1'

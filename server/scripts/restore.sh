@@ -218,6 +218,8 @@ compose up -d amnezia-api portal
 ok "Портал запущен"
 # служба перезагрузки по команде из бота и админки — том данных уже есть
 bash "$APP/scripts/install-reboot.sh"
+# доступ диспетчера в РФ к бэкапу, если он есть в .env (dispatcher/README.md)
+bash "$APP/scripts/install-dispatcher-key.sh"
 
 step "6/7 Прежние ключи сервера VPN"
 cli restore-vpn < "$WORK/amnezia.json"

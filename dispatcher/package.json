@@ -1,0 +1,13 @@
+{
+  "name": "family-vpn-dispatcher",
+  "private": true,
+  "type": "module",
+  "description": "Диспетчер в РФ: проверка доступности сервера VPN и переезд на новый VPS через API хостера",
+  "engines": {
+    "node": ">=22.13"
+  },
+  "scripts": {
+    "test": "node --test test/*.test.js",
+    "probe": "node scripts/zomro-probe.mjs"
+  }
+}

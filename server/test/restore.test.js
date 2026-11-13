@@ -124,7 +124,7 @@ function prepare(name, { publicKey = SERVER_KEY } = {}) {
   const recipient = keyText.match(/public key: (age1\w+)/)[1];
   const secret = keyText.match(/AGE-SECRET-KEY-1\w+/)[0];
   const sqlite = randomBytes(4096);
-  const env = 'PORTAL_HOST=m2pr7x.duckdns.org\nVPN_HOST=k4tq9v.duckdns.org\nKEY_ENCRYPTION_KEY=kek\nSERVER_ID=srv-uuid\nTELEGRAM_BOT_TOKEN=7000000001:bot\nDUCKDNS_TOKEN=duck\nYOOKASSA_SHOP_ID=123456\nYOOKASSA_SECRET_KEY=live_secret\nDOCKER_GID=\nDOCKER_API_VERSION=\n';
+  const env = 'PORTAL_HOST=m2pr7x.duckdns.org\nVPN_HOST=k4tq9v.duckdns.org\nKEY_ENCRYPTION_KEY=kek\nSERVER_ID=srv-uuid\nTELEGRAM_BOT_TOKEN=7000000001:bot\nDUCKDNS_TOKEN=duck\nYOOKASSA_SHOP_ID=123456\nYOOKASSA_SECRET_KEY=live_secret\nDISPATCHER_SSH_KEY=ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl family-vpn-dispatcher\nDOCKER_GID=\nDOCKER_API_VERSION=\n';
   const archive = gzipSync(createTar([
     { name: 'README.txt', data: 'бэкап' },
     { name: 'env', data: env },
@@ -213,6 +213,9 @@ test('restore.sh: бэкап расшифрован, AmneziaWG с прежним
   }
   assert.ok(calls.includes('git -C ' + join(t.root, 'opt', 'amnezia-protocols') + ' checkout -q --detach 9c6e9b6198b9a844682615e79f401f7ac327134e'), 'установщик — проверенной версии');
   assert.ok(calls.includes('install.sh awg --port 51234 --subnet 10.8.1.0 --cidr 24'));
+  // диспетчер в РФ сразу может забирать бэкап с нового сервера
+  const auth = readFileSync(join(t.root, 'home', 'deploy', '.ssh', 'authorized_keys'), 'utf8');
+  assert.match(auth, /^command="cd \S+\/home\/deploy\/family-vpn && docker compose exec -T portal [^"]+ backup --stdout",restrict ssh-ed25519 AAAA\S+ family-vpn-dispatcher$/m);
   assert.match(res.stdout, /AmneziaWG: порт 51234\/udp, подсеть 10\.8\.1\.0\/24, клиентов 2/);
   assert.match(res.stdout, /В бэкапе есть ещё xray — скрипт восстанавливает только AmneziaWG/);
 

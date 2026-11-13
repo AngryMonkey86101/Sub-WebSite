@@ -84,7 +84,8 @@ function loadConfig(env = process.env) {
     // Сторож IP: обновляет записи DuckDNS при смене IP сервера (watchdog.js)
     duckdns: env.DUCKDNS_TOKEN?.trim() ? { token: env.DUCKDNS_TOKEN.trim() } : null,
     // Бэкап: открытый ключ age админа (backup.js). Пусто — бэкап не делается
-    backup: { recipient: env.BACKUP_AGE_RECIPIENT?.trim() || null },
+    // DISPATCHER_AGE_RECIPIENT — второй ключ: бэкап может расшифровать и диспетчер в РФ (dispatcher/)
+    backup: { recipient: env.BACKUP_AGE_RECIPIENT?.trim() || null, dispatcher: env.DISPATCHER_AGE_RECIPIENT?.trim() || null },
     // Оплата через ЮKassa. Пусто — заказы подтверждает админ вручную
     yookassa: shopId ? { shopId, secretKey, test: secretKey.startsWith('test_') } : null
   };
