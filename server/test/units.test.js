@@ -9,7 +9,7 @@ import { decodeVpnKey, encodeVpnKey, hostOfKey, isIpAddress } from '../src/vpnKe
 import { openDatabase } from '../src/db.js';
 import { encryptSecret, decryptSecret, newMemberCode, CODE } from '../src/crypto.js';
 import { loadConfig, ConfigError } from '../src/config.js';
-import { createAmneziaClient } from '../src/amnezia.js';
+import { createAmneziaClient, wgPeers, wgPeerList } from '../src/amnezia.js';
 import { html, cabinetPage } from '../src/pages.js';
 import { main } from '../src/cli.js';
 import { startFakeAmnezia } from './fakeAmnezia.js';
@@ -49,6 +49,14 @@ test('база с прошлой выкладки получает колонк�
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test('клиенты AmneziaWG — ключи из разделов [Peer] awg0.conf, без повторов', () => {
+  const conf = '[Interface]\nPrivateKey = c2VydmVy\nAddress = 10.8.1.0/24\n\n[Peer]\nPublicKey = QUJD+/x=\nAllowedIPs = 10.8.1.2/32\n\n[Peer]\n  PublicKey=REVG\nAllowedIPs = 0.0.0.0/32\n[Peer]\nPublicKey = QUJD+/x=\n';
+  assert.deepEqual(wgPeers(conf), ['QUJD+/x=', 'REVG']);
+  assert.deepEqual(wgPeers('[Interface]\nPrivateKey = x\n'), []);
+  assert.deepEqual(wgPeers(undefined), []);
+  assert.deepEqual(wgPeerList(conf), [{ key: 'QUJD+/x=', disabled: false }, { key: 'REVG', disabled: true }]);
 });
 
 test('IP или имя', () => {
@@ -118,6 +126,15 @@ test('адаптер: постраничный список без адресо�
     const clients = await amnezia.listClients();
     assert.equal(clients.length, 130, 'две страницы по 100');
     assert.ok(clients.every((c) => c.peers.every((p) => !('endpoint' in p))));
+    // amnezia-api может отдать меньше, чем просили (например, ограничит страницу): портал листает
+    // дальше сам, пока не придёт пустая страница
+    fake.state.maxPage = 10;
+    assert.equal((await amnezia.listClients()).length, 130, 'страницы по 10');
+    fake.state.totalIsPage = true;
+    assert.equal((await amnezia.listClients()).length, 130, 'total — размер страницы, а не всего');
+    fake.state.ignoreSkip = true;
+    assert.equal((await amnezia.listClients()).length, 10, 'сервер не листает — без вечного цикла');
+    Object.assign(fake.state, { maxPage: undefined, totalIsPage: false, ignoreSkip: false });
 
     const [client] = clients;
     assert.equal(await amnezia.deleteClient({ id: client.peers[0].id, protocol: 'amneziawg3' }), true);

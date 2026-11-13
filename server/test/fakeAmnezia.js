@@ -1,6 +1,7 @@
 import { createServer } from 'node:http';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { encodeVpnKey } from '../src/vpnKey.js';
+import { wgPeerList } from '../src/amnezia.js';
 
 // Поддельный amnezia-api по контракту 2.0.0 (openapi/openapi.json): клиенты в памяти,
 // ключи vpn:// в настоящем формате. Каждому клиенту отдаётся внешний адрес устройства
@@ -52,10 +53,17 @@ async function startFakeAmnezia({ apiKey, host = 'k4tq9v.duckdns.org' }) {
       if (!Array.isArray(body.protocols) || !body.amneziaWg3?.wgConfig) return send(400, { message: 'Некорректная резервная копия' });
       state.imported = body;
       state.clients.clear();
-      for (const client of body.amneziaWg3.clients) {
-        state.clients.set(client.clientId, {
-          id: client.clientId,
-          name: client.userData?.clientName ?? '',
+      // как настоящий amnezia-api: клиенты — пиры из awg0.conf (awg syncconf), таблица клиентов —
+      // только их имена; записи таблицы без пира в конфиге клиентами не становятся
+      // Ключи на паузе (0.0.0.0/32): адрес достаётся последнему, у прочих он пуст, и amnezia-api,
+      // пока к ним не подключались, их не показывает — как на новом сервере после переезда.
+      const names = new Map(body.amneziaWg3.clients.map((c) => [c.clientId, c.userData?.clientName ?? '']));
+      const peers = wgPeerList(body.amneziaWg3.wgConfig);
+      const lastPaused = peers.filter((p) => p.disabled).at(-1)?.key;
+      for (const id of peers.filter((p) => !p.disabled || p.key === lastPaused).map((p) => p.key)) {
+        state.clients.set(id, {
+          id,
+          name: names.get(id) ?? id,
           protocol: 'amneziawg3',
           status: 'active',
           online: false,
@@ -63,6 +71,8 @@ async function startFakeAmnezia({ apiKey, host = 'k4tq9v.duckdns.org' }) {
           traffic: { received: 0, sent: 0 }
         });
       }
+      // сбой применения конфигурации: часть пиров не попала в AmneziaWG
+      for (const id of [...state.clients.keys()].slice(0, state.dropOnImport ?? 0)) state.clients.delete(id);
       return send(200, { id: 'srv', region: 'NL', weight: 100, maxPeers: 200, totalPeers: state.clients.size, protocols: ['amneziawg3'] });
     }
 
@@ -72,7 +82,7 @@ async function startFakeAmnezia({ apiKey, host = 'k4tq9v.duckdns.org' }) {
         serverId: 'srv',
         protocols: ['amneziawg3'],
         amneziaWg3: {
-          wgConfig: '[Interface]\nPrivateKey = server-private-key\nJc = 4\n',
+          wgConfig: `[Interface]\nPrivateKey = server-private-key\nJc = 4\n${[...state.clients.values()].filter((c) => c.protocol === 'amneziawg3').map((c) => `\n[Peer]\nPublicKey = ${c.id}\nAllowedIPs = 10.8.1.2/32\n`).join('')}`,
           presharedKey: 'psk',
           serverPublicKey: 'server-public-key',
           clients: [...state.clients.values()].map((c) => ({ clientId: c.id, userData: { clientName: c.name } }))
@@ -130,8 +140,12 @@ async function startFakeAmnezia({ apiKey, host = 'k4tq9v.duckdns.org' }) {
       }
       const all = [...groups].map(([username, peers]) => ({ username, peers }));
       const skip = Number(url.searchParams.get('skip') ?? 0);
-      const limit = Number(url.searchParams.get('limit') ?? 100);
-      return send(200, { total: all.length, items: all.slice(skip, skip + limit) });
+      // как живой amnezia-api: больше state.maxPage за раз не отдаёт, сколько ни попроси
+      const limit = Math.min(Number(url.searchParams.get('limit') ?? 100), state.maxPage ?? Infinity);
+      const page = all.slice(skip, skip + limit);
+      // totalIsPage — total как размер страницы; ignoreSkip — skip не учитывается (всегда с начала)
+      if (state.ignoreSkip) return send(200, { total: all.length, items: all.slice(0, limit) });
+      return send(200, { total: state.totalIsPage ? page.length : all.length, items: page });
     }
 
     const client = state.clients.get(body.clientId);

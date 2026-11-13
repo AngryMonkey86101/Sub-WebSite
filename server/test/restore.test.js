@@ -41,12 +41,18 @@ const AMNEZIA_JSON = {
   serverId: 'srv-uuid',
   protocols: ['amneziawg3', 'xray'],
   amneziaWg3: {
-    wgConfig: '[Interface]\nPrivateKey = server-private-key\nAddress = 10.8.1.0/24\nListenPort = 51234\nJc = 4\n\n[Peer]\nPublicKey = a\n\n[Peer]\nPublicKey = b\n',
+    wgConfig: '[Interface]\nPrivateKey = server-private-key\nAddress = 10.8.1.0/24\nListenPort = 51234\nJc = 4\n\n[Peer]\nPublicKey = peer-a\nAllowedIPs = 10.8.1.2/32\n\n[Peer]\nPublicKey = peer-b\nAllowedIPs = 10.8.1.3/32\n' +
+      // ключи на паузе (истёк срок): у обоих 0.0.0.0/32 — amnezia-api до подключения видит лишь один
+      '\n[Peer]\nPublicKey = peer-c\nAllowedIPs = 0.0.0.0/32\n\n[Peer]\nPublicKey = peer-d\nAllowedIPs = 0.0.0.0/32\n',
     presharedKey: 'psk',
     serverPublicKey: SERVER_KEY,
     clients: [
       { clientId: 'peer-a', userData: { clientName: 'K7M2-1' } },
-      { clientId: 'peer-b', userData: { clientName: 'K7M2-2' } }
+      { clientId: 'peer-b', userData: { clientName: 'K7M2-2' } },
+      { clientId: 'peer-c', userData: { clientName: 'P3XQ-1' } },
+      { clientId: 'peer-d', userData: { clientName: 'H8WN-1' } },
+      // запись удалённого раньше устройства: в таблице осталась, пира в awg0.conf нет
+      { clientId: 'peer-old', userData: { clientName: 'K7M2-9' } }
     ]
   },
   xray: { serverConfig: '{}' }
@@ -96,9 +102,17 @@ test('CLI restore-vpn: ключи сервера из бэкапа — в amnezi
     assert.deepEqual(fake.state.imported.protocols, ['amneziawg3']);
     assert.equal(fake.state.imported.amneziaWg3.serverPublicKey, SERVER_KEY);
     assert.match(lines.join('\n'), /⚠️ Не восстановлены — их нет на этом сервере: amneziawg/);
-    assert.match(lines.join('\n'), /Ключи сервера VPN восстановлены: клиентов 2 из 2 в бэкапе/);
+    assert.match(lines.join('\n'), /Ключи сервера VPN восстановлены: действующих 2 из 2, на паузе 2, всего в бэкапе 4/);
+    assert.match(lines.join('\n'), /В таблице клиентов ещё 1 без ключа в awg0\.conf — это удалённые раньше устройства/);
     assert.equal(value('backup_last_at'), null, 'ключи прежние — бэкап можно делать');
     after.close();
+
+    // ключ клиента не попал в AmneziaWG — переезд останавливается
+    fake.state.dropOnImport = 1;
+    lines.length = 0;
+    await assert.rejects(run(['restore-vpn'], JSON.stringify(AMNEZIA_JSON)), /Не все действующие ключи клиентов из бэкапа видны в amnezia-api/);
+    assert.match(lines.join('\n'), /действующих 1 из 2, на паузе 2/);
+    fake.state.dropOnImport = 0;
 
     // amnezia-api не поднялся — понятная ошибка после ожидания
     process.env.AMNEZIA_API_URL = 'http://127.0.0.1:9';
@@ -158,7 +172,7 @@ case "$*" in
     while [ $# -gt 0 ]; do [ "$1" = "-v" ] && cp "\${2%%:*}/caddy.tar.gz" "$OUT/caddy.tar.gz"; shift; done ;;
   "compose --ansi never exec -T portal node --disable-warning=ExperimentalWarning src/cli.js duckdns") echo "⚠️ Имя DuckDNS указывает не на этот сервер" ;;
   "exec amnezia-awg2 awg show awg0 public-key") echo "$FAKE_PUBLIC_KEY" ;;
-  "exec amnezia-awg2 awg show awg0 peers") printf 'a\\nb\\n' ;;
+  "exec amnezia-awg2 awg show awg0 peers") printf '%s\\n' \${FAKE_PEERS:-a b c d} ;;
   "volume inspect -f {{.Mountpoint}} family-vpn_data") mkdir -p "$OUT/volume"; echo "$OUT/volume" ;;
   "compose --ansi never run --rm --no-deps -T -u root"*)
     # база из бэкапа: что именно увидит контейнер в /restore
@@ -220,7 +234,7 @@ test('restore.sh: бэкап расшифрован, AmneziaWG с прежним
   // диспетчер в РФ сразу может забирать бэкап с нового сервера
   const auth = readFileSync(join(t.root, 'home', 'deploy', '.ssh', 'authorized_keys'), 'utf8');
   assert.match(auth, /^command="bash \S+\/home\/deploy\/family-vpn\/scripts\/dispatcher-command\.sh",restrict ssh-ed25519 AAAA\S+ family-vpn-dispatcher$/m);
-  assert.match(res.stdout, /AmneziaWG: порт 51234\/udp, подсеть 10\.8\.1\.0\/24, клиентов 2/);
+  assert.match(res.stdout, /AmneziaWG: порт 51234\/udp, подсеть 10\.8\.1\.0\/24, клиентов 4/);
   assert.match(res.stdout, /В бэкапе есть ещё xray — скрипт восстанавливает только AmneziaWG/);
 
   // .env — из бэкапа, со своими DOCKER_GID и DOCKER_API_VERSION, только для владельца
@@ -245,7 +259,7 @@ test('restore.sh: бэкап расшифрован, AmneziaWG с прежним
   // база и ключи сервера — те, что в бэкапе
   assert.deepEqual(readFileSync(join(t.out, 'restored.sqlite')), t.sqlite);
   assert.deepEqual(JSON.parse(readFileSync(join(t.out, 'restore-input.json'), 'utf8')), AMNEZIA_JSON);
-  assert.match(res.stdout, /Ключ сервера прежний, клиентов в AmneziaWG: 2 из 2/);
+  assert.match(res.stdout, /Ключ сервера прежний, клиентов в AmneziaWG: 4 из 4/);
 
   // порядок: база → «забыть старый сервер» → запуск → ключи → перезапуск AWG → DuckDNS → Caddy
   const order = [
@@ -345,6 +359,13 @@ test('restore.sh: чужой ключ, не тот ключ сервера — �
   assert.match(res.stderr, /не прежний ключ сервера \(другой-ключ=\)/);
   assert.equal(indexOf(res.calls, /duckdns --takeover/), -1, 'имена не переносятся на неисправный сервер');
   assert.equal(existsSync(mismatch.work), false);
+
+  // в AmneziaWG меньше ключей клиентов, чем в бэкапе — имена не переносятся
+  const short = prepare('short');
+  res = short.run(`${short.secret}\ny\n`, [], { FAKE_PEERS: 'a b' });
+  assert.notEqual(res.status, 0);
+  assert.match(res.stderr, /В AmneziaWG ключей клиентов 2, а в бэкапе 4/);
+  assert.equal(indexOf(res.calls, /duckdns --takeover/), -1);
 });
 
 test('restore.sh: shellcheck без замечаний', { skip: spawnSync('shellcheck', ['--version']).status !== 0 && 'нет shellcheck' }, () => {

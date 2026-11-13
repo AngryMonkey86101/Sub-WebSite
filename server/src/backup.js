@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { createTar } from './tar.js';
 import { HOUR, DAY } from './config.js';
 import { PortalError } from './portal.js';
+import { wgPeers } from './amnezia.js';
 
 // Бэкап (этап 4): раз в сутки портал собирает всё, что нужно для переезда на новый сервер без
 // замены ключей у семьи, шифрует открытым ключом админа (age) и присылает файлом в Telegram.
@@ -156,7 +157,8 @@ portal.sqlite  база портала: участники, выданные к�
       { name: 'portal.sqlite', data: snapshotDb() }
     ];
     const data = await seal(gzipSync(createTar(files, { mtime: time })));
-    const keys = Object.values(server).reduce((sum, part) => sum + (Array.isArray(part?.clients) ? part.clients.length : 0), 0);
+    // AmneziaWG — по разделам [Peer] в awg0.conf: в таблице клиентов бывают записи удалённых устройств
+    const keys = Object.values(server).reduce((sum, part) => sum + (part?.wgConfig ? wgPeers(part.wgConfig).length : Array.isArray(part?.clients) ? part.clients.length : 0), 0);
     return {
       data,
       filename: `family-vpn-${stamp(time)}.tar.gz.age`,
