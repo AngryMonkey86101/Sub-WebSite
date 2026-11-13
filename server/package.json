@@ -2,7 +2,7 @@
   "name": "family-vpn-portal",
   "private": true,
   "version": "0.1.0",
-  "description": "Семейный портал выдачи ключей AmneziaVPN поверх amnezia-api",
+  "description": "Табор VPN: портал выдачи ключей AmneziaVPN поверх amnezia-api",
   "type": "module",
   "engines": {
     "node": ">=22.13"

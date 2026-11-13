@@ -153,7 +153,7 @@ test('Telegram: чат админа подключается одноразов�
 
   // посторонние: команд админа не выполняют, видят клиентское меню
   await say(999, '/status');
-  assert.match(tg.last(), /Это бот VPN/);
+  assert.match(tg.last(), /Это Табор VPN/);
   assert.ok(!tg.sent.some((m) => /Сервер VPN|Участников/.test(m.text)));
   await say(999, '/start wrong-code');
   assert.match(tg.last(), /недействительна или устарела/);
@@ -192,7 +192,7 @@ test('Telegram: чат админа подключается одноразов�
   assert.ok(tg.calls.some((c) => c.method === 'deleteMyCommands' && c.params.scope.chat_id === '42'), 'у прежнего чата — снова клиентское меню команд');
   await say(42, '/status');
   assert.ok(!tg.sent.some((m) => m.chat_id === '42' && /Сервер VPN/.test(m.text)), 'прежний чат больше не управляет');
-  assert.match(tg.last(), /Это бот VPN/);
+  assert.match(tg.last(), /Это Табор VPN/);
 
   await telegram.unlink();
   assert.equal(telegram.chatId(), null);
@@ -272,7 +272,7 @@ test('Telegram: чат из .env — подключать не нужно, ко�
   await say(-100500, '/invite', 'supergroup');
   assert.equal(tg.sent.length, count, 'в группе команды мог бы отправить кто угодно');
   await say(42, '/invite');
-  assert.match(tg.last(), /Это бот VPN/, 'личный чат — клиентское меню');
+  assert.match(tg.last(), /Это Табор VPN/, 'личный чат — клиентское меню');
   assert.equal(tg.sent.at(-1).chat_id, '42');
   db.close();
 });
@@ -349,7 +349,7 @@ test('Telegram: клиентское меню — кнопки, экраны, л
   assert.match(tg.edited.at(-1).text, /Доступа пока нет/);
   // неизвестная или устаревшая кнопка — меню
   await press(500, 'c:что-то-старое', 7);
-  assert.match(tg.edited.at(-1).text, /Это бот VPN/);
+  assert.match(tg.edited.at(-1).text, /Это Табор VPN/);
 
   // старое сообщение править нельзя — экран приходит новым сообщением
   tg.state.cannotEdit = true;
@@ -363,7 +363,7 @@ test('Telegram: клиентское меню — кнопки, экраны, л
   await say(500, '/keys');
   assert.match(tg.last(), /Доступа пока нет/);
   await say(500, 'добрый день');
-  assert.match(tg.last(), /Это бот VPN/);
+  assert.match(tg.last(), /Это Табор VPN/);
 
   // кнопки в группах не работают
   const quietBefore = tg.calls.length;
@@ -372,7 +372,7 @@ test('Telegram: клиентское меню — кнопки, экраны, л
 
   // админ смотрит меню покупателя, кнопки работают и у него; команды админа — по-прежнему
   await say(42, '/client');
-  assert.match(tg.last(), /Это бот VPN/);
+  assert.match(tg.last(), /Это Табор VPN/);
   assert.equal(tg.sent.at(-1).chat_id, '42');
   await press(42, 'c:help', 9);
   assert.equal(tg.edited.at(-1).chat_id, '42');

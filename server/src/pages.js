@@ -75,8 +75,8 @@ function layout({ title, member, body, section }) {
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="robots" content="noindex, nofollow">
 <meta name="theme-color" content="#2563eb">
-<meta name="apple-mobile-web-app-title" content="Семейный VPN">
-<title>${title} · Семейный VPN</title>
+<meta name="apple-mobile-web-app-title" content="Табор VPN">
+<title>${title} · Табор VPN</title>
 <link rel="icon" href="/static/icon-192.png">
 <link rel="apple-touch-icon" href="/static/icon-180.png">
 ${member?.token ? html`<link rel="manifest" href="/manifest.webmanifest?t=${member.token}">` : ''}
@@ -85,7 +85,7 @@ ${member?.token ? html`<link rel="manifest" href="/manifest.webmanifest?t=${memb
 </head>
 <body>
 <header>
-  <a class="brand" href="/">Семейный VPN</a>
+  <a class="brand" href="/">Табор VPN</a>
   ${member
     ? html`<nav class="who">
     <span>Участник <b>${member.code}</b></span>
@@ -122,7 +122,7 @@ function invitePage({ token, member }) {
   return layout({
     title: 'Приглашение',
     body: html`
-      <h1>Приглашение в семейный VPN</h1>
+      <h1>Приглашение в Табор VPN</h1>
       <p>Вам выдан код участника <b>${member.code}</b>. Имя и контакты не нужны.</p>
       <p>После нажатия кнопки вы получите личную ссылку. По ней вы сами добавляете устройства и забираете ключи для приложения AmneziaVPN.</p>
       <form method="post" action="/i/${token}">

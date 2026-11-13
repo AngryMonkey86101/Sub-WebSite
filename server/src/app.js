@@ -40,8 +40,8 @@ const STATIC = {
 function webManifest(startUrl) {
   return {
     id: '/',
-    name: 'Семейный VPN',
-    short_name: 'Семейный VPN',
+    name: 'Табор VPN',
+    short_name: 'Табор VPN',
     lang: 'ru',
     start_url: startUrl,
     scope: '/',
