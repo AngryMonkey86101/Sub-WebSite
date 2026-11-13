@@ -18,7 +18,8 @@ import { createZomro, ZomroError, DEFAULT_URL } from '../src/zomro.js';
 const SECRET_KEY = /pass|auth|token|secret|session|apikey|api_key|key$|sign/i;
 const PERSONAL_KEY = /mail|phone|mobile|person|realname|fullname|first_?name|last_?name|middle|address|addr$|inn|kpp|ogrn|passport|birth|card|bank|zip|city|street|telegram|skype|jabber|login|username|owner|account_?name|company/i;
 const EMAIL = /[\w.+-]+@[\w-]+\.[\w.-]+/g;
-const PHONE = /\+?\d[\d\s()-]{8,}\d/g;
+// телефон: +7 / 8 и 10 цифр с разделителями — не даты и не номера услуг
+const PHONE = /(?:\+\d{1,3}|\b8)[\s(-]*\d{3}[\s)-]*\d{3}[\s-]*\d{2}[\s-]*\d{2}\b/g;
 const IPV4 = /\b(\d{1,3})\.\d{1,3}\.\d{1,3}\.\d{1,3}\b/g;
 const MAX_ITEMS = 12;
 const MAX_TEXT = 140;
@@ -139,11 +140,15 @@ async function main() {
   }
 
   // 2. Где ваши VPS: в BILLmanager у каждого вида услуг своя функция списка
-  print('\n— Где ваши серверы —');
-  for (const func of ['v2.instances', 'instances', 'v2.vds', 'vds', 'cloudvps', 'vps', 'cloud', 'v2.cloud', 'dedic', 'service', 'item']) {
-    const items = await attempt(`Услуги (func=${func})`, () => zomro.list(func));
-    if (items?.length) show({ всего: items.length, поля: fieldsOf(items), примеры: items.slice(0, 3) });
-    else if (items) print('  пусто');
+  print('\n— Ваши серверы (func=instances) —');
+  const servers = (await attempt('Услуги (func=instances)', () => zomro.list('instances'))) ?? [];
+  if (servers.length) {
+    show(servers.map((x) => ({ id: x.id, name: x.name, servername: x.servername, status: x.instance_status, ip: x.ip, cost: x.cost, period: x.period, billhourly: x.billhourly, datacenter: `${x.datacenter} ${x.datacentername ?? ''}`, pricelist: `${x.pricelist_id} ${x.pricelist ?? ''}`, os: `${x.os_distro ?? ''} ${x.os_version ?? ''} ${x.instances_os ?? ''}`, autoprolong: x.autoprolong })));
+    // форма услуги — только просмотр: какие поля есть у сервера (пароль скрывается)
+    const card = await attempt(`Карточка сервера (func=instances.edit, elid=${servers[0].id}) — только просмотр`, () => zomro.call('instances.edit', { elid: String(servers[0].id) }));
+    if (card) show(summary(card));
+  } else {
+    print('  пусто');
   }
 
   // 3. Баланс
@@ -152,13 +157,14 @@ async function main() {
   if (balance) show(balance.map((b) => ({ balance: b.balance, creditlimit: b.creditlimit })));
 
   // 4. Заказ по шагам, как в кабинете: дата-центр → тарифы в нём → форма заказа (без подтверждения)
-  for (const prefix of ['v2.instances', 'vds']) {
+  for (const prefix of ['instances']) {
     print(`\n— Заказ: ${prefix} —`);
     const step = await attempt(`Первый шаг заказа (func=${prefix}.order)`, () => zomro.call(`${prefix}.order`));
     if (step) show(summary(step));
     const fromElems = (Array.isArray(step?.elem) ? step.elem : step?.elem ? [step.elem] : []).map((e) => e.datacenter ?? e.id).filter(Boolean);
-    const datacenters = [...new Set([...optionsOf(step, 'datacenter'), ...fromElems])].slice(0, 6);
-    if (!datacenters.length) datacenters.push(null);
+    // дата-центры: из первого шага заказа и из уже купленных серверов
+    const datacenters = [...new Set([...optionsOf(step, 'datacenter'), ...fromElems, ...servers.map((x) => x.datacenter)].filter(Boolean).map(String))].slice(0, 6);
+    datacenters.push(null);
     let first = null;
     for (const datacenter of datacenters) {
       const params = datacenter ? { datacenter: String(datacenter) } : {};
@@ -167,6 +173,9 @@ async function main() {
       show({ всего: items.length, поля: fieldsOf(items), тарифы: items });
       if (!first && items.length) first = { params, item: items[0] };
     }
+    // тарифов не нашлось — форма по тарифу уже купленного посуточного сервера
+    const daily = servers.find((x) => String(x.period) === '-50') ?? servers[0];
+    if (!first && daily) first = { params: { datacenter: String(daily.datacenter) }, item: { id: daily.pricelist_id } };
     if (first) {
       const id = first.item.id ?? first.item.pricelist ?? first.item.elid;
       const form = await attempt(`Форма заказа (func=${prefix}.order.param, pricelist=${id}) — без заказа`, () =>
