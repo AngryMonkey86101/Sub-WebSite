@@ -5,7 +5,7 @@ import * as systemDns from 'node:dns/promises';
 import { setTimeout as delay } from 'node:timers/promises';
 import { openDatabase } from './db.js';
 import { loadConfig, ConfigError, PROTOCOLS } from './config.js';
-import { createAmneziaClient, wgPeers } from './amnezia.js';
+import { createAmneziaClient, wgPeerList } from './amnezia.js';
 import { createTelegram } from './telegram.js';
 import { createWatchdog, detectPublicIp, describeStatus } from './watchdog.js';
 import { createBackup } from './backup.js';
@@ -63,8 +63,9 @@ async function waitForApi(amnezia, { attempts, delayMs }) {
 }
 
 // Ключи сервера VPN из бэкапа (amnezia.json) — обратно в amnezia-api. Восстанавливаются протоколы,
-// которые есть на этом сервере; AmneziaWG обязателен. Проверка — каждый ключ клиента из awg0.conf
-// бэкапа (разделы [Peer]) есть в AmneziaWG на новом сервере.
+// которые есть на этом сервере; AmneziaWG обязателен. Проверка — каждый действующий ключ клиента
+// из awg0.conf бэкапа (разделы [Peer]) виден в amnezia-api. Ключи на паузе amnezia-api до первого
+// подключения не показывает (wgPeerList) — их restore.sh сверяет прямо в AmneziaWG (awg show peers).
 async function restoreVpn({ amnezia, input, wait, out }) {
   let data;
   try {
@@ -82,13 +83,16 @@ async function restoreVpn({ amnezia, input, wait, out }) {
   const skipped = data.protocols.filter((p) => !available.includes(p));
   if (skipped.length) out(`⚠️ Не восстановлены — их нет на этом сервере: ${skipped.join(', ')}`);
   await amnezia.importServerBackup({ ...data, protocols });
-  const expected = wgPeers(data.amneziaWg3.wgConfig);
+  const peers = wgPeerList(data.amneziaWg3.wgConfig);
+  const expected = peers.filter((peer) => !peer.disabled).map((peer) => peer.key);
+  const paused = peers.length - expected.length;
   const present = new Set((await amnezia.listClients()).flatMap((client) => client.peers).filter((peer) => peer.protocol === 'amneziawg3').map((peer) => peer.id));
   const restored = expected.filter((key) => present.has(key)).length;
-  out(`Ключи сервера VPN восстановлены: клиентов ${restored} из ${expected.length} в бэкапе`);
-  const stale = new Set(data.amneziaWg3.clients.map((c) => c?.clientId).filter((id) => id && !expected.includes(id))).size;
+  out(`Ключи сервера VPN восстановлены: действующих ${restored} из ${expected.length}${paused ? `, на паузе ${paused}` : ''}, всего в бэкапе ${peers.length}`);
+  const keys = new Set(peers.map((peer) => peer.key));
+  const stale = new Set(data.amneziaWg3.clients.map((c) => c?.clientId).filter((id) => id && !keys.has(id))).size;
   if (stale) out(`  В таблице клиентов ещё ${stale} без ключа в awg0.conf — это удалённые раньше устройства, они не нужны`);
-  if (restored !== expected.length) throw new PortalError(500, 'Не все ключи клиентов из бэкапа есть в AmneziaWG — проверьте docker compose logs amnezia-api');
+  if (restored !== expected.length) throw new PortalError(500, 'Не все действующие ключи клиентов из бэкапа видны в amnezia-api — проверьте docker compose logs amnezia-api');
 }
 
 async function main(argv, {

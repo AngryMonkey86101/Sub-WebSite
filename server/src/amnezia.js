@@ -14,9 +14,21 @@ const PAGE = 100;
 // Ключи клиентов в awg0.conf — открытые ключи из разделов [Peer], без повторов. Именно они попадают
 // в AmneziaWG (awg syncconf). Таблица клиентов (clientsTable) — только подписи к ним, и в ней
 // остаются записи удалённых раньше устройств: считать клиентов по ней нельзя.
-function wgPeers(wgConfig) {
-  return [...new Set([...String(wgConfig ?? '').matchAll(/^[ \t]*PublicKey[ \t]*=[ \t]*(\S+)/gm)].map((m) => m[1]))];
+// disabled — ключ на паузе: AllowedIPs = 0.0.0.0/32. Такой адрес WireGuard оставляет только одному
+// ключу, у остальных список адресов пуст, и amnezia-api не показывает их, пока к ним никто не
+// подключался (на новом сервере после переезда — все). Сами ключи в AmneziaWG при этом есть.
+function wgPeerList(wgConfig) {
+  const peers = new Map();
+  for (const section of String(wgConfig ?? '').split(/^[ \t]*\[Peer\][ \t]*$/m).slice(1)) {
+    const key = section.match(/^[ \t]*PublicKey[ \t]*=[ \t]*(\S+)/m)?.[1];
+    if (!key) continue;
+    const allowed = (section.match(/^[ \t]*AllowedIPs[ \t]*=(.*)$/m)?.[1] ?? '').split(',').map((x) => x.trim()).filter(Boolean);
+    peers.set(key, { key, disabled: allowed.length === 1 && allowed[0] === '0.0.0.0/32' });
+  }
+  return [...peers.values()];
 }
+
+const wgPeers = (wgConfig) => wgPeerList(wgConfig).map((peer) => peer.key);
 
 function createAmneziaClient({ baseUrl, apiKey, timeoutMs = 30000, fetch = globalThis.fetch }) {
   async function request(method, path, body) {
@@ -121,4 +133,4 @@ function createAmneziaClient({ baseUrl, apiKey, timeoutMs = 30000, fetch = globa
   };
 }
 
-export { createAmneziaClient, AmneziaError, wgPeers };
+export { createAmneziaClient, AmneziaError, wgPeers, wgPeerList };

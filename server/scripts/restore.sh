@@ -288,7 +288,10 @@ for _ in $(seq 1 15); do
 done
 [ "$ACTUAL_KEY" = "$SERVER_KEY" ] \
   || die "У AmneziaWG не прежний ключ сервера (${ACTUAL_KEY:-нет ответа}) — ключи семьи с ним не подключатся. Смотрите docker logs $AWG"
+# все ключи из бэкапа, и действующие, и на паузе: awg show peers видит каждый, даже без адреса
 PEERS=$(docker exec "$AWG" awg show awg0 peers | grep -c . || true)
+[ "$PEERS" -ge "$CLIENTS" ] \
+  || die "В AmneziaWG ключей клиентов $PEERS, а в бэкапе $CLIENTS — смотрите docker logs $AWG"
 ok "Ключ сервера прежний, клиентов в AmneziaWG: $PEERS из $CLIENTS"
 
 if [ "$DRILL" -eq 1 ]; then

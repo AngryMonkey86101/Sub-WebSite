@@ -9,7 +9,7 @@ import { decodeVpnKey, encodeVpnKey, hostOfKey, isIpAddress } from '../src/vpnKe
 import { openDatabase } from '../src/db.js';
 import { encryptSecret, decryptSecret, newMemberCode, CODE } from '../src/crypto.js';
 import { loadConfig, ConfigError } from '../src/config.js';
-import { createAmneziaClient, wgPeers } from '../src/amnezia.js';
+import { createAmneziaClient, wgPeers, wgPeerList } from '../src/amnezia.js';
 import { html, cabinetPage } from '../src/pages.js';
 import { main } from '../src/cli.js';
 import { startFakeAmnezia } from './fakeAmnezia.js';
@@ -56,6 +56,7 @@ test('клиенты AmneziaWG — ключи из разделов [Peer] awg0.
   assert.deepEqual(wgPeers(conf), ['QUJD+/x=', 'REVG']);
   assert.deepEqual(wgPeers('[Interface]\nPrivateKey = x\n'), []);
   assert.deepEqual(wgPeers(undefined), []);
+  assert.deepEqual(wgPeerList(conf), [{ key: 'QUJD+/x=', disabled: false }, { key: 'REVG', disabled: true }]);
 });
 
 test('IP или имя', () => {

@@ -1,7 +1,7 @@
 import { createServer } from 'node:http';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { encodeVpnKey } from '../src/vpnKey.js';
-import { wgPeers } from '../src/amnezia.js';
+import { wgPeerList } from '../src/amnezia.js';
 
 // Поддельный amnezia-api по контракту 2.0.0 (openapi/openapi.json): клиенты в памяти,
 // ключи vpn:// в настоящем формате. Каждому клиенту отдаётся внешний адрес устройства
@@ -55,8 +55,12 @@ async function startFakeAmnezia({ apiKey, host = 'k4tq9v.duckdns.org' }) {
       state.clients.clear();
       // как настоящий amnezia-api: клиенты — пиры из awg0.conf (awg syncconf), таблица клиентов —
       // только их имена; записи таблицы без пира в конфиге клиентами не становятся
+      // Ключи на паузе (0.0.0.0/32): адрес достаётся последнему, у прочих он пуст, и amnezia-api,
+      // пока к ним не подключались, их не показывает — как на новом сервере после переезда.
       const names = new Map(body.amneziaWg3.clients.map((c) => [c.clientId, c.userData?.clientName ?? '']));
-      for (const id of wgPeers(body.amneziaWg3.wgConfig)) {
+      const peers = wgPeerList(body.amneziaWg3.wgConfig);
+      const lastPaused = peers.filter((p) => p.disabled).at(-1)?.key;
+      for (const id of peers.filter((p) => !p.disabled || p.key === lastPaused).map((p) => p.key)) {
         state.clients.set(id, {
           id,
           name: names.get(id) ?? id,
