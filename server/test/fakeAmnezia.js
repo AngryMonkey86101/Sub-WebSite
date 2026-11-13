@@ -130,7 +130,8 @@ async function startFakeAmnezia({ apiKey, host = 'k4tq9v.duckdns.org' }) {
       }
       const all = [...groups].map(([username, peers]) => ({ username, peers }));
       const skip = Number(url.searchParams.get('skip') ?? 0);
-      const limit = Number(url.searchParams.get('limit') ?? 100);
+      // как живой amnezia-api: больше state.maxPage за раз не отдаёт, сколько ни попроси
+      const limit = Math.min(Number(url.searchParams.get('limit') ?? 100), state.maxPage ?? Infinity);
       return send(200, { total: all.length, items: all.slice(skip, skip + limit) });
     }
 

@@ -118,6 +118,11 @@ test('адаптер: постраничный список без адресо�
     const clients = await amnezia.listClients();
     assert.equal(clients.length, 130, 'две страницы по 100');
     assert.ok(clients.every((c) => c.peers.every((p) => !('endpoint' in p))));
+    // живой amnezia-api отдаёт по 10 за раз, сколько ни попроси: портал листает дальше сам
+    // (иначе при переезде «клиентов 10 из 21 в бэкапе»)
+    fake.state.maxPage = 10;
+    assert.equal((await amnezia.listClients()).length, 130, 'страницы по 10');
+    fake.state.maxPage = undefined;
 
     const [client] = clients;
     assert.equal(await amnezia.deleteClient({ id: client.peers[0].id, protocol: 'amneziawg3' }), true);

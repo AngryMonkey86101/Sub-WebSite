@@ -74,9 +74,11 @@ function createAmneziaClient({ baseUrl, apiKey, timeoutMs = 30000, fetch = globa
 
     // Все клиенты сервера постранично. Внешний адрес устройства (endpoint) отбрасывается
     // здесь же: дальше адаптера IP-адреса членов семьи не попадают.
+    // amnezia-api может отдавать меньше, чем просили (на живом сервере — по 10): следующая
+    // страница начинается с того, сколько записей пришло, а не с размера запроса.
     async listClients() {
       const clients = [];
-      for (let skip = 0; ; skip += PAGE) {
+      for (let skip = 0; ; ) {
         const { total, items } = await request('GET', `/clients?skip=${skip}&limit=${PAGE}`);
         for (const item of items) {
           clients.push({
@@ -91,7 +93,8 @@ function createAmneziaClient({ baseUrl, apiKey, timeoutMs = 30000, fetch = globa
             }))
           });
         }
-        if (!items.length || skip + PAGE >= total) return clients;
+        skip += items.length;
+        if (!items.length || skip >= total) return clients;
       }
     },
 
