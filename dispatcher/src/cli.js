@@ -8,7 +8,11 @@ const HELP = `Команды:
   status      состояние: доступность сервера из РФ, последний бэкап
   check       проверить сервер из РФ сейчас
   backup      забрать бэкап сейчас
-  trust-host  забыть ключ SSH сервера — после переезда на новый сервер`;
+  trust-host  забыть ключ SSH сервера — после переезда на новый сервер
+  server      состояние портала на сервере: active или frozen
+  freeze --yes  заморозить портал на сервере (плановая смена): бот, оплаты и сайт остановятся,
+              VPN работает; финальный бэкап и сертификаты — в томе диспетчера
+  unfreeze    разморозить: портал, бот и сайт на сервере снова работают`;
 
 const fmt = (ms) => (ms ? new Date(ms).toISOString().replace('T', ' ').slice(0, 16) + ' UTC' : '—');
 
@@ -44,6 +48,24 @@ async function main(argv, { env = process.env, out = console.log, deps = {} } = 
       const r = await d.backups.pull();
       out(r.ok ? `✓ Бэкап получен и проверен: ${r.file}, ${r.size} байт` : `✗ Бэкап не получен: ${r.error}`);
       return r.ok ? 0 : 1;
+    }
+    case 'server': {
+      out(`Портал на ${config.portalHost}: ${await d.backups.remoteStatus()}`);
+      return 0;
+    }
+    case 'freeze': {
+      if (!argv.includes('--yes')) {
+        out('Заморозка остановит на сервере портал, бота и приём оплат (VPN продолжит работать) — до unfreeze или переезда.\nЕсли уверены: freeze --yes');
+        return 2;
+      }
+      const r = await d.backups.freeze();
+      out(`✓ Портал на сервере заморожен. Финальный бэкап и сертификаты Caddy: ${r.dir}\nОткат — unfreeze`);
+      return 0;
+    }
+    case 'unfreeze': {
+      await d.backups.unfreeze();
+      out('✓ Портал на сервере снова работает');
+      return 0;
     }
     case 'trust-host': {
       const ok = await d.backups.trustHost();

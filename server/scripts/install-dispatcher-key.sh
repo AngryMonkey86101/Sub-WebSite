@@ -4,9 +4,10 @@
 # restore.sh вызывает его сам — на новом сервере доступ появляется без участия админа.
 #
 # Берёт открытый SSH-ключ диспетчера из DISPATCHER_SSH_KEY в .env и пишет его в authorized_keys
-# пользователя deploy с принудительной командой: по этому ключу можно только получить свежий
-# зашифрованный бэкап — ни оболочки, ни других команд, ни проброса портов. Прежняя строка
-# диспетчера заменяется. Пустой DISPATCHER_SSH_KEY — строка диспетчера удаляется.
+# пользователя deploy с принудительной командой scripts/dispatcher-command.sh: по этому ключу можно
+# только получить бэкап, заморозить портал для плановой смены сервера и разморозить его — ни
+# оболочки, ни других команд, ни проброса портов. Прежняя строка диспетчера заменяется.
+# Пустой DISPATCHER_SSH_KEY — строка диспетчера удаляется.
 
 set -euo pipefail
 umask 077
@@ -39,10 +40,10 @@ esac
 TYPE_AND_KEY=$(printf '%s' "$KEY" | awk '{print $1" "$2}')
 printf '%s' "$TYPE_AND_KEY" | grep -Eq '^ssh-ed25519 [A-Za-z0-9+/]{60,80}={0,2}$' || { rm -f "$AUTH.tmp"; die "DISPATCHER_SSH_KEY не похож на ключ ssh-ed25519"; }
 
-COMMAND="cd $APP && docker compose exec -T portal node --disable-warning=ExperimentalWarning src/cli.js backup --stdout"
+COMMAND="bash $APP/scripts/dispatcher-command.sh"
 printf 'command="%s",restrict %s %s\n' "$COMMAND" "$TYPE_AND_KEY" "$MARK" >> "$AUTH.tmp"
 mv "$AUTH.tmp" "$AUTH"
 chmod 600 "$AUTH"
 chmod 700 "$(dirname "$AUTH")"
 chown -R "$DEPLOY_USER:$DEPLOY_USER" "$(dirname "$AUTH")" 2>/dev/null || true
-echo "✓ Диспетчер может забирать бэкап: ключ ${TYPE_AND_KEY:0:24}… — только команда бэкапа"
+echo "✓ Доступ диспетчера: ключ ${TYPE_AND_KEY:0:24}… — только бэкап, заморозка и разморозка портала"

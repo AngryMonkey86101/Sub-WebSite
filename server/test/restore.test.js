@@ -152,6 +152,10 @@ case "$*" in
   "--version") echo "Docker version 27.3.1" ;;
   "version --format {{.Server.APIVersion}}") echo "1.47" ;;
   "compose --ansi never exec -T portal node --disable-warning=ExperimentalWarning src/cli.js restore-vpn") cat > "$OUT/restore-input.json"; echo "Ключи сервера VPN восстановлены: клиентов 2 из 2 в бэкапе" ;;
+  "compose --ansi never run --rm --no-deps -T portal node --disable-warning=ExperimentalWarning src/cli.js restore-vpn") cat > "$OUT/prepare-input.json"; echo "Ключи сервера VPN восстановлены: клиентов 2 из 2 в бэкапе" ;;
+  "compose --ansi never run --rm --no-deps -T -u root --entrypoint sh -v "*" caddy -c "*)
+    # сертификаты Caddy: что увидит контейнер в /restore
+    while [ $# -gt 0 ]; do [ "$1" = "-v" ] && cp "\${2%%:*}/caddy.tar.gz" "$OUT/caddy.tar.gz"; shift; done ;;
   "compose --ansi never exec -T portal node --disable-warning=ExperimentalWarning src/cli.js duckdns") echo "⚠️ Имя DuckDNS указывает не на этот сервер" ;;
   "exec amnezia-awg2 awg show awg0 public-key") echo "$FAKE_PUBLIC_KEY" ;;
   "exec amnezia-awg2 awg show awg0 peers") printf 'a\\nb\\n' ;;
@@ -196,7 +200,7 @@ esac`);
       calls: readFileSync(calls, 'utf8').split('\n').filter(Boolean)
     };
   }
-  return { root, secret, sqlite, sock, out, run, app: join(root, 'home', 'deploy', 'family-vpn'), work: join(root, 'work') };
+  return { root, secret, recipient, sqlite, sock, out, run, app: join(root, 'home', 'deploy', 'family-vpn'), work: join(root, 'work') };
 }
 
 const indexOf = (calls, pattern) => calls.findIndex((line) => pattern.test(line));
@@ -215,7 +219,7 @@ test('restore.sh: бэкап расшифрован, AmneziaWG с прежним
   assert.ok(calls.includes('install.sh awg --port 51234 --subnet 10.8.1.0 --cidr 24'));
   // диспетчер в РФ сразу может забирать бэкап с нового сервера
   const auth = readFileSync(join(t.root, 'home', 'deploy', '.ssh', 'authorized_keys'), 'utf8');
-  assert.match(auth, /^command="cd \S+\/home\/deploy\/family-vpn && docker compose exec -T portal [^"]+ backup --stdout",restrict ssh-ed25519 AAAA\S+ family-vpn-dispatcher$/m);
+  assert.match(auth, /^command="bash \S+\/home\/deploy\/family-vpn\/scripts\/dispatcher-command\.sh",restrict ssh-ed25519 AAAA\S+ family-vpn-dispatcher$/m);
   assert.match(res.stdout, /AmneziaWG: порт 51234\/udp, подсеть 10\.8\.1\.0\/24, клиентов 2/);
   assert.match(res.stdout, /В бэкапе есть ещё xray — скрипт восстанавливает только AmneziaWG/);
 
@@ -347,3 +351,55 @@ test('restore.sh: shellcheck без замечаний', { skip: spawnSync('shel
   const res = spawnSync('shellcheck', ['-S', 'style', SCRIPT]);
   assert.equal(res.status, 0, res.stdout.toString());
 });
+
+test('restore.sh --prepare / --finish: плановая смена — заранее AmneziaWG, после заморозки старого — портал и имена', { skip: !HAS_AGE && 'нет программы age' }, () => {
+  const t = prepare('rotation');
+  const keyFile = () => {
+    const file = join(t.root, `dispatcher-${Math.random().toString(36).slice(2)}.key`);
+    writeFileSync(file, `# created: 2026-11-13\n# public key: ${t.recipient}\n${t.secret}\n`);
+    return file;
+  };
+
+  // подготовка: ключ — из файла, без клавиатуры; файл ключа удаляется
+  let key = keyFile();
+  let res = t.run('', ['--prepare', '--key-file', key]);
+  assert.equal(res.status, 0, res.stderr + res.stdout);
+  assert.equal(existsSync(key), false, 'файл ключа удалён сразу после чтения');
+  assert.match(res.stdout, /Сервер подготовлен\./);
+  let calls = res.calls;
+  assert.ok(calls.includes('install.sh awg --port 51234 --subnet 10.8.1.0 --cidr 24'));
+  assert.ok(calls.includes('docker compose --ansi never up -d amnezia-api'));
+  assert.ok(calls.some((c) => /run --rm --no-deps -T portal node .*restore-vpn$/.test(c)), 'ключи VPN — разовым контейнером');
+  assert.deepEqual(JSON.parse(readFileSync(join(t.out, 'prepare-input.json'), 'utf8')), AMNEZIA_JSON);
+  for (const forbidden of [/up -d amnezia-api portal/, /duckdns/, /up -d caddy/, /cli\.js restored$/, /run --rm --no-deps -T -u root/]) {
+    assert.equal(indexOf(calls, forbidden), -1, `на подготовке нет ${forbidden}`);
+  }
+  assert.ok(existsSync(join(t.app, '.prepared')));
+  assert.equal(existsSync(t.work), false, 'расшифрованное удалено');
+
+  // завершение: финальный бэкап и сертификаты Caddy, без вопросов и без повторной установки программ
+  const caddyFile = join(t.root, 'caddy.tar.gz.age');
+  const caddyTar = gzipSync(createTar([{ name: 'caddy/certificates/x.crt', data: 'CERT' }]));
+  writeFileSync(caddyFile, spawnSync('age', ['-r', t.recipient], { input: caddyTar }).stdout);
+  writeFileSync(join(t.root, 'calls.log'), '');
+  key = keyFile();
+  res = t.run('', ['--finish', '--key-file', key, '--caddy', caddyFile]);
+  assert.equal(res.status, 0, res.stderr + res.stdout);
+  calls = res.calls;
+  assert.equal(existsSync(key), false);
+  assert.match(res.stdout, /Сервер подготовлен заранее/);
+  assert.equal(indexOf(calls, /^apt-get update/), -1, 'программы уже стоят');
+  assert.deepEqual(readFileSync(join(t.out, 'restored.sqlite')), t.sqlite, 'база — из финального бэкапа');
+  assert.deepEqual(readFileSync(join(t.out, 'caddy.tar.gz')), caddyTar, 'сертификаты Caddy — со старого сервера');
+  const order = [/up -d amnezia-api portal$/, /restore-vpn$/, /duckdns --takeover$/, /caddy -c tar -xzf/, /up -d caddy$/].map((p) => indexOf(calls, p));
+  assert.ok(order.every((i) => i >= 0), JSON.stringify(order));
+  assert.deepEqual([...order].sort((a, b) => a - b), order, 'сертификаты — до запуска Caddy, Caddy — после имён');
+  assert.equal(existsSync(join(t.app, '.prepared')), false, 'отметка подготовки снята');
+  assert.ok(!res.stdout.includes(t.secret) && !res.stderr.includes(t.secret));
+
+  // режимы не смешиваются
+  res = t.run('', ['--prepare', '--drill', '--key-file', keyFile()]);
+  assert.equal(res.status, 1);
+  assert.match(res.stderr, /вместе не запускаются/);
+});
+

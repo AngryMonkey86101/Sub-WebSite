@@ -173,13 +173,22 @@ async function main() {
       show({ всего: items.length, поля: fieldsOf(items), тарифы: items });
       if (!first && items.length) first = { params, item: items[0] };
     }
+    // тарифы из первого шага заказа: list → tariflist → elem (pricelist, desc, price)
+    const blocks = Array.isArray(step?.list) ? step.list : step?.list ? [step.list] : [];
+    const tariffs = blocks.flatMap((b) => (Array.isArray(b.elem) ? b.elem : b.elem ? [b.elem] : [])).filter((e) => e && typeof e === 'object' && e.pricelist);
+    if (tariffs.length) {
+      show({ тарифов_в_первом_шаге: tariffs.length, тарифы: tariffs.map((e) => `${e.pricelist} ${e.desc ?? ''} — ${e.price ?? ''}`) });
+      const cheapest = tariffs.find((e) => /blitz/i.test(e.desc ?? '')) ?? tariffs[0];
+      if (!first) first = { params: { datacenter: String(step.datacenter ?? datacenters[0] ?? '') }, item: { id: cheapest.pricelist } };
+    }
     // тарифов не нашлось — форма по тарифу уже купленного посуточного сервера
     const daily = servers.find((x) => String(x.period) === '-50') ?? servers[0];
     if (!first && daily) first = { params: { datacenter: String(daily.datacenter) }, item: { id: daily.pricelist_id } };
     if (first) {
       const id = first.item.id ?? first.item.pricelist ?? first.item.elid;
       const form = await attempt(`Форма заказа (func=${prefix}.order.param, pricelist=${id}) — без заказа`, () =>
-        zomro.call(`${prefix}.order.param`, { ...first.params, pricelist: String(id) })
+        // period=-50 — посуточно: без периода Zomro форму не открывает
+        zomro.call(`${prefix}.order.param`, { ...first.params, pricelist: String(id), period: '-50' })
       );
       if (form) show(summary(form));
     }

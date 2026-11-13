@@ -8,6 +8,14 @@
 #   bash ~/sub-website/server/scripts/restore.sh --drill ~/family-vpn-ГГГГ-ММ-ДД.tar.gz.age
 # --yes — перенести имена DuckDNS без вопроса в конце (так запускает его scripts/windows/migrate.ps1).
 #
+# Плановая смена сервера диспетчером (dispatcher/, docs/PLAN.md, раздел 15) — в два приёма:
+#   --prepare  заранее, пока старый сервер работает: программы, фаервол, AmneziaWG с ключами из
+#              бэкапа, образ портала. Портал, бот и Caddy НЕ запускаются, имена не трогаются;
+#   --finish   после заморозки старого сервера, с его финальным бэкапом: база, портал, имена DuckDNS,
+#              Caddy (с прежними сертификатами, если передан --caddy). Без вопросов (как --yes).
+# --key-file ФАЙЛ — закрытый ключ age из файла вместо ввода с клавиатуры; файл удаляется сразу после
+#                   чтения. --caddy ФАЙЛ — сертификаты Caddy (caddy.tar.gz.age, тем же ключом).
+#
 # Что делает:
 #   1. ставит Docker, age, jq, git и ufw, если их нет;
 #   2. расшифровывает бэкап закрытым ключом age (спросит его, на экране он не появится);
@@ -69,23 +77,39 @@ cli() { compose exec -T portal "${PORTAL_CLI[@]}" "$@"; }
 
 DRILL=0
 YES=0
+PREPARE=0
+FINISH=0
+KEY_FILE=""
+CADDY=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --drill) DRILL=1; shift ;;
     --yes) YES=1; shift ;;
+    --prepare) PREPARE=1; shift ;;
+    --finish) FINISH=1; YES=1; shift ;;
+    --key-file) KEY_FILE=${2:-}; shift 2 || die "--key-file: укажите файл" ;;
+    --caddy) CADDY=${2:-}; shift 2 || die "--caddy: укажите файл" ;;
     *) break ;;
   esac
 done
 
 [ "$(id -u)" -eq 0 ] || die "Запустите от root: bash $0 [--drill] [--yes] <файл бэкапа>"
+[ $((DRILL + PREPARE + FINISH)) -le 1 ] || die "--drill, --prepare и --finish вместе не запускаются"
 BACKUP=${1:-}
 [ -n "$BACKUP" ] && [ -f "$BACKUP" ] || die "Укажите файл бэкапа: bash $0 ~/family-vpn-ГГГГ-ММ-ДД.tar.gz.age"
 BACKUP=$(realpath "$BACKUP")
+[ -z "$KEY_FILE" ] || [ -f "$KEY_FILE" ] || die "Нет файла ключа: $KEY_FILE"
+[ -z "$CADDY" ] || [ -f "$CADDY" ] || die "Нет файла сертификатов Caddy: $CADDY"
+# сервер уже подготовлен (--prepare): программы стоят, AmneziaWG поднят
+PREPARED=$APP/.prepared
 [ -f "$REPO_DIR/server/docker-compose.yml" ] || die "Скрипт запускается из клона репозитория: server/scripts/restore.sh"
 command -v apt-get >/dev/null || die "Нужен Ubuntu или Debian (apt-get)"
 
 step "1/7 Программы: Docker, age, jq, git, ufw"
 export DEBIAN_FRONTEND=noninteractive
+if [ "$FINISH" -eq 1 ] && [ -f "$PREPARED" ]; then
+  ok "Сервер подготовлен заранее ($(cat "$PREPARED")) — программы уже стоят"
+else
 apt-get update -qq
 apt-get install -y -qq ca-certificates curl git age jq ufw >/dev/null
 if ! command -v docker >/dev/null; then
@@ -105,28 +129,38 @@ docker buildx version >/dev/null 2>&1 \
   || apt-get install -y -qq docker-buildx >/dev/null 2>&1 \
   || warn "docker buildx не поставился — образ соберётся встроенным сборщиком"
 ok "$(docker --version)"
+fi
 
 step "2/7 Расшифровка бэкапа"
 rm -rf "$WORK"
 mkdir -p "$WORK"
 chmod 700 "$WORK"
-printf 'Вставьте закрытый ключ age — строку AGE-SECRET-KEY-1… из менеджера паролей (на экране не появится): '
-# можно вставить и все три строки из age-keygen: строки-комментарии «# …» пропускаются
 KEY=""
-while IFS= read -rs LINE; do
-  LINE=$(printf '%s' "$LINE" | tr -d '[:space:]')
-  case "$LINE" in
-    "" | "#"*) continue ;;
-    *) KEY=$LINE; break ;;
-  esac
-done
-unset LINE
-echo
+if [ -n "$KEY_FILE" ]; then
+  # ключ из файла (диспетчер): файл удаляется сразу после чтения
+  KEY=$(grep -m 1 '^AGE-SECRET-KEY-1' "$KEY_FILE" | tr -d '[:space:]' || true)
+  rm -f "$KEY_FILE"
+else
+  printf 'Вставьте закрытый ключ age — строку AGE-SECRET-KEY-1… из менеджера паролей (на экране не появится): '
+  # можно вставить и все три строки из age-keygen: строки-комментарии «# …» пропускаются
+  while IFS= read -rs LINE; do
+    LINE=$(printf '%s' "$LINE" | tr -d '[:space:]')
+    case "$LINE" in
+      "" | "#"*) continue ;;
+      *) KEY=$LINE; break ;;
+    esac
+  done
+  unset LINE
+  echo
+fi
 [[ "$KEY" == AGE-SECRET-KEY-1* ]] || die "Это не закрытый ключ age: нужна строка, которая начинается с AGE-SECRET-KEY-1"
 printf '%s\n' "$KEY" > "$WORK/key"
 unset KEY
 if ! age -d -i "$WORK/key" -o "$WORK/backup.tar.gz" "$BACKUP" 2> "$WORK/age.err"; then
   die "Бэкап не расшифровался ($(head -n 1 "$WORK/age.err")): ключ от другой пары или файл повреждён"
+fi
+if [ -n "$CADDY" ] && ! age -d -i "$WORK/key" -o "$WORK/caddy.tar.gz" "$CADDY" 2> "$WORK/age.err"; then
+  die "Сертификаты Caddy не расшифровались ($(head -n 1 "$WORK/age.err"))"
 fi
 rm -f "$WORK/key" "$WORK/age.err"
 tar -xzf "$WORK/backup.tar.gz" -C "$WORK"
@@ -206,6 +240,26 @@ if [ "$DRILL" -eq 1 ]; then
 fi
 chown -R "$DEPLOY_USER:$DEPLOY_USER" "$APP" "$DEPLOY_HOME/sub-website"
 compose build portal
+
+if [ "$PREPARE" -eq 1 ]; then
+  # Подготовка: только AmneziaWG с прежними ключами — портал, бот и Caddy пока работают на старом
+  # сервере. Ключи — через разовый контейнер портала, сам портал не запускается.
+  compose up -d amnezia-api
+  step "6/7 Прежние ключи сервера VPN (подготовка)"
+  compose run --rm --no-deps -T portal "${PORTAL_CLI[@]}" restore-vpn < "$WORK/amnezia.json"
+  docker restart "$AWG" >/dev/null
+  ACTUAL_KEY=""
+  for _ in $(seq 1 15); do
+    ACTUAL_KEY=$(docker exec "$AWG" awg show awg0 public-key 2>/dev/null || true)
+    [ -z "$ACTUAL_KEY" ] || break
+    sleep 2
+  done
+  [ "$ACTUAL_KEY" = "$SERVER_KEY" ] || die "У AmneziaWG не прежний ключ сервера (${ACTUAL_KEY:-нет ответа})"
+  date -u '+%Y-%m-%d %H:%M UTC' > "$PREPARED"
+  printf '\n%s\n' "${BOLD}${GREEN}Сервер подготовлен.${R} AmneziaWG — с прежним ключом сервера, образ портала собран."
+  printf '%s\n' "Портал, бот и Caddy не запущены, имена DuckDNS не тронуты. Дальше — --finish с финальным бэкапом."
+  exit 0
+fi
 # мимо обёртки compose: неудача здесь ожидаема и не должна попасть в сообщение об остановке
 (cd "$APP" && docker compose stop portal caddy) >/dev/null 2>&1 || true
 # база — на том портала; владелец — пользователь node, от которого работает портал
@@ -252,6 +306,11 @@ else
 fi
 if [[ "$ANSWER" =~ ^[yYдД] ]]; then
   cli duckdns --takeover
+  if [ -f "$WORK/caddy.tar.gz" ]; then
+    # прежние сертификаты: Let's Encrypt выпускает не больше 5 одинаковых в неделю
+    compose run --rm --no-deps -T -u root --entrypoint sh -v "$WORK:/restore:ro" caddy -c 'tar -xzf /restore/caddy.tar.gz -C /data'
+    ok "Сертификаты Caddy — со старого сервера"
+  fi
   compose up -d caddy
   ok "Имена ведут сюда, Caddy выпустит сертификат для $PORTAL_HOST за минуту-две"
   TAKEN=1
@@ -261,6 +320,7 @@ else
   TAKEN=0
 fi
 
+rm -f "$PREPARED"
 printf '\n%s\n' "${BOLD}${GREEN}Готово.${R} Дальше:"
 printf '  1. Старый сервер, если он ещё работает, выключите: там cd ~/family-vpn && docker compose down && docker stop %s.\n' "$AWG"
 printf '     Иначе бот будет работать на двух серверах сразу.\n'

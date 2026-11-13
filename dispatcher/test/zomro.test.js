@@ -57,6 +57,7 @@ function billmanager(params, { sessions = true } = {}) {
     case 'vds.order.pricelist':
       return { doc: { error: { $type: 'value', msg: v('Нет доступных для заказа тарифных планов') } } };
     case 'instances.order.param':
+      if (params.get('period') !== '-50') return { doc: { error: { $type: 'value', msg: v('Для заказа выбранного тарифного плана выберите другой период оплаты') } } };
       return {
         doc: {
           pricelist: v(params.get('pricelist')),
