@@ -74,13 +74,20 @@ function createAmneziaClient({ baseUrl, apiKey, timeoutMs = 30000, fetch = globa
 
     // Все клиенты сервера постранично. Внешний адрес устройства (endpoint) отбрасывается
     // здесь же: дальше адаптера IP-адреса членов семьи не попадают.
-    // amnezia-api может отдавать меньше, чем просили (на живом сервере — по 10): следующая
-    // страница начинается с того, сколько записей пришло, а не с размера запроса.
+    // Живой amnezia-api отдаёт меньше, чем просили (по 10), и на его total полагаться нельзя:
+    // листаем, пока не придёт пустая страница. Если сервер не сдвигается по skip и повторяет
+    // те же записи — останавливаемся, а не крутимся вечно.
     async listClients() {
       const clients = [];
-      for (let skip = 0; ; ) {
-        const { total, items } = await request('GET', `/clients?skip=${skip}&limit=${PAGE}`);
+      const seen = new Set();
+      for (let skip = 0, page = 0; page < 1000; page += 1) {
+        const items = (await request('GET', `/clients?skip=${skip}&limit=${PAGE}`))?.items ?? [];
+        let fresh = 0;
         for (const item of items) {
+          const key = `${item.username}\u0000${item.peers.map((p) => p.id).join(',')}`;
+          if (seen.has(key)) continue;
+          seen.add(key);
+          fresh += 1;
           clients.push({
             name: item.username,
             peers: item.peers.map((p) => ({
@@ -93,9 +100,10 @@ function createAmneziaClient({ baseUrl, apiKey, timeoutMs = 30000, fetch = globa
             }))
           });
         }
+        if (!items.length || !fresh) return clients;
         skip += items.length;
-        if (!items.length || skip >= total) return clients;
       }
+      return clients;
     },
 
     // Серия QR-кодов в формате приложения Amnezia (PNG data URI)

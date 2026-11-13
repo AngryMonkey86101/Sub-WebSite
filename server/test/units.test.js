@@ -122,7 +122,11 @@ test('адаптер: постраничный список без адресо�
     // (иначе при переезде «клиентов 10 из 21 в бэкапе»)
     fake.state.maxPage = 10;
     assert.equal((await amnezia.listClients()).length, 130, 'страницы по 10');
-    fake.state.maxPage = undefined;
+    fake.state.totalIsPage = true;
+    assert.equal((await amnezia.listClients()).length, 130, 'total — размер страницы, а не всего');
+    fake.state.ignoreSkip = true;
+    assert.equal((await amnezia.listClients()).length, 10, 'сервер не листает — без вечного цикла');
+    Object.assign(fake.state, { maxPage: undefined, totalIsPage: false, ignoreSkip: false });
 
     const [client] = clients;
     assert.equal(await amnezia.deleteClient({ id: client.peers[0].id, protocol: 'amneziawg3' }), true);

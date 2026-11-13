@@ -132,7 +132,10 @@ async function startFakeAmnezia({ apiKey, host = 'k4tq9v.duckdns.org' }) {
       const skip = Number(url.searchParams.get('skip') ?? 0);
       // как живой amnezia-api: больше state.maxPage за раз не отдаёт, сколько ни попроси
       const limit = Math.min(Number(url.searchParams.get('limit') ?? 100), state.maxPage ?? Infinity);
-      return send(200, { total: all.length, items: all.slice(skip, skip + limit) });
+      const page = all.slice(skip, skip + limit);
+      // totalIsPage — total как размер страницы; ignoreSkip — skip не учитывается (всегда с начала)
+      if (state.ignoreSkip) return send(200, { total: all.length, items: all.slice(0, limit) });
+      return send(200, { total: state.totalIsPage ? page.length : all.length, items: page });
     }
 
     const client = state.clients.get(body.clientId);
