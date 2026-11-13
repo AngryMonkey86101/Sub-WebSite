@@ -42,7 +42,7 @@ REQUEST=$DATA/reboot-request
 
 cat > "$SYSTEMD_DIR/$NAME.service" <<EOF
 [Unit]
-Description=Семейный VPN: перезагрузка сервера по команде из бота или админки
+Description=Табор VPN: перезагрузка сервера по команде из бота или админки
 
 [Service]
 Type=oneshot
@@ -52,7 +52,7 @@ EOF
 
 cat > "$SYSTEMD_DIR/$NAME.path" <<EOF
 [Unit]
-Description=Семейный VPN: ждать запроса на перезагрузку от портала
+Description=Табор VPN: ждать запроса на перезагрузку от портала
 
 [Path]
 PathExists=$REQUEST

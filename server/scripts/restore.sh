@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Переезд семейного VPN на этот сервер из бэкапа (server/README.md, «Переезд на новый VPS»).
+# Переезд «Табор VPN» на этот сервер из бэкапа (server/README.md, «Переезд на новый VPS»).
 #
 # Запуск на НОВОМ сервере (Ubuntu 22.04/24.04 или Debian 12) под root, из клона репозитория:
 #   bash ~/sub-website/server/scripts/restore.sh ~/family-vpn-ГГГГ-ММ-ДД.tar.gz.age

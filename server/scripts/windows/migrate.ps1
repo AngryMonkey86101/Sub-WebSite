@@ -1,4 +1,4 @@
-﻿# Переезд семейного VPN на новый VPS — с компьютера на Windows (server/README.md, «Переезд с Windows»).
+﻿# Переезд «Табор VPN» на новый VPS — с компьютера на Windows (server/README.md, «Переезд с Windows»).
 #
 # Спросит только IP нового сервера, один раз пароль root (если вход по ключу ещё не настроен)
 # и закрытый ключ age для бэкапа. Всё остальное делает сам:
@@ -83,7 +83,7 @@ if (-not (Test-Path -LiteralPath $key)) {
   # строка аргументов целиком: так пустая фраза-пароль -N "" доходит до ssh-keygen в любой версии PowerShell
   Start-Process -FilePath 'ssh-keygen' -ArgumentList "-t ed25519 -q -N `"`" -C family-vpn -f `"$key`"" -Wait -NoNewWindow
   if (-not (Test-Path -LiteralPath $key)) { Fail 'Не удалось создать SSH-ключ' }
-  Ok "Создан ключ для входа на серверы семейного VPN: $key"
+  Ok "Создан ключ для входа на серверы «Табор VPN»: $key"
 }
 $opts = @('-i', $key, '-o', 'StrictHostKeyChecking=accept-new', '-o', 'ServerAliveInterval=30')
 

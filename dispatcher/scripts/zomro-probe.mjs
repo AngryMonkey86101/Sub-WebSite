@@ -7,6 +7,9 @@
 // Вывод можно присылать в чат: пароль и ключ сессии в него не попадают, почта, телефон, имена,
 // адреса и прочие личные данные скрыты, IP-адреса укорочены.
 //
+// Точечный запрос (тоже только чтение): node zomro-probe.mjs call ФУНКЦИЯ [параметр=значение ...]
+// — функции, которые могут что-то изменить, скрипт не вызывает.
+//
 // Запуск — dispatcher/README.md, «Шаг 0». Логин и пароль — из переменных окружения:
 //   ZOMRO_USER, ZOMRO_PASSWORD, необязательно ZOMRO_API_URL (по умолчанию https://api.zomro.com/)
 
@@ -63,6 +66,53 @@ async function attempt(title, fn) {
   }
 }
 
+// Сводка ответа BILLmanager: поля, элементы списка, варианты полей-списков (slist)
+function summary(doc) {
+  if (!doc || typeof doc !== 'object') return { ответ: doc };
+  const items = Array.isArray(doc.elem) ? doc.elem : doc.elem ? [doc.elem] : [];
+  const slist = Array.isArray(doc.slist) ? doc.slist : doc.slist ? [doc.slist] : [];
+  const rest = Object.fromEntries(Object.entries(doc).filter(([k]) => !['elem', 'slist', 'tparams', 'metadata', 'messages', 'customizer', 'mgrdata', 'toolbar', 'page'].includes(k)));
+  const out = { поля: Object.keys(rest) };
+  if (items.length) Object.assign(out, { элементов: items.length, поля_элементов: fieldsOf(items), элементы: items });
+  if (slist.length) {
+    out.списки = Object.fromEntries(slist.map((x) => [x.name, (Array.isArray(x.val) ? x.val : x.val ? [x.val] : []).map((v) => (v && typeof v === 'object' ? `${v.key ?? ''}=${v.value ?? ''}` : v))]));
+  }
+  if (!items.length) out.значения = rest;
+  return out;
+}
+
+const optionsOf = (doc, name) => {
+  const slist = Array.isArray(doc?.slist) ? doc.slist : doc?.slist ? [doc.slist] : [];
+  const field = slist.find((x) => x.name === name);
+  return field ? (Array.isArray(field.val) ? field.val : [field.val]).map((v) => (v && typeof v === 'object' ? v.key : v)).filter((v) => v !== undefined && v !== '') : [];
+};
+
+// Функции, которые могут что-то изменить, — не вызываются никогда, даже командой call
+const UNSAFE = /delete|\.del$|suspend|resume|stop|start|reboot|reset|reinstall|prolong|payment|edit|order\.(param|basket|finish)|basket|cart|password|setparam|close|open|transfer|sok/i;
+
+// Точечный запрос: node zomro-probe.mjs call ФУНКЦИЯ [имя=значение ...] — только чтение
+async function callMode(zomro, [func, ...pairs]) {
+  if (!func) {
+    print('Укажите функцию: call ИМЯ [параметр=значение ...]');
+    return 2;
+  }
+  if (UNSAFE.test(func)) {
+    print(`Функцию ${func} скрипт не вызывает: она может что-то изменить или заказать.`);
+    return 2;
+  }
+  const params = {};
+  for (const pair of pairs) {
+    const i = pair.indexOf('=');
+    if (i < 1) continue;
+    const key = pair.slice(0, i);
+    if (/^(sok|clicked_button|func|auth|authinfo)$/i.test(key)) continue;
+    params[key] = pair.slice(i + 1);
+  }
+  const doc = await attempt(`func=${func} ${new URLSearchParams(params)}`, () => zomro.call(func, params));
+  if (doc) show(summary(doc));
+  return doc ? 0 : 1;
+}
+
 async function main() {
   const user = process.env.ZOMRO_USER?.trim();
   const password = process.env.ZOMRO_PASSWORD ?? '';
@@ -71,55 +121,58 @@ async function main() {
     process.exit(2);
   }
   const zomro = createZomro({ settings: { url: process.env.ZOMRO_API_URL || DEFAULT_URL, user, password } });
+  const args = process.argv.slice(2);
+  if (args[0] === 'call') {
+    process.exit(await callMode(zomro, args.slice(1)));
+  }
   print(`Проверка API Zomro: ${zomro.base}`, 'Только чтение: ничего не заказывается и не удаляется.');
 
   // 1. Вход: сессия или логин с паролем в каждом запросе
   const loggedIn = await attempt('Вход (func=auth)', () => zomro.login());
   if (!loggedIn) print('  Пробую без сессии — логин и пароль в каждом запросе (authinfo).');
   const who = await attempt('Кто я (func=whoami)', () => zomro.call('whoami'));
-  if (who) show({ поля: Object.keys(who) });
+  if (who) show({ поля: Object.keys(who), features: who.features ?? null });
   if (!who && !loggedIn) {
     print('\nВойти не удалось. Проверьте логин и пароль, адрес API (ZOMRO_API_URL) и не включена ли',
       'двухфакторная авторизация: с ней вход по API может требовать отдельного ключа.');
     process.exit(1);
   }
 
-  // 2. Услуги: облачные VPS (v2.instances) и классические (vds)
-  for (const func of ['v2.instances', 'vds']) {
+  // 2. Где ваши VPS: в BILLmanager у каждого вида услуг своя функция списка
+  print('\n— Где ваши серверы —');
+  for (const func of ['v2.instances', 'instances', 'v2.vds', 'vds', 'cloudvps', 'vps', 'cloud', 'v2.cloud', 'dedic', 'service', 'item']) {
     const items = await attempt(`Услуги (func=${func})`, () => zomro.list(func));
-    if (items) show({ всего: items.length, поля: fieldsOf(items), примеры: items.slice(0, 3) });
+    if (items?.length) show({ всего: items.length, поля: fieldsOf(items), примеры: items.slice(0, 3) });
+    else if (items) print('  пусто');
   }
 
-  // 3. Баланс: в разных версиях BILLmanager — в разных функциях
-  for (const func of ['dashboard.info', 'subaccount', 'account']) {
-    const doc = await attempt(`Баланс (func=${func})`, () => zomro.call(func));
-    if (doc) {
-      const items = Array.isArray(doc.elem) ? doc.elem : doc.elem ? [doc.elem] : [];
-      show(items.length ? { поля: fieldsOf(items), примеры: items.slice(0, 2) } : { поля: Object.keys(doc), ответ: doc });
+  // 3. Баланс
+  print('\n— Баланс —');
+  const balance = await attempt('Баланс (func=subaccount)', () => zomro.list('subaccount'));
+  if (balance) show(balance.map((b) => ({ balance: b.balance, creditlimit: b.creditlimit })));
+
+  // 4. Заказ по шагам, как в кабинете: дата-центр → тарифы в нём → форма заказа (без подтверждения)
+  for (const prefix of ['v2.instances', 'vds']) {
+    print(`\n— Заказ: ${prefix} —`);
+    const step = await attempt(`Первый шаг заказа (func=${prefix}.order)`, () => zomro.call(`${prefix}.order`));
+    if (step) show(summary(step));
+    const fromElems = (Array.isArray(step?.elem) ? step.elem : step?.elem ? [step.elem] : []).map((e) => e.datacenter ?? e.id).filter(Boolean);
+    const datacenters = [...new Set([...optionsOf(step, 'datacenter'), ...fromElems])].slice(0, 6);
+    if (!datacenters.length) datacenters.push(null);
+    let first = null;
+    for (const datacenter of datacenters) {
+      const params = datacenter ? { datacenter: String(datacenter) } : {};
+      const items = await attempt(`Тарифы (func=${prefix}.order.pricelist${datacenter ? `, datacenter=${datacenter}` : ''})`, () => zomro.list(`${prefix}.order.pricelist`, params));
+      if (!items) continue;
+      show({ всего: items.length, поля: fieldsOf(items), тарифы: items });
+      if (!first && items.length) first = { params, item: items[0] };
     }
-  }
-
-  // 4. Тарифы облачных VPS и форма заказа (без sok=ok BILLmanager только показывает форму)
-  let pricelist = null;
-  for (const func of ['v2.instances.order.pricelist', 'vds.order.pricelist']) {
-    const items = await attempt(`Тарифы (func=${func})`, () => zomro.list(func));
-    if (!items) continue;
-    show({ всего: items.length, поля: fieldsOf(items), тарифы: items });
-    if (!pricelist && items.length) pricelist = { func: func.replace('.pricelist', '.param'), item: items[0] };
-  }
-  if (pricelist) {
-    const id = pricelist.item.id ?? pricelist.item.pricelist ?? pricelist.item.elid;
-    const form = await attempt(`Форма заказа (func=${pricelist.func}, pricelist=${id}) — без заказа`, () =>
-      zomro.call(pricelist.func, { pricelist: String(id) })
-    );
-    if (form) {
-      // slist — варианты для полей-списков: дата-центры, ОС, периоды оплаты
-      const slist = Array.isArray(form.slist) ? form.slist : form.slist ? [form.slist] : [];
-      show({
-        поля_формы: Object.keys(form).filter((k) => k !== 'slist'),
-        значения: Object.fromEntries(Object.entries(form).filter(([k]) => k !== 'slist')),
-        списки: Object.fromEntries(slist.map((s) => [s.name, (Array.isArray(s.val) ? s.val : [s.val]).map((v) => (v && typeof v === 'object' ? `${v.key ?? ''}=${v.value ?? ''}` : v))]))
-      });
+    if (first) {
+      const id = first.item.id ?? first.item.pricelist ?? first.item.elid;
+      const form = await attempt(`Форма заказа (func=${prefix}.order.param, pricelist=${id}) — без заказа`, () =>
+        zomro.call(`${prefix}.order.param`, { ...first.params, pricelist: String(id) })
+      );
+      if (form) show(summary(form));
     }
   }
 

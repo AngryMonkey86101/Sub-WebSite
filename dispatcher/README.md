@@ -114,6 +114,14 @@ cd ~/sub-website/dispatcher && docker compose exec dispatcher node src/cli.js st
    ```
 4. Пришлите вывод в чат.
 
+**Точечный запрос.** Чтобы проверить одну функцию API, а не всё сразу, — после `node …/zomro-probe.mjs` допишите `call ФУНКЦИЯ параметр=значение`, например:
+
+```bash
+read -rp 'Логин Zomro: ' ZOMRO_USER && read -rsp 'Пароль Zomro: ' ZOMRO_PASSWORD && echo && export ZOMRO_USER ZOMRO_PASSWORD && node ~/sub-website/dispatcher/scripts/zomro-probe.mjs call v2.instances.order.pricelist datacenter=1; unset ZOMRO_USER ZOMRO_PASSWORD
+```
+
+Это тоже только чтение: функции, которые могут что-то изменить (удаление, остановка, оплата, подтверждение заказа и т. п.), скрипт не вызывает, а параметр `sok` отбрасывает.
+
 **Если не получилось:**
 
 - «Zomro недоступна (…)» — VPS в РФ не достучался до `api.zomro.com`. Проверьте: `curl -sI https://api.zomro.com/ | head -1`.
