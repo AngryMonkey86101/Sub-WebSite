@@ -1,7 +1,7 @@
 import { lookup as dnsLookup } from 'node:dns/promises';
 
-// Доступность сервера VPN из РФ (docs/PLAN.md, раздел 15, этап 3). Пока только сообщения:
-// переезд по ним появится на этапе 5.
+// Доступность сервера VPN из РФ (docs/PLAN.md, раздел 15, этап 3): сообщения; долгую
+// недоступность разбирает аварийный переезд (emergency.js).
 //
 // Раз в минуту:
 //   1. Свой интернет: открывается ли хоть один из REFERENCE_URLS (российские сайты). Если нет —
@@ -10,6 +10,7 @@ import { lookup as dnsLookup } from 'node:dns/promises';
 // Сервер недоступен ALERT_AFTER_MIN минут подряд — «🔴», вернулся — «🟢» со временем простоя.
 
 const TIMEOUT = 10000;
+const MIN = 60 * 1000;
 
 function describeError(err) {
   const code = err?.cause?.code ?? err?.code;
@@ -93,7 +94,9 @@ function createMonitor({ config, state, notify, fetch = globalThis.fetch, lookup
         next.alerted = true;
         await notify(
           `🔴 Из РФ сервер недоступен ${minutes(time - since)}: ${result.reason}.${result.ip ? ` IP: ${result.ip}.` : ''} ` +
-            'Если и за границей он работает (проверка GitHub молчит) — вероятно, IP заблокирован. Переезд: на диспетчере bash ~/sub-website/dispatcher/menu.sh → «Переезд сейчас».'
+            (config.emergency?.enabled
+              ? `Если не вернётся, через ${minutes(Math.max(MIN, since + config.emergency.afterMin * MIN - time))} диспетчер сам переедет на новый сервер (аварийный переезд). Переехать сразу: bash ~/sub-website/dispatcher/menu.sh → «Переезд сейчас».`
+              : 'Если и за границей он работает (проверка GitHub молчит) — вероятно, IP заблокирован. Переезд: на диспетчере bash ~/sub-website/dispatcher/menu.sh → «Переезд сейчас».')
         );
       } else {
         next.alerted = s.status === 'down' ? Boolean(s.alerted) : false;

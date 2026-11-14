@@ -10,10 +10,15 @@ import { createAeza } from './aeza.js';
 import { createOrders } from './orders.js';
 import { createMigration } from './migrate.js';
 import { createCancel } from './cancel.js';
+import { createEmergency } from './emergency.js';
+import { spawn } from 'node:child_process';
+import { openSync, closeSync } from 'node:fs';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { lookup as dnsLookup } from 'node:dns/promises';
 
 // Сборка диспетчера из частей — общая для службы (index.js) и команд (cli.js)
-async function createDispatcher({ config, fetch = globalThis.fetch, run = defaultRun, lookup, now = () => Date.now(), log = console }) {
+async function createDispatcher({ config, fetch = globalThis.fetch, run = defaultRun, lookup, now = () => Date.now(), log = console, startEmergency = null }) {
   mkdirSync(config.dataDir, { recursive: true, mode: 0o700 });
   const state = createState(config.dataDir);
   if (!state.get('startedAt')) state.set('startedAt', now());
@@ -42,7 +47,22 @@ async function createDispatcher({ config, fetch = globalThis.fetch, run = defaul
   const cancel = createCancel(config.dataDir, { now });
   // переезд — по запросу: out (вывод хода) у команды свой
   const migration = (options = {}) => createMigration({ config, keys, state, clouds, backups, monitor, orders, notify, run, lookup: resolve, now, cancel, ...options });
-  return { config, state, notify, keys, monitor, backups, cloud, clouds, orders, migration, cancel, run };
+  // аварийный переезд — отдельным процессом (как «Переезд сейчас» из меню): служба продолжает
+  // проверять сервер, ход переезда — в /data/migrate.log
+  const emergency = createEmergency({ config, state, notify, start: startEmergency ?? ((info) => spawnMigration(config, info, log)), now, log });
+  return { config, state, notify, keys, monitor, backups, cloud, clouds, orders, migration, cancel, emergency, run };
+}
+
+function spawnMigration(config, { minutes }, log = console) {
+  const fd = openSync(join(config.dataDir, 'migrate.log'), 'w', 0o600);
+  try {
+    const cli = fileURLToPath(new URL('./cli.js', import.meta.url));
+    const child = spawn(process.execPath, [cli, 'migrate', '--yes', '--emergency', String(minutes)], { stdio: ['ignore', fd, fd] });
+    child.on('error', (err) => log.error?.(`Аварийный переезд: ${err.message}`));
+    child.on('exit', (code) => log.log?.(`Аварийный переезд закончился, код ${code}`));
+  } finally {
+    closeSync(fd);
+  }
 }
 
 // Подсказка, что вписать в .env сервера: открытые ключи диспетчера

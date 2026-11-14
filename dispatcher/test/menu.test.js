@@ -53,7 +53,7 @@ function setup(name) {
   stub('docker', `echo "$*" >> "$CALLS"
 case "$*" in
   "compose --ansi never ps --status running -q dispatcher") echo abc123 ;;
-  *" src/cli.js status") echo "Сервер m2pr7x.duckdns.org из РФ: доступен, IP 45.91.201.169" ;;
+  *" src/cli.js status") printf 'Сервер m2pr7x.duckdns.org из РФ: доступен, IP 45.91.201.169\nАварийный переезд: включён — после 30 мин недоступности из РФ, хостер: Zomro\n' ;;
   *" src/cli.js server") echo "Портал на m2pr7x.duckdns.org: active" ;;
   *" src/cli.js servers") echo "Баланс Zomro: 3.2 EUR" ;;
   *" src/cli.js schedule") echo "Следующая смена: 16.11 04:00 МСК — через 1 д 18 ч" ;;
@@ -229,6 +229,26 @@ test('menu.sh: плановая смена — выключить и включ�
   res = t.run('10\n6\n\n0\n0\n', { AEZA_ON: '1', AEZA_POS: '2', AEZA_MODE_NOW: 'auto' });
   assert.match(t.env(), /^AEZA_MODE=manual$/m);
   assert.match(res.out, /Aeza — только по запросу/);
+});
+
+test('menu.sh: аварийный переезд — выключить, включить, через сколько минут', () => {
+  const t = setup('emergency');
+  let res = t.run('13\n1\n\n0\n0\n');
+  assert.equal(res.status, 0, res.err);
+  assert.match(res.out, /13 — Аварийный переезд/);
+  assert.match(res.out, /Аварийный переезд: включён — после 30 мин[\s\S]*1 — выключить: при блокировке только сообщение/);
+  assert.match(t.env(), /^EMERGENCY_ENABLED=0$/m);
+  assert.ok(res.calls.includes('compose --ansi never up -d'), 'диспетчер перезапущен');
+  res = t.run('13\n1\n\n0\n0\n');
+  assert.match(res.out, /1 — включить аварийный переезд/);
+  assert.match(t.env(), /^EMERGENCY_ENABLED=1$/m);
+  assert.equal(t.env().match(/^EMERGENCY_ENABLED=/gm).length, 1);
+  // минуты: 45 — сохраняется; 5 — слишком мало
+  res = t.run('13\n2\n45\n\n0\n0\n');
+  assert.match(t.env(), /^EMERGENCY_AFTER_MIN=45$/m);
+  res = t.run('13\n2\n05\n\n0\n0\n');
+  assert.match(res.out, /Нужно от 10 до 1440/);
+  assert.match(t.env(), /^EMERGENCY_AFTER_MIN=45$/m);
 });
 
 test('menu.sh: shellcheck без замечаний', { skip: spawnSync('shellcheck', ['--version']).status !== 0 && 'нет shellcheck' }, () => {

@@ -94,7 +94,8 @@ test('Zomro: настройки диспетчера — тариф, дата-ц
   assert.throws(() => loadConfig({ PORTAL_HOST: 'a.duckdns.org', ZOMRO_USER: USER, ZOMRO_PASSWORD: 'x', ZOMRO_BUILD_MIN: '5' }), /ZOMRO_BUILD_MIN/);
   assert.equal(loadConfig({ PORTAL_HOST: 'm2pr7x.duckdns.org' }).zomro, null);
   assert.throws(() => loadConfig({ PORTAL_HOST: 'a.duckdns.org', ZOMRO_USER: USER }), (err) => err instanceof ConfigError && /нужны оба/.test(err.message));
-  assert.throws(() => loadConfig({ PORTAL_HOST: 'a.duckdns.org', ZOMRO_USER: USER, ZOMRO_PASSWORD: 'x', ZOMRO_OS: 'ubuntu' }), /ZOMRO_OS/);
+  assert.throws(() => loadConfig({ PORTAL_HOST: 'a.duckdns.org', ZOMRO_USER: USER, ZOMRO_PASSWORD: 'x', ZOMRO_OS: 'ubuntu 24.04; rm' }), /ZOMRO_OS/);
+  assert.equal(loadConfig({ PORTAL_HOST: 'a.duckdns.org', ZOMRO_USER: USER, ZOMRO_PASSWORD: 'x', ZOMRO_OS: '415' }).zomro.os, '415', 'номер образа — не только UUID');
 });
 
 test('Zomro: пароль root и имя сервера', () => {
