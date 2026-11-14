@@ -1,6 +1,7 @@
 import { loadConfig, ConfigError } from './config.js';
 import { createDispatcher, keysHelp } from './app.js';
 import { zomroTest } from './zomroTest.js';
+import { schedule, msk, span } from './schedule.js';
 
 // Команды диспетчера: docker compose exec dispatcher node src/cli.js <команда>
 
@@ -16,7 +17,10 @@ const HELP = `Команды:
   unfreeze    разморозить: портал, бот и сайт на сервере снова работают
   servers     серверы у Zomro и баланс (свои — с именем family-vpn-…)
   remove ID --yes  удалить свой сервер у Zomro (только с именем family-vpn-…)
-  tariffs     тарифы Zomro для посуточного заказа во всех дата-центрах, с ценой за день
+  tariffs [--tsv]  тарифы Zomro для посуточного заказа во всех дата-центрах, с ценой за день
+  tariff      выбранный тариф: дата-центр, название, цена
+  tariff-check ТАРИФ ДАТАЦЕНТР  можно ли заказать тариф и какой образ ОС взять (только чтение)
+  schedule    расписание плановой смены сервера: когда следующая и сколько осталось
   zomro-test --yes  пробный заказ: заказать сервер, дождаться IP, войти по паролю, удалить
               (несколько центов с баланса). Надёжнее запускать в фоне — см. README`;
 
@@ -83,9 +87,54 @@ async function main(argv, { env = process.env, out = console.log, deps = {} } = 
       if (pending.length) out(`Ждут уборки, если их не довели до конца: ${pending.map((o) => `${o.name} (после ${fmt(o.until)})`).join(', ')}`);
       return 0;
     }
+    case 'schedule': {
+      const s = schedule({ config, state: d.state });
+      out(`Плановая смена: каждые ${s.everyDays} дн. в ${s.at} МСК, новый сервер заказывается за ${s.overlapHours} ч`);
+      out(`Последняя смена: ${s.lastAt ? msk(s.lastAt) : 'ещё не было'}`);
+      out(`Следующая смена: ${msk(s.next)} — через ${span(s.left)}`);
+      out(`Заказ нового сервера: ${msk(s.orderAt)}${s.orderAt <= Date.now() ? ' (время уже наступило)' : ` — через ${span(s.orderAt - Date.now())}`}`);
+      out('⚠️ Автоматическая смена ещё не включена (этап 7): это расписание, по которому она будет работать');
+      return 0;
+    }
+    case 'tariff': {
+      const z = config.zomro;
+      if (!z) throw new ConfigError('Zomro не настроен: впишите ZOMRO_USER и ZOMRO_PASSWORD в .env');
+      const t = (await d.cloud.tariffs()).find((x) => x.pricelist === z.pricelist && x.datacenter === z.datacenter);
+      if (!t) {
+        out(`Выбран тариф ${z.pricelist} в дата-центре ${z.datacenter}, но Zomro его сейчас не предлагает — выберите другой`);
+        return 1;
+      }
+      out(`Дата-центр: ${t.datacenter} — ${t.datacenterName}`);
+      out(`Тариф: ${t.pricelist} — ${t.name}`);
+      out(`Цена: ${t.price}${t.discount && t.was ? ` (скидка ${t.discount}, было ${t.was})` : ''}${t.available ? '' : ' — нет в наличии!'}`);
+      out(`Образ ОС: ${z.os}`);
+      out(`Ожидание сборки: до ${Math.round(z.buildTimeout / 60000)} мин, SSH — до ${Math.round(z.sshTimeout / 60000)} мин`);
+      return 0;
+    }
+    case 'tariff-check': {
+      if (!d.cloud) throw new ConfigError('Zomro не настроен: впишите ZOMRO_USER и ZOMRO_PASSWORD в .env');
+      const [, pricelist, datacenter] = argv;
+      if (!/^\d{1,9}$/.test(pricelist ?? '') || !/^\d{1,9}$/.test(datacenter ?? '')) {
+        out('tariff-check ТАРИФ ДАТАЦЕНТР — номера из tariffs');
+        return 2;
+      }
+      const os = await d.cloud.pickOs({ pricelist, datacenter });
+      // одна строка для menu.sh: ok, номер образа, название
+      out(`ok\t${os.id}\t${os.name}`);
+      return 0;
+    }
     case 'tariffs': {
       if (!d.cloud) throw new ConfigError('Zomro не настроен: впишите ZOMRO_USER и ZOMRO_PASSWORD в .env');
       const list = await d.cloud.tariffs();
+      if (argv.includes('--tsv')) {
+        // для menu.sh: дата-центр, его имя, тариф, название, цена за день, цена текстом, есть ли, выбран ли
+        // пустое поле — «-»: bash склеивает подряд идущие табуляции
+        for (const t of [...list].sort((a, b) => a.datacenter.localeCompare(b.datacenter) || (a.perDay ?? 1e9) - (b.perDay ?? 1e9))) {
+          const chosen = t.pricelist === config.zomro.pricelist && t.datacenter === config.zomro.datacenter;
+          out([t.datacenter, t.datacenterName, t.pricelist, t.name, t.perDay ?? '', t.price, t.available ? 1 : 0, chosen ? 1 : 0].map((x) => String(x).replace(/[\t\n]/g, ' ').trim() || '-').join('\t'));
+        }
+        return 0;
+      }
       let center = null;
       for (const t of [...list].sort((a, b) => a.datacenter.localeCompare(b.datacenter) || (a.perDay ?? 1e9) - (b.perDay ?? 1e9))) {
         if (t.datacenter !== center) {

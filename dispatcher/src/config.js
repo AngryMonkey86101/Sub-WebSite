@@ -46,8 +46,18 @@ function loadConfig(env = process.env) {
     return value;
   };
 
+  const rotationAt = env.ROTATION_TIME?.trim() || '04:00';
+  if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(rotationAt)) throw new ConfigError('ROTATION_TIME: время по Москве, например 04:00');
+
   return {
     portalHost,
+    // плановая смена сервера (schedule.js): раз в everyDays дней в at по Москве, новый сервер —
+    // за overlapHours часов до неё
+    rotation: {
+      everyDays: number('ROTATION_DAYS', 3, { min: 1, max: 30 }),
+      at: rotationAt,
+      overlapHours: number('ROTATION_OVERLAP_H', 20, { min: 1, max: 72 })
+    },
     dataDir: env.DATA_DIR?.trim() || '/data',
     telegram: token ? { token, chatId } : null,
     ssh: { user: sshUser, port: number('SSH_PORT', 22, { min: 1, max: 65535 }) },

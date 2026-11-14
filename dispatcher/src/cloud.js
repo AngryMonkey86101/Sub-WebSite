@@ -199,7 +199,28 @@ function createCloud({ settings, fetch = globalThis.fetch, now = () => Date.now(
     return out;
   }
 
-  return { servers, server, balance, order, waitFor, remove, removeWhenReady, tariffs };
+  // Образы ОС для тарифа в дата-центре — из формы заказа (без sok ничего не заказывается).
+  // У каждого дата-центра свои номера образов: при смене тарифа нужен номер из этого списка.
+  async function osImages({ pricelist, datacenter }) {
+    const doc = await zomro.call('instances.order.param', { datacenter: String(datacenter), pricelist: String(pricelist), period: '-50' });
+    const asList = (x) => (Array.isArray(x) ? x : x === undefined || x === null ? [] : [x]);
+    return asList(doc?.slist)
+      .filter((l) => l?.name === 'instances_os')
+      .flatMap((l) => asList(l.val))
+      .map((v) => ({ id: String(v?.key ?? ''), name: String(v?.value ?? v?.$ ?? '') }))
+      .filter((o) => /^[0-9a-f-]{36}$/.test(o.id));
+  }
+
+  // Образ для нового тарифа: прежний, если он там есть; иначе Ubuntu 24.04, затем 22.04
+  async function pickOs({ pricelist, datacenter, current = settings.os }) {
+    const images = await osImages({ pricelist, datacenter });
+    if (!images.length) throw new ZomroError(`Zomro не отдала образы ОС для тарифа ${pricelist} в дата-центре ${datacenter} — тариф недоступен для заказа посуточно?`);
+    const found = images.find((o) => o.id === current) ?? images.find((o) => /ubuntu.*24\.04/i.test(o.name)) ?? images.find((o) => /ubuntu.*22\.04/i.test(o.name));
+    if (!found) throw new ZomroError(`Для тарифа ${pricelist} нет Ubuntu 24.04 или 22.04 — выберите другой тариф`);
+    return found;
+  }
+
+  return { servers, server, balance, order, waitFor, remove, removeWhenReady, tariffs, osImages, pickOs };
 }
 
 export { createCloud, newPassword, serverName, shape, notReady, parsePrice, PREFIX };

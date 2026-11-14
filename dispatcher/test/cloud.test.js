@@ -54,6 +54,13 @@ function fakeZomro({ activateAfter = 2, deleteFails = false, balance = '4.1502 E
         });
       }
       case 'instances.order.param': {
+        // без sok — только форма заказа: образы ОС этого дата-центра
+        if (p.get('sok') !== 'ok') {
+          const images = p.get('datacenter') === '19'
+            ? [['11111111-2222-4333-8444-555555555555', 'Ubuntu 24.04 x64'], ['66666666-7777-4888-8999-000000000000', 'Debian 12']]
+            : [['2140c514-fa2b-4b38-90e4-f9ff394245d1', 'Ubuntu 24.04 x64']];
+          return reply({ slist: [{ $name: 'instances_os', val: images.map(([key, name]) => ({ $key: key, $: name })) }] });
+        }
         orders.push(Object.fromEntries(p));
         if (p.get('sok') === 'ok') servers.push({ id: String(next++), servername: p.get('servername'), ip: '', instance_status: 'creating', pricelist_id: p.get('pricelist'), datacenter: p.get('datacenter'), orderedAt: polls });
         return reply({ ok: v('ok') });
@@ -318,4 +325,12 @@ test('tariffs: тарифы всех дата-центров с ценой за 
   assert.deepEqual(parsePrice(''), { text: '', perDay: null, was: null, discount: null });
   assert.deepEqual(list[1].labels, ['cpu:AMD', 'type:Basic', 'soldout:False']);
   assert.equal(z.orders.length, 0, 'заказ не отправлялся');
+});
+
+test('смена тарифа: образ ОС — свой у каждого дата-центра; прежний, если есть, иначе Ubuntu 24.04', async () => {
+  const z = fakeZomro();
+  const cloud = createCloud({ settings, fetch: z.fetch });
+  assert.deepEqual(await cloud.pickOs({ pricelist: '7864', datacenter: '17' }), { id: '2140c514-fa2b-4b38-90e4-f9ff394245d1', name: 'Ubuntu 24.04 x64' });
+  assert.deepEqual(await cloud.pickOs({ pricelist: '8235', datacenter: '19' }), { id: '11111111-2222-4333-8444-555555555555', name: 'Ubuntu 24.04 x64' });
+  assert.equal(z.orders.length, 0, 'форма заказа без sok — ничего не заказано');
 });
