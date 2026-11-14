@@ -30,6 +30,30 @@ function wgPeerList(wgConfig) {
 
 const wgPeers = (wgConfig) => wgPeerList(wgConfig).map((peer) => peer.key);
 
+// Адреса каждого ключа в awg0.conf: открытый ключ → список AllowedIPs
+function wgAllowed(wgConfig) {
+  const out = new Map();
+  for (const section of String(wgConfig ?? '').split(/^[ \t]*\[Peer\][ \t]*$/m).slice(1)) {
+    const key = section.match(/^[ \t]*PublicKey[ \t]*=[ \t]*(\S+)/m)?.[1];
+    if (!key || out.has(key)) continue;
+    out.set(key, (section.match(/^[ \t]*AllowedIPs[ \t]*=(.*)$/m)?.[1] ?? '').split(',').map((x) => x.trim()).filter(Boolean));
+  }
+  return out;
+}
+
+// Тот же awg0.conf, у одного ключа — другие AllowedIPs (строки нет — добавить после PublicKey)
+function setPeerAllowed(wgConfig, key, allowed) {
+  const parts = String(wgConfig).split(/(^[ \t]*\[Peer\][ \t]*$)/m);
+  for (let i = 2; i < parts.length; i += 2) {
+    if (parts[i].match(/^[ \t]*PublicKey[ \t]*=[ \t]*(\S+)/m)?.[1] !== key) continue;
+    parts[i] = /^[ \t]*AllowedIPs[ \t]*=/m.test(parts[i])
+      ? parts[i].replace(/^([ \t]*AllowedIPs[ \t]*=).*$/m, `$1 ${allowed}`)
+      : parts[i].replace(/^([ \t]*PublicKey[ \t]*=.*)$/m, `$1\nAllowedIPs = ${allowed}`);
+    return parts.join('');
+  }
+  return wgConfig;
+}
+
 function createAmneziaClient({ baseUrl, apiKey, timeoutMs = 30000, fetch = globalThis.fetch }) {
   async function request(method, path, body) {
     let res;
@@ -133,4 +157,4 @@ function createAmneziaClient({ baseUrl, apiKey, timeoutMs = 30000, fetch = globa
   };
 }
 
-export { createAmneziaClient, AmneziaError, wgPeers, wgPeerList };
+export { createAmneziaClient, AmneziaError, wgPeers, wgPeerList, wgAllowed, setPeerAllowed };

@@ -6,11 +6,11 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { Readable } from 'node:stream';
-import { decodeVpnKey, encodeVpnKey, hostOfKey, isIpAddress } from '../src/vpnKey.js';
+import { decodeVpnKey, encodeVpnKey, hostOfKey, isIpAddress, clientOfKey } from '../src/vpnKey.js';
 import { openDatabase } from '../src/db.js';
 import { encryptSecret, decryptSecret, newMemberCode, CODE } from '../src/crypto.js';
 import { loadConfig, ConfigError } from '../src/config.js';
-import { createAmneziaClient, wgPeers, wgPeerList } from '../src/amnezia.js';
+import { createAmneziaClient, wgPeers, wgPeerList, wgAllowed, setPeerAllowed } from '../src/amnezia.js';
 import { html, cabinetPage } from '../src/pages.js';
 import { main } from '../src/cli.js';
 import { startFakeAmnezia } from './fakeAmnezia.js';
@@ -246,4 +246,22 @@ test('CLI: приглашение админа, список, проверка �
     rmSync(dir, { recursive: true, force: true });
     await fake.close();
   }
+});
+
+test('awg0.conf: адреса ключей и замена адреса одному ключу', () => {
+  const conf = '[Interface]\nPrivateKey = s\n\n[Peer]\nPublicKey = QUJD+/x=\nAllowedIPs = 0.0.0.0/32\n\n[Peer]\nPublicKey = REVG\nPresharedKey = p\nAllowedIPs = 10.8.1.3/32\n\n[Peer]\nPublicKey = R0hJ\n';
+  assert.deepEqual([...wgAllowed(conf)], [['QUJD+/x=', ['0.0.0.0/32']], ['REVG', ['10.8.1.3/32']], ['R0hJ', []]]);
+  const next = setPeerAllowed(conf, 'QUJD+/x=', '10.8.1.2/32');
+  assert.deepEqual(wgAllowed(next).get('QUJD+/x='), ['10.8.1.2/32']);
+  assert.deepEqual(wgAllowed(next).get('REVG'), ['10.8.1.3/32'], 'другие ключи не тронуты');
+  assert.equal(next.replace('10.8.1.2/32', '0.0.0.0/32'), conf, 'остальной текст как был');
+  assert.deepEqual(wgAllowed(setPeerAllowed(conf, 'R0hJ', '10.8.1.4/32')).get('R0hJ'), ['10.8.1.4/32'], 'строки AllowedIPs не было — добавлена');
+  assert.equal(setPeerAllowed(conf, 'нет такого', '10.8.1.9/32'), conf);
+});
+
+test('ключ vpn://: адрес устройства и его открытый ключ', () => {
+  const key = (last) => encodeVpnKey({ containers: [{ container: 'amnezia-awg2', awg: { last_config: JSON.stringify(last) } }] });
+  assert.deepEqual(clientOfKey(key({ client_ip: '10.8.1.7', client_pub_key: 'QUJD', config: '' })), { address: '10.8.1.7', publicKey: 'QUJD' });
+  assert.deepEqual(clientOfKey(key({ config: '[Interface]\nAddress = 10.8.1.8/32\nPrivateKey = x\n' })), { address: '10.8.1.8', publicKey: null }, 'адрес — из текста конфига');
+  assert.equal(clientOfKey(encodeVpnKey({ containers: [{ container: 'amnezia-xray', xray: { last_config: '{}' } }] })), null, 'не AmneziaWG');
 });

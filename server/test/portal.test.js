@@ -470,3 +470,58 @@ test('в базе и уведомлениях нет IP-адресов устр�
   assert.ok(!dump.includes(DEVICE_IP));
   assert.ok(!notifications.some((n) => n.includes(DEVICE_IP)));
 });
+
+test('возобновление после переезда: amnezia-api забыл адреса — портал возвращает их из сохранённых ключей', async () => {
+  const admin = await joinedMember({ role: 'admin' });
+  const { member, browser: b } = await joinedMember();
+  await addDevice(b);
+  await addDevice(b);
+  const [one, two] = [1, 2].map((n) => fake.byName(`${member.code}-${n}`)[0]);
+  const addresses = [one.allowed, two.allowed];
+  assert.equal((await admin.browser.post(`/admin/members/${member.id}/pause`)).status, 303);
+  assert.deepEqual([one.allowed, two.allowed], ['0.0.0.0/32', '0.0.0.0/32']);
+
+  // переезд: бэкап загружен, запомненные адреса пропали — «возобновить» в amnezia-api ничего не меняет
+  fake.forgetAddresses();
+  const imports = fake.state.imports ?? 0;
+  notifications.length = 0;
+  assert.equal((await admin.browser.post(`/admin/members/${member.id}/resume`)).status, 303);
+  const [a, c] = [1, 2].map((n) => fake.byName(`${member.code}-${n}`)[0]);
+  assert.deepEqual([a.allowed, c.allowed], addresses, 'адреса — те же, что были у ключей');
+  assert.deepEqual([a.status, c.status], ['active', 'active']);
+  assert.equal(fake.state.imports, imports + 1, 'одна загрузка awg0.conf');
+  assert.deepEqual(fake.state.imported.protocols, ['amneziawg3'], 'Xray не трогается');
+  assert.ok(notifications.some((t) => t.startsWith(`🔧 ${member.code}-1, ${member.code}-2: ключи не включились — вернул им адреса`)), notifications.join('\n'));
+
+  // всё совпадает — повторная проверка ничего не пишет
+  const again = await portal.repairKeys();
+  assert.deepEqual([again.fixed, again.paused, again.failed, again.applied], [[], [], [], false]);
+  assert.equal(fake.state.imports, imports + 1);
+});
+
+test('проверка ключей: на паузе, а ключ работает — выключить; --dry-run ничего не меняет; ключи поменялись — повторить', async () => {
+  const admin = await joinedMember({ role: 'admin' });
+  const { member, browser: b } = await joinedMember();
+  await addDevice(b);
+  assert.equal((await admin.browser.post(`/admin/members/${member.id}/pause`)).status, 303);
+  const key = fake.byName(`${member.code}-1`)[0];
+  key.allowed = `${key.address}/32`;
+
+  const dry = await portal.repairKeys({ apply: false });
+  assert.deepEqual(dry.paused, [{ name: `${member.code}-1` }]);
+  assert.equal(dry.applied, false);
+  assert.equal(key.allowed, `${key.address}/32`, 'только показать');
+
+  // между проверкой и записью awg0.conf на сервере поменялся (например, выдали ключ) — не затирать
+  let calls = 0;
+  fake.state.backupHook = () => {
+    if (++calls === 2) key.allowed = `${key.address}/32, 10.8.9.9/32`;
+  };
+  await assert.rejects(portal.repairKeys(), /изменились во время проверки/);
+  fake.state.backupHook = null;
+  key.allowed = `${key.address}/32`;
+
+  const r = await portal.repairKeys();
+  assert.deepEqual(r.paused, [{ name: `${member.code}-1` }]);
+  assert.equal(fake.byName(`${member.code}-1`)[0].allowed, '0.0.0.0/32');
+});

@@ -1,6 +1,7 @@
 import { transaction } from './db.js';
 import { sha256, newToken, newMemberCode, encryptSecret, decryptSecret } from './crypto.js';
-import { hostOfKey, isIpAddress } from './vpnKey.js';
+import { hostOfKey, isIpAddress, clientOfKey } from './vpnKey.js';
+import { wgAllowed, setPeerAllowed } from './amnezia.js';
 import { LIMITS, PROTOCOLS, PLATFORMS } from './config.js';
 
 // Логика портала без HTTP: её используют и сайт, и команды CLI.
@@ -253,23 +254,107 @@ function createPortal({ db, config, amnezia, notify, now = () => Date.now() }) {
     if (member.role === 'admin') throw new PortalError(400, 'Это админ: его нельзя приостановить или удалить');
   }
 
-  // Пауза без смены ключей: на сервере ключи выключаются, после возобновления работают снова
+  // Изменения ключей на сервере — по одному: проверка ключей (repairKeys) пишет awg0.conf целиком
+  let chain = Promise.resolve();
+  const serial = (fn) => {
+    const run = chain.then(fn, fn);
+    chain = run.catch(() => {});
+    return run;
+  };
+
+  // Пауза без смены ключей: на сервере ключи выключаются, после возобновления работают снова.
+  // amnezia-api включает ключ по адресу, который запомнил при паузе; после переезда (загрузка
+  // бэкапа) он эти адреса теряет, и «возобновить» молча ничего не делает. Поэтому после
+  // возобновления портал проверяет ключи сам и, если нужно, возвращает адрес из сохранённого ключа.
   async function setPaused(memberId, paused) {
     const member = requireMember(memberId);
     requireRegular(member);
     if (!paused && member.status !== 'paused') throw new PortalError(400, 'Участник не на паузе');
     const status = paused ? 'disabled' : 'active';
-    for (const device of q.devicesOf.all(member.id)) {
-      if (!device.client_id) continue;
-      try {
-        await amnezia.setStatus({ id: device.client_id, protocol: device.protocol, status });
-      } catch (err) {
-        throw new PortalError(502, `${UNAVAILABLE} (${err.message})`);
+    await serial(async () => {
+      for (const device of q.devicesOf.all(member.id)) {
+        if (!device.client_id) continue;
+        try {
+          await amnezia.setStatus({ id: device.client_id, protocol: device.protocol, status });
+        } catch (err) {
+          throw new PortalError(502, `${UNAVAILABLE} (${err.message})`);
+        }
       }
-    }
-    q.setMemberStatus.run(paused ? 'paused' : 'active', member.id);
+      q.setMemberStatus.run(paused ? 'paused' : 'active', member.id);
+    });
     log(paused ? 'member_paused' : 'member_resumed', member.code);
     notify(paused ? `⏸ ${member.code}: доступ приостановлен` : `▶️ ${member.code}: доступ возобновлён`);
+    if (paused) return;
+    try {
+      const r = await repairKeys({ memberId: member.id });
+      if (r.fixed.length) notify(`🔧 ${r.fixed.map((x) => x.name).join(', ')}: ключи не включились — вернул им адреса из сохранённых ключей, VPN работает`);
+      if (r.failed.length) notify(`⚠️ ${r.failed.map((x) => `${x.name} — ${x.reason}`).join('; ')}. Удалите это устройство и выдайте новый ключ`);
+    } catch (err) {
+      notify(`⚠️ ${member.code}: не удалось проверить, включились ли ключи (${err.message}). Проверка вручную: docker compose exec portal npm run -s cli -- repair-keys`);
+    }
+  }
+
+  // Ключи на сервере против базы портала (AmneziaWG). У участника не на паузе ключ с адресом паузы
+  // (0.0.0.0/32) — вернуть ему адрес из сохранённого ключа устройства; у участника на паузе
+  // работающий ключ — поставить на паузу. Запись — загрузкой awg0.conf через amnezia-api
+  // (POST /server/backup, как при переезде); перед ней — сверка, что ключи на сервере не менялись.
+  // apply: false — только показать. memberId — только этого участника.
+  function repairKeys({ apply = true, memberId = null } = {}) {
+    return serial(async () => {
+      const backup = await amnezia.serverBackup();
+      const part = backup?.amneziaWg3;
+      if (!part?.wgConfig) throw new PortalError(502, 'amnezia-api не отдал ключи AmneziaWG');
+      const allowed = wgAllowed(part.wgConfig);
+      const taken = new Set([...allowed.values()].flat().filter((ip) => ip !== '0.0.0.0/32'));
+      let wgConfig = part.wgConfig;
+      const fixed = [];
+      const paused = [];
+      const failed = [];
+      const members = memberId ? [requireMember(memberId)] : q.members.all();
+      for (const member of members) {
+        const shouldWork = member.status !== 'paused';
+        for (const device of q.devicesOf.all(member.id)) {
+          if (!device.client_id || device.protocol !== 'amneziawg3' || !allowed.has(device.client_id)) continue;
+          const name = clientName(member, device.number);
+          const current = allowed.get(device.client_id);
+          const off = !current.length || (current.length === 1 && current[0] === '0.0.0.0/32');
+          if (shouldWork && off) {
+            let info = null;
+            try {
+              info = device.key_enc ? clientOfKey(deviceKey(device)) : null;
+            } catch {
+              info = null;
+            }
+            if (!info) {
+              failed.push({ name, reason: 'в сохранённом ключе нет адреса' });
+            } else if (info.publicKey && info.publicKey !== device.client_id) {
+              failed.push({ name, reason: 'сохранённый ключ не от этого устройства' });
+            } else if (taken.has(`${info.address}/32`)) {
+              failed.push({ name, reason: `адрес ${info.address} уже у другого ключа` });
+            } else {
+              taken.add(`${info.address}/32`);
+              wgConfig = setPeerAllowed(wgConfig, device.client_id, `${info.address}/32`);
+              fixed.push({ name, address: info.address });
+            }
+          } else if (!shouldWork && !off) {
+            wgConfig = setPeerAllowed(wgConfig, device.client_id, '0.0.0.0/32');
+            paused.push({ name });
+          }
+        }
+      }
+      const changed = wgConfig !== part.wgConfig;
+      if (apply && changed) {
+        const fresh = (await amnezia.serverBackup())?.amneziaWg3?.wgConfig;
+        if (fresh !== part.wgConfig) throw new PortalError(409, 'Ключи на сервере изменились во время проверки — повторите');
+        try {
+          await amnezia.importServerBackup({ protocols: ['amneziawg3'], amneziaWg3: { ...part, wgConfig } });
+        } catch (err) {
+          throw new PortalError(502, `${UNAVAILABLE} (${err.message})`);
+        }
+        log('keys_repaired', null, [...fixed.map((x) => x.name), ...paused.map((x) => x.name)].join(', '));
+      }
+      return { fixed, paused, failed, applied: apply && changed };
+    });
   }
 
   async function deleteMember(memberId) {
@@ -366,6 +451,7 @@ function createPortal({ db, config, amnezia, notify, now = () => Date.now() }) {
     deviceKey,
     revokeDevice,
     setPaused,
+    repairKeys,
     deleteMember,
     setDeviceLimit,
     listMembers,

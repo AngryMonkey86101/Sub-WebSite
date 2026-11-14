@@ -1,7 +1,7 @@
 import { createServer } from 'node:http';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { encodeVpnKey } from '../src/vpnKey.js';
-import { wgPeerList } from '../src/amnezia.js';
+import { wgPeerList, wgAllowed } from '../src/amnezia.js';
 
 // Поддельный amnezia-api по контракту 2.0.0 (openapi/openapi.json): клиенты в памяти,
 // ключи vpn:// в настоящем формате. Каждому клиенту отдаётся внешний адрес устройства
@@ -9,11 +9,11 @@ import { wgPeerList } from '../src/amnezia.js';
 
 const DEVICE_ENDPOINT = '203.0.113.77:51820';
 
-function makeKey(host, protocol, privateKey) {
+function makeKey(host, protocol, privateKey, { id = null, address = null } = {}) {
   const container = protocol === 'xray' ? 'amnezia-xray' : 'amnezia-awg2';
   const lastConfig = protocol === 'xray'
     ? { outbounds: [{ protocol: 'vless', settings: { vnext: [{ address: host, port: 8443 }] } }] }
-    : { config: `[Interface]\nPrivateKey = ${privateKey}\n[Peer]\nEndpoint = ${host}:55424\n`, hostName: host, client_priv_key: privateKey };
+    : { config: `[Interface]\nAddress = ${address}/32\nPrivateKey = ${privateKey}\n[Peer]\nEndpoint = ${host}:55424\n`, hostName: host, client_priv_key: privateKey, client_ip: address, client_pub_key: id };
   return encodeVpnKey({
     format_version: 1,
     hostName: host,
@@ -27,8 +27,13 @@ async function startFakeAmnezia({ apiKey, host = 'k4tq9v.duckdns.org' }) {
     host,
     clients: new Map(),
     failNext: 0,
-    requests: []
+    requests: [],
+    nextAddress: 2
   };
+  // Как настоящий amnezia-api 2.0.0: ключ на паузе — AllowedIPs 0.0.0.0/32, прежний адрес
+  // запоминается (remembered) и при возобновлении возвращается. Загрузка бэкапа адреса забывает:
+  // проверка запроса отбрасывает userData.allowedIp — возобновление после неё ничего не меняет.
+  const off = (c) => c.allowed === '0.0.0.0/32';
 
   const server = createServer(async (req, res) => {
     const send = (status, body) => {
@@ -52,37 +57,48 @@ async function startFakeAmnezia({ apiKey, host = 'k4tq9v.duckdns.org' }) {
     if (url.pathname === '/server/backup' && req.method === 'POST') {
       if (!Array.isArray(body.protocols) || !body.amneziaWg3?.wgConfig) return send(400, { message: 'Некорректная резервная копия' });
       state.imported = body;
+      state.imports = (state.imports ?? 0) + 1;
+      const previous = new Map(state.clients);
       state.clients.clear();
       // как настоящий amnezia-api: клиенты — пиры из awg0.conf (awg syncconf), таблица клиентов —
       // только их имена; записи таблицы без пира в конфиге клиентами не становятся
       // Ключи на паузе (0.0.0.0/32): адрес достаётся последнему, у прочих он пуст, и amnezia-api,
-      // пока к ним не подключались, их не показывает — как на новом сервере после переезда.
+      // пока к ним не подключались, их не показывает (hidden) — как на новом сервере после переезда.
       const names = new Map(body.amneziaWg3.clients.map((c) => [c.clientId, c.userData?.clientName ?? '']));
       const peers = wgPeerList(body.amneziaWg3.wgConfig);
+      const allowedOf = wgAllowed(body.amneziaWg3.wgConfig);
       const lastPaused = peers.filter((p) => p.disabled).at(-1)?.key;
-      for (const id of peers.filter((p) => !p.disabled || p.key === lastPaused).map((p) => p.key)) {
+      for (const { key: id, disabled } of peers) {
+        const allowed = (allowedOf.get(id) ?? [])[0] ?? '0.0.0.0/32';
+        const before = previous.get(id);
         state.clients.set(id, {
           id,
           name: names.get(id) ?? id,
           protocol: 'amneziawg3',
-          status: 'active',
+          status: disabled ? 'disabled' : 'active',
+          allowed,
+          address: disabled ? before?.address ?? null : allowed.split('/')[0],
+          remembered: false,
+          hidden: disabled && id !== lastPaused,
           online: false,
           lastHandshake: 0,
           traffic: { received: 0, sent: 0 }
         });
       }
+      for (const c of previous.values()) if (c.protocol !== 'amneziawg3') state.clients.set(c.id, c);
       // сбой применения конфигурации: часть пиров не попала в AmneziaWG
       for (const id of [...state.clients.keys()].slice(0, state.dropOnImport ?? 0)) state.clients.delete(id);
       return send(200, { id: 'srv', region: 'NL', weight: 100, maxPeers: 200, totalPeers: state.clients.size, protocols: ['amneziawg3'] });
     }
 
     if (url.pathname === '/server/backup' && req.method === 'GET') {
+      if (state.backupHook) state.backupHook();
       return send(200, {
         generatedAt: new Date().toISOString(),
         serverId: 'srv',
         protocols: ['amneziawg3'],
         amneziaWg3: {
-          wgConfig: `[Interface]\nPrivateKey = server-private-key\nJc = 4\n${[...state.clients.values()].filter((c) => c.protocol === 'amneziawg3').map((c) => `\n[Peer]\nPublicKey = ${c.id}\nAllowedIPs = 10.8.1.2/32\n`).join('')}`,
+          wgConfig: `[Interface]\nPrivateKey = server-private-key\nJc = 4\n${[...state.clients.values()].filter((c) => c.protocol === 'amneziawg3').map((c) => `\n[Peer]\nPublicKey = ${c.id}\nAllowedIPs = ${c.allowed}\n`).join('')}`,
           presharedKey: 'psk',
           serverPublicKey: 'server-public-key',
           clients: [...state.clients.values()].map((c) => ({ clientId: c.id, userData: { clientName: c.name } }))
@@ -109,27 +125,32 @@ async function startFakeAmnezia({ apiKey, host = 'k4tq9v.duckdns.org' }) {
       }
       const privateKey = randomBytes(32).toString('base64');
       const id = protocol === 'xray' ? randomUUID() : randomBytes(32).toString('base64');
+      const address = `10.8.1.${state.nextAddress++}`;
       state.clients.set(id, {
         id,
         name: body.clientName,
         protocol,
+        address,
+        allowed: `${address}/32`,
+        remembered: true,
         status: 'active',
         online: false,
         lastHandshake: 0,
         traffic: { received: 0, sent: 0 }
       });
-      return send(200, { message: 'Успешно сохранено', client: { id, config: makeKey(state.host, protocol, privateKey), protocol } });
+      return send(200, { message: 'Успешно сохранено', client: { id, config: makeKey(state.host, protocol, privateKey, { id, address }), protocol } });
     }
 
     if (req.method === 'GET') {
       const groups = new Map();
       for (const client of state.clients.values()) {
+        if (client.hidden) continue;
         if (!groups.has(client.name)) groups.set(client.name, []);
         groups.get(client.name).push({
           id: client.id,
           name: null,
           status: client.status,
-          allowedIps: ['10.8.1.2/32'],
+          allowedIps: [client.allowed ?? '10.8.1.2/32'],
           lastHandshake: client.lastHandshake,
           traffic: client.traffic,
           endpoint: DEVICE_ENDPOINT,
@@ -151,6 +172,17 @@ async function startFakeAmnezia({ apiKey, host = 'k4tq9v.duckdns.org' }) {
     const client = state.clients.get(body.clientId);
     if (!client || client.protocol !== body.protocol) return send(404, { message: 'Не найдено' });
     if (req.method === 'PATCH') {
+      if (client.protocol === 'amneziawg3') {
+        if (body.status === 'disabled') {
+          client.allowed = '0.0.0.0/32';
+          client.remembered = true;
+        } else if (body.status === 'active' && client.remembered) {
+          client.allowed = `${client.address}/32`;
+        }
+        // забытый адрес — как живой: ответ «сохранено», а ключ остаётся на паузе
+        client.status = off(client) ? 'disabled' : 'active';
+        return send(200, { message: 'Успешно сохранено' });
+      }
       client.status = body.status;
       return send(200, { message: 'Успешно сохранено' });
     }
@@ -166,6 +198,10 @@ async function startFakeAmnezia({ apiKey, host = 'k4tq9v.duckdns.org' }) {
     state,
     url: `http://127.0.0.1:${server.address().port}`,
     byName: (name) => [...state.clients.values()].filter((c) => c.name === name),
+    // как после переезда: загрузка бэкапа забыла адреса ключей на паузе
+    forgetAddresses: () => {
+      for (const c of state.clients.values()) c.remembered = false;
+    },
     close: () => new Promise((resolve) => server.close(resolve))
   };
 }
