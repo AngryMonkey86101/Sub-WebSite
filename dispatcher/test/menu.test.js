@@ -158,6 +158,14 @@ test('menu.sh: хостеры — очередь, ключ Aeza, разведк�
   assert.match(t.env(), /^AEZA_API_KEY=AEZAkey0123456789abcdef$/m);
   assert.match(t.env(), /^CLOUD_ORDER=zomro,aeza$/m);
   assert.ok(!res.out.includes('AEZAkey0123456789abcdef'), 'ключ на экран не выводится');
+  assert.match(res.out, /Ключ записан в \.env, но диспетчер его не видит/, 'служба ключ не подхватила — честно сказано');
+  // ключ с +/= и пробелами по краям при вставке — принимается; диспетчер его видит — сразу проверка у Aeza
+  res = t.run('10\n2\n  QUJDREVGR0hJSktMTU5PUA+/==  \n\n0\n0\n', { AEZA_ON: '1', AEZA_POS: '2' });
+  assert.match(t.env(), /^AEZA_API_KEY=QUJDREVGR0hJSktMTU5PUA\+\/==$/m);
+  assert.match(res.out, /✓ Ключ сохранён, диспетчер его видит[\s\S]*Баланс \(GET \/accounts\/me\)/);
+  // с кавычкой — отказ с объяснением
+  res = t.run("10\n2\nabc'def0123456789xyz\n\n0\n0\n");
+  assert.match(res.out, /Не похоже на ключ API: нужно от 16 символов, без кавычек/);
   // оба настроены: основным становится Aeza
   const both = { AEZA_ON: '1', AEZA_POS: '2' };
   res = t.run('10\n1\n\n0\n0\n', both);
