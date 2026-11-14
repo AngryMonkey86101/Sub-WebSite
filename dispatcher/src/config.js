@@ -100,6 +100,14 @@ function loadConfig(env = process.env) {
       at: rotationAt,
       overlapHours: number('ROTATION_OVERLAP_H', 20, { min: 1, max: 72 })
     },
+    // аварийный переезд: сервер недоступен из РФ EMERGENCY_AFTER_MIN минут подряд (а свой интернет
+    // есть) — диспетчер сам переезжает к хостерам в режиме auto (Aeza «по запросу» не трогает).
+    // Не удался — следующая попытка не раньше чем через EMERGENCY_RETRY_H часов
+    emergency: {
+      enabled: flag('EMERGENCY_ENABLED', true),
+      afterMin: number('EMERGENCY_AFTER_MIN', 30, { min: 10, max: 1440 }),
+      retryHours: number('EMERGENCY_RETRY_H', 6, { min: 1, max: 72 })
+    },
     dataDir: env.DATA_DIR?.trim() || '/data',
     telegram: token ? { token, chatId } : null,
     ssh: { user: sshUser, port: number('SSH_PORT', 22, { min: 1, max: 65535 }) },
@@ -141,7 +149,7 @@ function loadConfig(env = process.env) {
           password: zomroPassword,
           pricelist: zomroId('ZOMRO_PRICELIST', '7864', /^\d{1,9}$/),
           datacenter: zomroId('ZOMRO_DATACENTER', '17', /^\d{1,9}$/),
-          os: zomroId('ZOMRO_OS', '2140c514-fa2b-4b38-90e4-f9ff394245d1', /^[0-9a-f-]{36}$/),
+          os: zomroId('ZOMRO_OS', '2140c514-fa2b-4b38-90e4-f9ff394245d1', /^[\w.:-]{1,64}$/),
           // Zomro собирает серверы долго: сколько ждать, пока сервер станет активным и получит IP,
           // и потом — пока на нём откроется SSH
           buildTimeout: number('ZOMRO_BUILD_MIN', 90, { min: 10, max: 360 }) * MINUTE,

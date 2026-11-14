@@ -557,6 +557,45 @@ screen_rotation() {
   pause
 }
 
+# Аварийный переезд: сервер долго недоступен из РФ — диспетчер переезжает сам (хостеры auto)
+screen_emergency() {
+  while true; do
+    header 'Аварийный переезд'
+    printf 'Если сервер недоступен из РФ дольше заданного (а у диспетчера интернет есть), диспетчер\n'
+    printf 'сам заказывает новый сервер и переезжает — как «Переезд сейчас». Хостеры — те, что\n'
+    printf '«и в автоматических переездах» (Aeza «по запросу» не трогается). Не удалось — повтор через\n'
+    printf '%s ч, не больше 3 попыток на одну аварию.\n\n' "$(setting EMERGENCY_RETRY_H | grep . || echo 6)"
+    cli status | grep '^Аварийный переезд' || true
+    local on after
+    on=$(setting EMERGENCY_ENABLED)
+    after=$(setting EMERGENCY_AFTER_MIN | grep . || echo 30)
+    printf '\n'
+    if [ "$on" = 0 ] || [ "$on" = off ] || [ "$on" = no ]; then
+      printf '  %s1%s — включить аварийный переезд\n' "$B" "$R"
+    else
+      printf '  %s1%s — выключить: при блокировке только сообщение, переезд — вручную\n' "$B" "$R"
+    fi
+    printf '  %s2%s — через сколько минут недоступности переезжать (сейчас %s)\n' "$B" "$R" "$after"
+    printf '  %s0%s — назад\n' "$B" "$R"
+    case "$(ask)" in
+      1)
+        if [ "$on" = 0 ] || [ "$on" = off ] || [ "$on" = no ]; then set_env EMERGENCY_ENABLED 1; else set_env EMERGENCY_ENABLED 0; fi
+        ;;
+      2)
+        local m
+        m=$(ask_value 'Минут недоступности (10–1440), пусто — отмена:' '^[0-9]{2,4}$') || continue
+        if [ "$m" -lt 10 ] || [ "$m" -gt 1440 ]; then printf '%sНужно от 10 до 1440%s\n' "$Y" "$R"; pause; continue; fi
+        set_env EMERGENCY_AFTER_MIN "$m"
+        ;;
+      *) return ;;
+    esac
+    compose up -d >/dev/null 2>&1 || { printf '%sДиспетчер не перезапустился%s\n' "$RD" "$R"; pause; return; }
+    printf '\n%s✓ Сохранено.%s ' "$G" "$R"
+    cli status | grep '^Аварийный переезд' || true
+    pause
+  done
+}
+
 main_menu() {
   while true; do
     header 'главное меню'
@@ -572,6 +611,7 @@ main_menu() {
     printf '  %s10%s — Хостеры (Zomro, Aeza)\n' "$B" "$R"
     printf '  %s11%s — Удаление серверов\n' "$B" "$R"
     printf '  %s12%s — Плановая смена: включить или выключить\n' "$B" "$R"
+    printf '  %s13%s — Аварийный переезд: включить, выключить, через сколько минут\n' "$B" "$R"
     printf '  %s0%s — Выход\n' "$B" "$R"
     case "$(ask)" in
       1) screen_status ;;
@@ -586,6 +626,7 @@ main_menu() {
       10) screen_providers ;;
       11) screen_delete ;;
       12) screen_rotation ;;
+      13) screen_emergency ;;
       0) clear 2>/dev/null || true; exit 0 ;;
       *) ;;
     esac

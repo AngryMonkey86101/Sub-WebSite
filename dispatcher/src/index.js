@@ -1,7 +1,8 @@
 import { loadConfig, ConfigError } from './config.js';
 import { createDispatcher, keysHelp } from './app.js';
 
-// Служба диспетчера: раз в минуту — проверка сервера из РФ, раз в час — бэкап с сервера.
+// Служба диспетчера: раз в минуту — проверка сервера из РФ (долго недоступен — аварийный переезд),
+// раз в час — бэкап с сервера.
 
 let config;
 try {
@@ -18,7 +19,7 @@ if (d.keys.created.length) {
   console.log(`Созданы ключи диспетчера.\n${keysHelp(d.keys)}`);
   await d.notify(`Диспетчер запущен впервые и создал свои ключи.\n\n${keysHelp(d.keys)}`);
 } else {
-  await d.notify(`Диспетчер запущен: проверяю ${config.portalHost} из РФ, бэкап — раз в ${Math.round(config.backupInterval / 60000)} мин.`);
+  await d.notify(`Диспетчер запущен: проверяю ${config.portalHost} из РФ, бэкап — раз в ${Math.round(config.backupInterval / 60000)} мин. ${d.emergency.describe()}.`);
 }
 
 // очередь на удаление и брошенные заказы — раз в 10 минут: сервер стоит денег, пока не удалён
@@ -30,6 +31,8 @@ async function cycle() {
   busy = true;
   try {
     const result = await d.monitor.tick();
+    // долго недоступен из РФ — аварийный переезд (emergency.js)
+    await d.emergency.tick(result);
     if (result.status === 'up') {
       // накопленные сообщения — через сервер, пока он на связи (telegram.js)
       await d.notify.flush();

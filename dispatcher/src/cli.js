@@ -157,6 +157,7 @@ async function main(argv, { env = process.env, out = console.log, deps = {} } = 
       if (m.selfOfflineAt) out(`⚠️ ${fmt(m.selfOfflineAt)} у самого диспетчера не было интернета (REFERENCE_URLS не открывались) — сервер тогда не проверялся`);
       out(`Последний бэкап: ${b.latest ? `${b.latest.file.split('/').at(-1)}, ${Math.max(1, Math.round(b.latest.size / 1024))} КБ` : 'нет'}`);
       if (b.error && (!b.lastAt || b.failedAt > b.lastAt)) out(`Последняя попытка бэкапа не удалась (${fmt(b.failedAt)}): ${b.error}`);
+      out(d.emergency.describe(m));
       return 0;
     }
     case 'check': {
@@ -426,6 +427,13 @@ async function main(argv, { env = process.env, out = console.log, deps = {} } = 
       const i = argv.indexOf('--provider');
       const chosen = i >= 0 ? argv[i + 1] : null;
       if (chosen && !d.clouds[chosen]) throw new ConfigError(`${NAMES[chosen] ?? chosen} не настроен`);
+      // --emergency МИН — аварийный переезд, запущенный службой (emergency.js): только хостеры auto
+      const e = argv.indexOf('--emergency');
+      if (e >= 0) {
+        const minutes = Number(argv[e + 1]) || config.emergency.afterMin;
+        const r = await d.migration({ out }).migrate({ reason: `аварийный (из РФ сервер недоступен ${minutes} мин)`, automatic: true });
+        return r.ok ? 0 : 1;
+      }
       const r = await d.migration({ out }).migrate({ reason: chosen ? `по команде, ${NAMES[chosen]}` : 'по команде', providers: chosen ? [chosen] : null });
       return r.ok ? 0 : 1;
     }
