@@ -23,18 +23,29 @@ const PREFIX = 'family-vpn-';
 const notReady = (err) => /не активн|not active|inactive/i.test(String(err?.message ?? ''));
 const NAME = /^family-vpn-[a-z0-9-]{1,40}$/;
 
-// Пароль root нового сервера: 24 символа, есть строчные, заглавные и цифры
-function newPassword() {
-  const sets = ['abcdefghijkmnpqrstuvwxyz', 'ABCDEFGHJKLMNPQRSTUVWXYZ', '23456789'];
-  const all = sets.join('');
-  const chars = sets.map((s) => s[randomInt(s.length)]);
-  while (chars.length < 24) chars.push(all[randomInt(all.length)]);
-  for (let i = chars.length - 1; i > 0; i--) {
+// Пароль root нового сервера: 24 символа — строчные, заглавные, цифры и спецсимволы (не меньше
+// двух). Zomro требует минимум 12 символов и хотя бы по одной строчной, заглавной, цифре и
+// спецсимволу; если пароль не подходит, сервер не собирается, а висит «в сборке» без ошибки
+// (ответ поддержки Zomro, 14.11.2026). Спецсимволы — только безопасные для оболочки, URL и JSON
+// (без $ ` \ " ' ! & ; | < > и пробела); первый символ — буква.
+const PASSWORD_SETS = ['abcdefghijkmnpqrstuvwxyz', 'ABCDEFGHJKLMNPQRSTUVWXYZ', '23456789', '@#%+=_-'];
+const PASSWORD_RULE = /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=(?:.*[@#%+=_-]){2})[A-Za-z][A-Za-z0-9@#%+=_-]{11,}$/;
+
+function newPassword(length = 24) {
+  const [lower, upper, digits, special] = PASSWORD_SETS;
+  const all = PASSWORD_SETS.join('');
+  const pick = (set) => set[randomInt(set.length)];
+  const rest = [pick(lower), pick(upper), pick(digits), pick(special), pick(special)];
+  while (rest.length < length - 1) rest.push(pick(all));
+  for (let i = rest.length - 1; i > 0; i--) {
     const j = randomInt(i + 1);
-    [chars[i], chars[j]] = [chars[j], chars[i]];
+    [rest[i], rest[j]] = [rest[j], rest[i]];
   }
-  return chars.join('');
+  return `${pick(lower + upper)}${rest.join('')}`;
 }
+
+// Подходит ли пароль под требования хостера (проверка перед заказом)
+const strongPassword = (p) => typeof p === 'string' && PASSWORD_RULE.test(p);
 
 const pad = (n) => String(n).padStart(2, '0');
 function serverName(ms) {
@@ -102,6 +113,7 @@ function createCloud({ settings, fetch = globalThis.fetch, now = () => Date.now(
   // несколько минут (waitFor). Деньги списываются с лицевого счёта.
   async function order({ name = serverName(now()), password = newPassword() } = {}) {
     if (!NAME.test(name)) throw new ZomroError(`Имя сервера должно начинаться с ${PREFIX}`);
+    if (!strongPassword(password)) throw new ZomroError('Пароль root не подходит Zomro: нужно от 12 символов, строчные, заглавные, цифры и спецсимволы');
     const doc = await zomro.call('instances.order.param', {
       pricelist: settings.pricelist,
       datacenter: settings.datacenter,
@@ -332,4 +344,4 @@ function createCloud({ settings, fetch = globalThis.fetch, now = () => Date.now(
   return { provider: 'zomro', servers, server, balance, order, waitFor, remove, removeWhenReady, tariffs, osImages, orderForm, orderFormRaw, pickOs, check, listsOf, fieldsOf: fieldsList };
 }
 
-export { createCloud, newPassword, serverName, shape, notReady, parsePrice, PREFIX };
+export { createCloud, newPassword, strongPassword, serverName, shape, notReady, parsePrice, PREFIX };
