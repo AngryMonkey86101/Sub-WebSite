@@ -104,6 +104,13 @@ function createBackups({ config, keys, state, notify, isServerUp = () => true, r
     for (const old of files.slice(0, Math.max(0, files.length - config.backupKeep))) rmSync(join(dir, old), { force: true });
   }
 
+  // Папки переездов rotation/<время>/ — только ROTATION_KEEP последних (имена сортируются по времени)
+  function pruneRotations() {
+    const root = join(config.dataDir, 'rotation');
+    const dirs = readdirSync(root).filter((f) => /^\d{4}-\d{2}-\d{2}-\d{4}$/.test(f)).sort();
+    for (const old of dirs.slice(0, Math.max(0, dirs.length - (config.rotationKeep ?? 5)))) rmSync(join(root, old), { recursive: true, force: true });
+  }
+
   // Самый свежий бэкап на диске — для переезда (этап 5)
   function latest() {
     const files = readdirSync(dir).filter((f) => /^family-vpn-.*\.tar\.gz\.age$/.test(f)).sort();
@@ -178,6 +185,7 @@ function createBackups({ config, keys, state, notify, isServerUp = () => true, r
     const rotation = join(config.dataDir, 'rotation', stamp(time));
     mkdirSync(rotation, { recursive: true, mode: 0o700 });
     for (const [name, data] of [['backup.tar.gz.age', backup], ['caddy.tar.gz.age', caddy]]) writeFileSync(join(rotation, name), data, { mode: 0o600 });
+    pruneRotations();
     // финальный бэкап — и самый свежий обычный
     const name = `family-vpn-${stamp(time)}.tar.gz.age`;
     writeFileSync(join(dir, name), backup, { mode: 0o600 });

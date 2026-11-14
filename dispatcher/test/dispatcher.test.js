@@ -302,6 +302,16 @@ test('диспетчер: заморозка старого сервера — �
   assert.equal(d.backups.latest().size, backup.length, 'финальный бэкап — и самый свежий');
   assert.equal(await d.backups.remoteStatus(), 'frozen');
 
+  // папки переездов: хранятся 5 последних (ROTATION_KEEP), старые удаляются
+  for (let i = 0; i < 6; i++) {
+    w.advance(3 * 24 * 3600000);
+    await d.backups.freeze();
+  }
+  const rotations = readdirSync(join(dataDir, 'rotation')).sort();
+  assert.equal(rotations.length, 5, rotations.join(', '));
+  assert.deepEqual(readdirSync(join(dataDir, 'rotation', rotations.at(-1))).sort(), ['backup.tar.gz.age', 'caddy.tar.gz.age'], 'последняя — целиком');
+  assert.ok(!rotations.includes(r.dir.split('/').at(-1)), 'самая старая удалена');
+
   // плохой ответ сервера — ошибка, ничего не сохраняется как финальное
   w.net.bundle = createTar([{ name: 'backup.tar.gz.age', data: backup }]);
   await assert.rejects(d.backups.freeze(), /не отдал финальный бэкап и сертификаты/);

@@ -111,6 +111,8 @@ function loadConfig(env = process.env) {
     // бэкап с сервера: раз в BACKUP_INTERVAL_MIN минут, хранить BACKUP_KEEP последних
     backupInterval: number('BACKUP_INTERVAL_MIN', 60, { min: 10, max: 1440 }) * MINUTE,
     backupKeep: number('BACKUP_KEEP', 48, { min: 1, max: 1000 }),
+    // финальные бэкапы и сертификаты Caddy с переездов (rotation/<время>/) — сколько последних хранить
+    rotationKeep: number('ROTATION_KEEP', 5, { min: 1, max: 100 }),
     // сообщение, если свежего бэкапа нет дольше этого, а сервер при этом доступен
     backupAlertAfter: number('BACKUP_ALERT_AFTER_HOURS', 3, { min: 1, max: 168 }) * HOUR,
     // тариф, дата-центр и образ ОС новых серверов — по проверке API (docs/PLAN.md, раздел 15):
