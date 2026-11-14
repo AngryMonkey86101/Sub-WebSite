@@ -347,7 +347,13 @@ function createPortal({ db, config, amnezia, notify, now = () => Date.now() }) {
         const fresh = (await amnezia.serverBackup())?.amneziaWg3?.wgConfig;
         if (fresh !== part.wgConfig) throw new PortalError(409, 'Ключи на сервере изменились во время проверки — повторите');
         try {
-          await amnezia.importServerBackup({ protocols: ['amneziawg3'], amneziaWg3: { ...part, wgConfig } });
+          // generatedAt и serverId amnezia-api требует обязательно; восстанавливается только AmneziaWG
+          await amnezia.importServerBackup({
+            generatedAt: typeof backup.generatedAt === 'string' ? backup.generatedAt : new Date(now()).toISOString(),
+            serverId: backup.serverId ?? null,
+            protocols: ['amneziawg3'],
+            amneziaWg3: { ...part, wgConfig }
+          });
         } catch (err) {
           throw new PortalError(502, `${UNAVAILABLE} (${err.message})`);
         }

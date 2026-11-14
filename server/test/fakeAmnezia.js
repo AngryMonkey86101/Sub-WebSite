@@ -55,7 +55,9 @@ async function startFakeAmnezia({ apiKey, host = 'k4tq9v.duckdns.org' }) {
     }
 
     if (url.pathname === '/server/backup' && req.method === 'POST') {
-      if (!Array.isArray(body.protocols) || !body.amneziaWg3?.wgConfig) return send(400, { message: 'Некорректная резервная копия' });
+      // как настоящий: generatedAt, serverId и protocols — обязательны (иначе «Ошибка валидации»)
+      if (typeof body.generatedAt !== 'string' || !('serverId' in body) || !Array.isArray(body.protocols) || !body.protocols.length) return send(400, { message: 'Ошибка валидации' });
+      if (!body.amneziaWg3?.wgConfig) return send(400, { message: 'Некорректная резервная копия' });
       state.imported = body;
       state.imports = (state.imports ?? 0) + 1;
       const previous = new Map(state.clients);
