@@ -145,7 +145,42 @@ function createCloud({ settings, fetch = globalThis.fetch, now = () => Date.now(
     }
   }
 
-  return { servers, server, balance, order, waitFor, remove, removeWhenReady };
+  // Тарифы для заказа посуточно — по всем дата-центрам. Только чтение: первый шаг заказа
+  // (instances.order) без подтверждения ничего не заказывает. Метки тарифа (процессор, тип,
+  // «распродано») — из списка фильтров формы: ключ метки → её значение.
+  async function tariffs() {
+    const asList = (x) => (Array.isArray(x) ? x : x === undefined || x === null ? [] : [x]);
+    const first = await zomro.call('instances.order', { period: '-50' });
+    const centers = asList(first?.slist)
+      .filter((l) => l?.name === 'datacenter')
+      .flatMap((l) => asList(l.val))
+      .map((v) => ({ id: String(v?.key ?? ''), name: String(v?.$ ?? v?.value ?? '') }))
+      .filter((c) => /^\d+$/.test(c.id));
+    if (!centers.length) centers.push({ id: String(first?.datacenter ?? settings.datacenter), name: '' });
+    const out = [];
+    for (const center of centers) {
+      const doc = center.id === String(first?.datacenter) ? first : await zomro.call('instances.order', { period: '-50', datacenter: center.id });
+      const tags = new Map(asList(doc?.flist?.val).map((t) => [String(t?.key ?? ''), String(t?.value ?? t?.$ ?? '')]));
+      const items = asList(doc?.list).flatMap((b) => asList(b?.elem)).filter((e) => e?.pricelist);
+      for (const e of items) {
+        const labels = asList(e.filter?.tag).map((t) => tags.get(String(t?.$ ?? t)) ?? '').filter(Boolean);
+        const price = String(e.price ?? '');
+        out.push({
+          datacenter: center.id,
+          datacenterName: center.name,
+          pricelist: String(e.pricelist),
+          name: String(e.desc ?? ''),
+          price,
+          perDay: Number.parseFloat(price.replace(',', '.')) || null,
+          available: e.order_available !== 'off' && !labels.includes('soldout:True'),
+          labels
+        });
+      }
+    }
+    return out;
+  }
+
+  return { servers, server, balance, order, waitFor, remove, removeWhenReady, tariffs };
 }
 
 export { createCloud, newPassword, serverName, shape, notReady, PREFIX };

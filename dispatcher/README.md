@@ -88,6 +88,7 @@ cd ~/sub-website/dispatcher && docker compose exec dispatcher node src/cli.js st
 | `unfreeze` | Откат: портал, бот и сайт на сервере снова работают |
 | `servers` | Серверы у Zomro и баланс; ◆ — серверы диспетчера (только их он может удалить) |
 | `remove ID --yes` | Удалить свой сервер у Zomro (с ◆; чужие команда не удаляет) |
+| `tariffs` | Тарифы Zomro для посуточного заказа во всех дата-центрах: цена за день, процессор, тип, наличие; ▶ — выбранный. Только чтение |
 | `zomro-test --yes` | Пробный заказ у Zomro: заказать сервер, дождаться IP, войти по паролю root, удалить. Несколько центов с баланса |
 
 **Обновление:** `git -C ~/sub-website pull && cd ~/sub-website/dispatcher && docker compose up -d --build`. Ключи, бэкапы и состояние — в томе `dispatcher_data`, при обновлении не теряются.

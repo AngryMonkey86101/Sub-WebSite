@@ -16,6 +16,7 @@ const HELP = `Команды:
   unfreeze    разморозить: портал, бот и сайт на сервере снова работают
   servers     серверы у Zomro и баланс (свои — с именем family-vpn-…)
   remove ID --yes  удалить свой сервер у Zomro (только с именем family-vpn-…)
+  tariffs     тарифы Zomro для посуточного заказа во всех дата-центрах, с ценой за день
   zomro-test --yes  пробный заказ: заказать сервер, дождаться IP, войти по паролю, удалить
               (несколько центов с баланса). Надёжнее запускать в фоне — см. README`;
 
@@ -80,6 +81,22 @@ async function main(argv, { env = process.env, out = console.log, deps = {} } = 
       out('◆ — серверы диспетчера (только их он может удалить)');
       const pending = d.orders.list();
       if (pending.length) out(`Ждут уборки, если их не довели до конца: ${pending.map((o) => `${o.name} (после ${fmt(o.until)})`).join(', ')}`);
+      return 0;
+    }
+    case 'tariffs': {
+      if (!d.cloud) throw new ConfigError('Zomro не настроен: впишите ZOMRO_USER и ZOMRO_PASSWORD в .env');
+      const list = await d.cloud.tariffs();
+      let center = null;
+      for (const t of [...list].sort((a, b) => a.datacenter.localeCompare(b.datacenter) || (a.perDay ?? 1e9) - (b.perDay ?? 1e9))) {
+        if (t.datacenter !== center) {
+          center = t.datacenter;
+          out(`\nДата-центр ${t.datacenter}${t.datacenterName ? ` — ${t.datacenterName}` : ''}${t.datacenter === config.zomro.datacenter ? ' (сейчас выбран)' : ''}:`);
+        }
+        const mark = t.pricelist === config.zomro.pricelist && t.datacenter === config.zomro.datacenter ? '▶' : ' ';
+        const kind = t.labels.filter((l) => /^(cpu|type):/.test(l)).map((l) => l.split(':')[1]).join(', ');
+        out(`${mark} ${t.pricelist.padEnd(6)} ${t.name.padEnd(28)} ${t.price.padEnd(18)} ${kind}${t.available ? '' : '  — нет в наличии'}`);
+      }
+      out(`\n▶ — выбранный тариф. Сменить: ZOMRO_PRICELIST и ZOMRO_DATACENTER в .env, затем docker compose up -d`);
       return 0;
     }
     case 'remove': {

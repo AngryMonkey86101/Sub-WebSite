@@ -39,6 +39,20 @@ function fakeZomro({ activateAfter = 2, deleteFails = false, balance = '4.1502 E
         for (const s of servers) if (s.instance_status === 'creating' && polls - s.orderedAt >= activateAfter) Object.assign(s, { instance_status: 'active', ip: `203.0.113.${s.id % 200}` });
         return reply({ elem: servers.filter((s) => !(flags.hidden && s.orderedAt !== undefined)).map((s) => Object.fromEntries(Object.entries(s).map(([k, val]) => [k, v(val)]))) });
       }
+      case 'instances.order': {
+        // первый шаг заказа: дата-центры, метки фильтра, тарифы выбранного дата-центра
+        const dc = p.get('datacenter') ?? '17';
+        const tariff = (id, desc, price, tags, available = 'on') => ({ pricelist: v(id), desc: v(desc), price: v(price), order_available: v(available), filter: { tag: tags.map(v) } });
+        const list = dc === '17'
+          ? [tariff(7920, 'Blitz Intel| NL-3', '0.31 EUR за день', ['t-intel', 't-cheap', 't-in']), tariff(7864, 'Starter AMD| NL-3 v.3', '0.36 EUR за день', ['t-amd', 't-basic', 't-in'])]
+          : [tariff(8100, 'Starter AMD| DE-1', '0.45 EUR за день', ['t-amd', 't-basic', 't-out'])];
+        return reply({
+          datacenter: v(dc),
+          slist: [{ $name: 'datacenter', val: [{ $key: '17', $: 'Netherlands-3 [Cloud]' }, { $key: '19', $: 'Germany-1 [Cloud]' }] }, { $name: 'period', val: [{ $key: '-50', $: 'День' }] }],
+          flist: { $name: 'fpricelist', val: [['t-intel', 'cpu:Intel'], ['t-amd', 'cpu:AMD'], ['t-cheap', 'type:Cheap'], ['t-basic', 'type:Basic'], ['t-in', 'soldout:False'], ['t-out', 'soldout:True']].map(([key, value]) => ({ $key: key, $value: value })) },
+          list: [{ $name: 'tariflist', elem: list }]
+        });
+      }
       case 'instances.order.param': {
         orders.push(Object.fromEntries(p));
         if (p.get('sok') === 'ok') servers.push({ id: String(next++), servername: p.get('servername'), ip: '', instance_status: 'creating', pricelist_id: p.get('pricelist'), datacenter: p.get('datacenter'), orderedAt: polls });
@@ -286,4 +300,17 @@ test('сервер не собрался вовремя: Zomro не даёт у�
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test('tariffs: тарифы всех дата-центров с ценой за день и наличием; ничего не заказывает', async () => {
+  const z = fakeZomro();
+  const cloud = createCloud({ settings, fetch: z.fetch });
+  const list = await cloud.tariffs();
+  assert.deepEqual(list.map((t) => [t.datacenter, t.datacenterName, t.pricelist, t.name, t.perDay, t.available]), [
+    ['17', 'Netherlands-3 [Cloud]', '7920', 'Blitz Intel| NL-3', 0.31, true],
+    ['17', 'Netherlands-3 [Cloud]', '7864', 'Starter AMD| NL-3 v.3', 0.36, true],
+    ['19', 'Germany-1 [Cloud]', '8100', 'Starter AMD| DE-1', 0.45, false]
+  ]);
+  assert.deepEqual(list[1].labels, ['cpu:AMD', 'type:Basic', 'soldout:False']);
+  assert.equal(z.orders.length, 0, 'заказ не отправлялся');
 });
