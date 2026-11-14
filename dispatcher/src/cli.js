@@ -94,7 +94,8 @@ async function main(argv, { env = process.env, out = console.log, deps = {} } = 
         }
         const mark = t.pricelist === config.zomro.pricelist && t.datacenter === config.zomro.datacenter ? '▶' : ' ';
         const kind = t.labels.filter((l) => /^(cpu|type):/.test(l)).map((l) => l.split(':')[1]).join(', ');
-        out(`${mark} ${t.pricelist.padEnd(6)} ${t.name.padEnd(28)} ${t.price.padEnd(18)} ${kind}${t.available ? '' : '  — нет в наличии'}`);
+        const sale = t.discount && t.was ? `  скидка ${t.discount}, было ${t.was}` : '';
+        out(`${mark} ${t.pricelist.padEnd(6)} ${t.name.padEnd(28)} ${t.price.padEnd(18)} ${kind.padEnd(16)}${sale}${t.available ? '' : '  — нет в наличии'}`);
       }
       out(`\n▶ — выбранный тариф. Сменить: ZOMRO_PRICELIST и ZOMRO_DATACENTER в .env, затем docker compose up -d`);
       return 0;

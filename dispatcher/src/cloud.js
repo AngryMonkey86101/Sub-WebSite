@@ -42,6 +42,23 @@ function serverName(ms) {
   return `${PREFIX}${d.getUTCFullYear()}${pad(d.getUTCMonth() + 1)}${pad(d.getUTCDate())}-${pad(d.getUTCHours())}${pad(d.getUTCMinutes())}`;
 }
 
+// Цена тарифа из формы заказа. Со скидкой Zomro отдаёт HTML:
+//   <font color='red'><b>-20.03%</b></font> <del>0.36 EUR за день</del><font color='red'> <b>0.29 EUR за день</b></font>
+// Итог — { text: '0.29 EUR за день', perDay: 0.29, was: 0.36, discount: '-20.03%' }
+function parsePrice(raw) {
+  const html = String(raw ?? '');
+  const strip = (s) => s.replace(/<[^>]*>/g, ' ').replace(/&nbsp;/g, ' ').replace(/\s+/g, ' ').trim();
+  const number = (s) => {
+    const m = String(s).match(/(\d+(?:[.,]\d+)?)\s*[A-Z]{3}/);
+    return m ? Number.parseFloat(m[1].replace(',', '.')) : null;
+  };
+  const old = html.match(/<del>([\s\S]*?)<\/del>/i);
+  const rest = strip(html.replace(/<del>[\s\S]*?<\/del>/gi, ' '));
+  const discount = rest.match(/[-−]\s?\d+(?:[.,]\d+)?\s?%/)?.[0].replace(/\s/g, '') ?? null;
+  const text = strip(rest.replace(/[-−]\s?\d+(?:[.,]\d+)?\s?%/, ''));
+  return { text, perDay: number(text), was: old ? number(strip(old[1])) : null, discount };
+}
+
 // Сервер в удобном виде; IP — только IPv4
 function shape(x) {
   return {
@@ -164,14 +181,16 @@ function createCloud({ settings, fetch = globalThis.fetch, now = () => Date.now(
       const items = asList(doc?.list).flatMap((b) => asList(b?.elem)).filter((e) => e?.pricelist);
       for (const e of items) {
         const labels = asList(e.filter?.tag).map((t) => tags.get(String(t?.$ ?? t)) ?? '').filter(Boolean);
-        const price = String(e.price ?? '');
+        const price = parsePrice(e.price);
         out.push({
           datacenter: center.id,
           datacenterName: center.name,
           pricelist: String(e.pricelist),
           name: String(e.desc ?? ''),
-          price,
-          perDay: Number.parseFloat(price.replace(',', '.')) || null,
+          price: price.text,
+          perDay: price.perDay,
+          was: price.was,
+          discount: price.discount,
           available: e.order_available !== 'off' && !labels.includes('soldout:True'),
           labels
         });
@@ -183,4 +202,4 @@ function createCloud({ settings, fetch = globalThis.fetch, now = () => Date.now(
   return { servers, server, balance, order, waitFor, remove, removeWhenReady, tariffs };
 }
 
-export { createCloud, newPassword, serverName, shape, notReady, PREFIX };
+export { createCloud, newPassword, serverName, shape, notReady, parsePrice, PREFIX };

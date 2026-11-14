@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createCloud, newPassword, serverName, PREFIX } from '../src/cloud.js';
+import { createCloud, newPassword, serverName, parsePrice, PREFIX } from '../src/cloud.js';
 import { zomroTest } from '../src/zomroTest.js';
 import { loadConfig, ConfigError } from '../src/config.js';
 import { createOrders } from '../src/orders.js';
@@ -45,7 +45,7 @@ function fakeZomro({ activateAfter = 2, deleteFails = false, balance = '4.1502 E
         const tariff = (id, desc, price, tags, available = 'on') => ({ pricelist: v(id), desc: v(desc), price: v(price), order_available: v(available), filter: { tag: tags.map(v) } });
         const list = dc === '17'
           ? [tariff(7920, 'Blitz Intel| NL-3', '0.31 EUR за день', ['t-intel', 't-cheap', 't-in']), tariff(7864, 'Starter AMD| NL-3 v.3', '0.36 EUR за день', ['t-amd', 't-basic', 't-in'])]
-          : [tariff(8100, 'Starter AMD| DE-1', '0.45 EUR за день', ['t-amd', 't-basic', 't-out'])];
+          : [tariff(8235, 'Starter AMD| DE-1 v.3', "<font color='red'><b>-20.03%</b></font> <del>0.36 EUR за день</del><font color='red'> <b>0.29 EUR за день</b></font>", ['t-amd', 't-basic', 't-in']), tariff(8100, 'Blitz Intel| DE-1', '0.45 EUR за день', ['t-intel', 't-cheap', 't-out'])];
         return reply({
           datacenter: v(dc),
           slist: [{ $name: 'datacenter', val: [{ $key: '17', $: 'Netherlands-3 [Cloud]' }, { $key: '19', $: 'Germany-1 [Cloud]' }] }, { $name: 'period', val: [{ $key: '-50', $: 'День' }] }],
@@ -309,8 +309,13 @@ test('tariffs: тарифы всех дата-центров с ценой за 
   assert.deepEqual(list.map((t) => [t.datacenter, t.datacenterName, t.pricelist, t.name, t.perDay, t.available]), [
     ['17', 'Netherlands-3 [Cloud]', '7920', 'Blitz Intel| NL-3', 0.31, true],
     ['17', 'Netherlands-3 [Cloud]', '7864', 'Starter AMD| NL-3 v.3', 0.36, true],
-    ['19', 'Germany-1 [Cloud]', '8100', 'Starter AMD| DE-1', 0.45, false]
+    ['19', 'Germany-1 [Cloud]', '8235', 'Starter AMD| DE-1 v.3', 0.29, true],
+    ['19', 'Germany-1 [Cloud]', '8100', 'Blitz Intel| DE-1', 0.45, false]
   ]);
+  // скидка: итоговая цена, прежняя и размер скидки — без HTML
+  assert.deepEqual([list[2].price, list[2].was, list[2].discount], ['0.29 EUR за день', 0.36, '-20.03%']);
+  assert.deepEqual(parsePrice('0.31 EUR за день'), { text: '0.31 EUR за день', perDay: 0.31, was: null, discount: null });
+  assert.deepEqual(parsePrice(''), { text: '', perDay: null, was: null, discount: null });
   assert.deepEqual(list[1].labels, ['cpu:AMD', 'type:Basic', 'soldout:False']);
   assert.equal(z.orders.length, 0, 'заказ не отправлялся');
 });
