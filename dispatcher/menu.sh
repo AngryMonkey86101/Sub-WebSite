@@ -371,12 +371,26 @@ screen_providers() {
         read -rs key || key=''
         printf '\n'
         if [ -z "$key" ]; then continue; fi
-        if ! [[ "$key" =~ ^[A-Za-z0-9._:-]{16,200}$ ]]; then printf '%sНе похоже на ключ API%s\n' "$RD" "$R"; pause; continue; fi
+        # пробелы по краям (лишние при вставке) — убрать; внутри ключа пробелов и кавычек быть не должно
+        key=$(printf '%s' "$key" | tr -d '[:space:]')
+        if ! [[ "$key" =~ ^[^\'\"\\]{16,400}$ ]]; then
+          printf '%sНе похоже на ключ API: нужно от 16 символов, без кавычек (сейчас %d символов)%s\n' "$RD" "${#key}" "$R"
+          unset key
+          pause
+          continue
+        fi
         set_env AEZA_API_KEY "$key"
         unset key
         [ -n "$(setting CLOUD_ORDER)" ] || set_env CLOUD_ORDER 'zomro,aeza'
         compose up -d >/dev/null 2>&1
-        printf '%s✓ Ключ сохранён.%s Проверка — пункт 3, затем выберите тариф Aeza в «Изменить тариф»\n' "$G" "$R"
+        # диспетчер перезапущен с новым .env — проверить, что ключ дошёл и Aeza его принимает
+        if cli providers | grep -q $'^aeza\tAeza\t1'; then
+          printf '%s✓ Ключ сохранён, диспетчер его видит.%s Проверяю у Aeza…\n' "$G" "$R"
+          cli aeza-probe 2>&1 | sed -n '1,4p'
+          printf '\nПолная разведка — пункт 3, затем тариф Aeza — «Изменить тариф»\n'
+        else
+          printf '%sКлюч записан в .env, но диспетчер его не видит.%s Перезапустите: cd %s && docker compose up -d --force-recreate\n' "$RD" "$R" "$DIR"
+        fi
         pause
         ;;
       3)
