@@ -32,6 +32,8 @@ const HELP = `Команды:
   tariffs [--tsv]  тарифы Zomro для посуточного заказа во всех дата-центрах, с ценой за день
   tariff      выбранный тариф: дата-центр, название, цена
   tariff-check ТАРИФ ДАТАЦЕНТР  можно ли заказать тариф и какой образ ОС взять (только чтение)
+  available [ДАТАЦЕНТР] [--tsv]  какие тарифы можно заказать прямо сейчас: проверка формы заказа
+              у каждого тарифа (только чтение, у Zomro — около минуты)
   schedule    расписание плановой смены сервера: когда следующая и сколько осталось
   migrate --yes [--provider aeza]  переехать на новый сервер сейчас (--provider — только у этого
               хостера, иначе по очереди CLOUD_ORDER, включая хостеров «по запросу») (заказ, сборка, перенос) — часы; запускать
@@ -318,6 +320,35 @@ async function main(argv, { env = process.env, out = console.log, deps = {} } = 
       const os = await cloud.pickOs({ pricelist, datacenter });
       // одна строка для menu.sh: ok, номер образа, название
       out(`ok\t${os.id}\t${os.name}`);
+      return 0;
+    }
+    case 'available': {
+      const { name, cloud } = pick();
+      const dc = /^\d{1,9}$/.test(argv[1] ?? '') ? argv[1] : null;
+      const list = await cloud.check({ datacenter: dc });
+      const sorted = [...list].sort((a, b) => a.datacenter.localeCompare(b.datacenter) || (a.perDay ?? 1e9) - (b.perDay ?? 1e9));
+      if (argv.includes('--tsv')) {
+        // для menu.sh: дата-центр, его имя, тариф, название, цена за день, цена текстом, можно ли
+        // заказать, выбран ли, номер образа ОС (или «-»), образ или причина отказа
+        for (const t of sorted) out([t.datacenter, t.datacenterName, t.pricelist, t.name, t.perDay ?? '', t.price, t.can ? 1 : 0, isChosen(name, t) ? 1 : 0, t.can ? t.os.id : '', t.can ? t.os.name : t.reason].map((x) => String(x ?? '').replace(/[\t\n]/g, ' ').trim() || '-').join('\t'));
+        return 0;
+      }
+      out(`${NAMES[name]} — что можно заказать прямо сейчас:`);
+      let center = null;
+      for (const t of sorted) {
+        if (t.datacenter !== center) {
+          center = t.datacenter;
+          out(`\nДата-центр ${t.datacenter}${t.datacenterName ? ` — ${t.datacenterName}` : ''}:`);
+        }
+        const mark = isChosen(name, t) ? '▶' : ' ';
+        out(`${mark} ${t.can ? '✓' : '✗'} ${t.pricelist.padEnd(6)} ${t.name.padEnd(28)} ${t.price.padEnd(18)} ${t.can ? t.os.name : t.reason}`);
+      }
+      const can = sorted.filter((t) => t.can);
+      const cheapest = [...can].sort((a, b) => (a.perDay ?? 1e9) - (b.perDay ?? 1e9))[0];
+      out(`\nМожно заказать: ${can.length} из ${sorted.length}.${cheapest ? ` Дешевле всех: ${cheapest.name}, ${cheapest.datacenterName} — ${cheapest.price}` : ''}`);
+      const chosen = sorted.find((t) => isChosen(name, t));
+      if (chosen && !chosen.can) out(`⚠️ Выбранный тариф ${chosen.name} сейчас заказать нельзя: ${chosen.reason}. Сменить — меню, «Изменить тариф»`);
+      out('Хостер не сообщает, сколько мест свободно: «✓» значит, что форма заказа открыта. Собрать сервер он всё равно может не сразу.');
       return 0;
     }
     case 'tariffs': {

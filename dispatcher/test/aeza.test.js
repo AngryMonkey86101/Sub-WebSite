@@ -138,6 +138,8 @@ test('Aeza: список, баланс, тарифы, заказ почасов�
   await assert.rejects(aeza.pickOs({ pricelist: '42' }), /нельзя оплатить за час — только день[\s\S]*нужен тариф с почасовой оплатой/);
   await assert.rejects(aeza.pickOs({ pricelist: '999' }), /нет тарифа 999/);
   assert.deepEqual(await aeza.pickOs(), { id: 'ubuntu_2404', name: 'Ubuntu 24.04', numericId: 31 }, 'выключенный образ пропущен');
+  // что можно заказать: наличие и почасовая оплата — из тарифа, образ ОС — один на всех
+  assert.deepEqual((await aeza.check()).map((t) => [t.pricelist, t.can, t.can ? t.os.id : t.reason]), tariffs.map((t) => [t.pricelist, t.available, t.available ? 'ubuntu_2404' : t.termOk ? 'распродан' : 'нет оплаты за час']));
 
   const ordered = await aeza.order();
   assert.equal(ordered.name, 'family-vpn-20261114-0900');
