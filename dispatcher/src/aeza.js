@@ -17,10 +17,21 @@ import { newPassword, serverName, PREFIX } from './cloud.js';
 //   POST /services/{id}/change-password — { password } (8–32 символа): пароль root
 //   DELETE /services/{id}               — удалить (задача удаления ставится в очередь)
 //   GET  /accounts/me                   — balance, currency
-// Чего описание не говорит и что проверяет команда aeza-probe (только чтение) на живом аккаунте:
-// в каких единицах цены и какие поля ждёт parameters заказа (образ ОС). Пробный заказ — cloud-test.
+// Проверено разведкой (aeza-probe) на живом аккаунте 14.11.2026:
+//   - цены и баланс — в центах (month: 450 — это 4,50 EUR; пороги лимитов from: 1000 — 10 EUR);
+//   - у многих тарифов нет почасовой оплаты — только month, quarter_year, half_year, year:
+//     такой тариф для смены раз в несколько дней не годится (каждый сервер — оплата за месяц);
+//   - группа тарифа — тип (Shared, Dedicated, Promo…), локация — в названии тарифа (NLs, DEs…);
+//   - параметры заказа vm6: os, recipe, isoUrl, ddosNotifications.
+// Пробный заказ — cloud-test --provider aeza.
 
 const DEFAULT_URL = 'https://my.aeza.net/api/v2';
+// деньги в API — в центах
+const CENTS = 100;
+const eur = (v) => Math.round((v / CENTS) * 10000) / 10000;
+// сроки оплаты — от коротких к длинным: для смены сервера подходит самый короткий
+const TERMS = ['hour', 'half_day', 'day', 'week', 'month', 'quarter_year', 'half_year', 'year'];
+const TERM_NAME = { hour: 'час', half_day: 'полдня', day: 'день', week: 'неделю', month: 'месяц', quarter_year: '3 месяца', half_year: 'полгода', year: 'год' };
 const NAME = /^family-vpn-[a-z0-9-]{1,40}$/;
 
 class AezaError extends Error {
@@ -73,12 +84,14 @@ function createAezaApi({ settings, fetch = globalThis.fetch, timeoutMs = 30000 }
 
 const items = (data) => (Array.isArray(data?.items) ? data.items : Array.isArray(data?.data?.items) ? data.data.items : Array.isArray(data) ? data : []);
 
-// Цены тарифа по срокам: prices.base, prices, rawPrices — что из этого есть
+// Цены тарифа по срокам в EUR: prices.base, prices, rawPrices — что из этого есть (в API — центы)
 function termPrices(product) {
   const p = product?.prices;
   const candidates = [p?.base, p && !p.base ? p : null, product?.rawPrices];
   for (const c of candidates) {
-    if (c && typeof c === 'object' && Object.values(c).some((v) => typeof v === 'number')) return c;
+    if (c && typeof c === 'object' && Object.values(c).some((v) => typeof v === 'number')) {
+      return Object.fromEntries(Object.entries(c).filter(([, v]) => typeof v === 'number').map(([k, v]) => [k, eur(v)]));
+    }
   }
   return {};
 }
@@ -131,29 +144,39 @@ function createAeza({ settings, fetch = globalThis.fetch, now = () => Date.now()
     const account = me?.data ?? me ?? {};
     const value = Number(account.balance);
     if (!Number.isFinite(value)) throw new AezaError('Aeza не отдала баланс');
-    return { amount: value, currency: String(account.currency ?? 'EUR').toUpperCase() };
+    return { amount: eur(value), currency: String(account.currency ?? 'EUR').toUpperCase() };
   }
 
-  // Тарифы VPS: локация — группа тарифа. Цена — за выбранный срок (AEZA_TERM) и за день.
+  const products = async () => items(await call('GET', '/services/products', { query: { type: 'vps' } }));
+
+  // Тарифы VPS. «Дата-центр» — группа тарифа (Shared, Dedicated…: у Aeza это тип), к её названию
+  // добавлен пример тарифа — в названии тарифа локация. Цена — за срок AEZA_TERM; если его у тарифа
+  // нет — за самый короткий из возможных, и тариф помечен: оплатить на нужный срок его нельзя.
   async function tariffs() {
-    const list = items(await call('GET', '/services/products', { query: { type: 'vps' } }));
+    const list = await products();
+    const sample = new Map();
+    for (const p of list) if (!sample.has(p.group?.id)) sample.set(p.group?.id, p.name);
+    const want = settings.term ?? 'hour';
     return list.map((p) => {
       const prices = termPrices(p);
+      const terms = TERMS.filter((t) => typeof prices[t] === 'number');
+      const term = terms.includes(want) ? want : terms[0];
       const perDay = perDayOf(prices);
-      const term = settings.term ?? 'hour';
       return {
         provider: 'aeza',
         datacenter: String(p.group?.id ?? p.groupId ?? ''),
-        datacenterName: p.group?.name ?? '',
+        datacenterName: `${p.group?.name ?? ''}${sample.get(p.group?.id) ? ` · ${sample.get(p.group?.id)}…` : ''}`,
         pricelist: String(p.id),
         name: p.name ?? '',
-        price: typeof prices[term] === 'number' ? `${prices[term]} EUR за ${{ hour: 'час', day: 'день', month: 'месяц' }[term] ?? term}` : perDay !== null ? `${perDay} EUR за день` : '?',
+        price: term ? `${prices[term]} EUR за ${TERM_NAME[term] ?? term}` : '?',
         perDay,
         was: null,
         discount: null,
-        available: p.isAvailable !== false,
-        terms: Object.keys(prices),
-        labels: Array.isArray(p.tags) ? p.tags.map(String) : []
+        // для смены раз в несколько дней годится только тариф с нужным сроком (обычно — почасовой)
+        available: p.isAvailable !== false && terms.includes(want),
+        terms,
+        termOk: terms.includes(want),
+        labels: [...(Array.isArray(p.tags) ? p.tags.map(String) : []), ...(terms.includes(want) ? [] : [`нет оплаты за ${TERM_NAME[want] ?? want}`])]
       };
     });
   }
@@ -166,7 +189,18 @@ function createAeza({ settings, fetch = globalThis.fetch, now = () => Date.now()
     })).filter((o) => o.id);
   }
 
-  async function pickOs({ current = settings.os } = {}) {
+  // Образ ОС для тарифа; заодно — можно ли тариф оплатить на срок AEZA_TERM
+  async function pickOs({ pricelist = settings.product, current = settings.os } = {}) {
+    if (pricelist) {
+      const product = (await products()).find((p) => String(p.id) === String(pricelist));
+      if (!product) throw new AezaError(`У Aeza нет тарифа ${pricelist}`);
+      const terms = TERMS.filter((t) => typeof termPrices(product)[t] === 'number');
+      const want = settings.term ?? 'hour';
+      if (!terms.includes(want)) {
+        throw new AezaError(`Тариф ${product.name} нельзя оплатить за ${TERM_NAME[want] ?? want} — только ${terms.map((t) => TERM_NAME[t] ?? t).join(', ')}. Для смены сервера раз в несколько дней нужен тариф с почасовой оплатой`);
+      }
+      if (product.isAvailable === false) throw new AezaError(`Тариф ${product.name} сейчас недоступен для заказа`);
+    }
     const images = await osImages();
     if (!images.length) throw new AezaError('Aeza не отдала список образов ОС');
     const found = images.find((o) => o.id === current) ?? images.find((o) => /ubuntu.*24\.04/i.test(`${o.name} ${o.id}`)) ?? images.find((o) => /ubuntu.*22\.04/i.test(`${o.name} ${o.id}`));
@@ -247,4 +281,4 @@ function createAeza({ settings, fetch = globalThis.fetch, now = () => Date.now()
   return { provider: 'aeza', servers, server, balance, order, waitFor, remove, removeWhenReady, tariffs, osImages, pickOs, call };
 }
 
-export { createAeza, createAezaApi, AezaError, termPrices, perDayOf, DEFAULT_URL };
+export { createAeza, createAezaApi, AezaError, termPrices, perDayOf, DEFAULT_URL, TERMS };
