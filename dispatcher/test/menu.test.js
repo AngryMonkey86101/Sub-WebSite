@@ -57,7 +57,7 @@ case "$*" in
   *" src/cli.js server") echo "Портал на m2pr7x.duckdns.org: active" ;;
   *" src/cli.js servers") echo "Баланс Zomro: 3.2 EUR" ;;
   *" src/cli.js schedule") echo "Следующая смена: 16.11 04:00 МСК — через 1 д 18 ч" ;;
-  *" src/cli.js providers") printf "zomro${T}Zomro${T}1${T}1\naeza${T}Aeza${T}\${AEZA_ON:-0}${T}\${AEZA_POS:-0}\n" ;;
+  *" src/cli.js providers") printf "zomro${T}Zomro${T}1${T}1${T}auto\naeza${T}Aeza${T}\${AEZA_ON:-0}${T}\${AEZA_POS:-0}${T}\${AEZA_MODE_NOW:-manual}\n" ;;
   *" src/cli.js servers --tsv") printf 'zomro${T}7273993${T}family-vpn-20261113-1644${T}-${T}building${T}0.31${T}1${T}0\nzomro${T}7269056${T}vless-2${T}45.91.201.169${T}active${T}0.31${T}0${T}0\n' ;;
   *" src/cli.js delete-queue") echo "Очередь на удаление пуста" ;;
   *" src/cli.js delete-queue add "*) echo "✓ в очереди: $*" ;;
@@ -118,11 +118,11 @@ test('menu.sh: переезд сейчас — в фоне, с ходом из �
   // передумали — ничего не запущено
   let res = t.run('7\n0\n0\n');
   assert.equal(res.status, 0, res.err);
-  assert.match(res.out, /Что будет:[\s\S]*Заморозка старого[\s\S]*1 — начать переезд/);
+  assert.match(res.out, /Что будет:[\s\S]*Заморозка старого[\s\S]*Где заказать новый сервер:\n {2}1 — только Zomro/);
   assert.ok(!res.calls.some((c) => /migrate --yes/.test(c)));
-  // начать: в фоне (exec -d), вывод — в /data/migrate.log, затем ход переезда
-  res = t.run('7\n1\n\n0\n');
-  assert.ok(res.calls.includes("compose --ansi never exec -d dispatcher sh -c node src/cli.js migrate --yes > /data/migrate.log 2>&1"), res.calls.join('\n'));
+  // начать (один хостер): в фоне (exec -d), вывод — в /data/migrate.log, затем ход переезда
+  res = t.run('7\n1\n1\n\n0\n');
+  assert.ok(res.calls.includes('compose --ansi never exec -d dispatcher sh -c node src/cli.js migrate --yes --provider zomro > /data/migrate.log 2>&1'), res.calls.join('\n'));
   assert.match(res.out, /✓ Переезд запущен в фоне[\s\S]*Заказан family-vpn-20261114-0900/);
   // уже идёт — смотреть или отменить ожидание сборки
   res = t.run('7\n1\n0\n', { RUNNING: '1' });
@@ -132,6 +132,13 @@ test('menu.sh: переезд сейчас — в фоне, с ходом из �
   res = t.run('7\n3\n1\n\n0\n', { RUNNING: '1' });
   assert.ok(res.calls.some((c) => /src\/cli\.js cancel-wait --all$/.test(c)), 'отменить переезд — после подтверждения');
   assert.equal(res.calls.filter((c) => /migrate --yes/.test(c)).length, 1, 'второй переезд не запущен');
+  // два хостера: по очереди или только Aeza (по запросу)
+  const both = { AEZA_ON: '1', AEZA_POS: '2' };
+  res = t.run('7\n1\n1\n\n0\n', both);
+  assert.match(res.out, /1 — по очереди: Zomro → Aeza[\s\S]*2 — только Zomro[\s\S]*3 — только Aeza/);
+  assert.ok(res.calls.includes('compose --ansi never exec -d dispatcher sh -c node src/cli.js migrate --yes  > /data/migrate.log 2>&1'), 'по очереди — без --provider');
+  res = t.run('7\n3\n1\n\n0\n', both);
+  assert.ok(res.calls.includes('compose --ansi never exec -d dispatcher sh -c node src/cli.js migrate --yes --provider aeza > /data/migrate.log 2>&1'));
 });
 
 test('menu.sh: время и период переезда — проверка ввода, запись в .env, перезапуск', () => {
@@ -195,6 +202,25 @@ test('menu.sh: удаление серверов — выбрать, чужой 
   const before = res.calls.length;
   res = t.run('11\n2\n0\n0\n0\n');
   assert.ok(!res.calls.slice(before).some((c) => /delete-queue add/.test(c)));
+});
+
+test('menu.sh: плановая смена — выключить и включить; Aeza — только по запросу или и в автоматических', () => {
+  const t = setup('rotation');
+  let res = t.run('12\n1\n\n0\n');
+  assert.equal(res.status, 0, res.err);
+  assert.match(res.out, /1 — выключить плановую смену: сервер работает, пока его не заблокируют/);
+  assert.match(t.env(), /^ROTATION_ENABLED=0$/m);
+  res = t.run('12\n1\n\n0\n');
+  assert.match(res.out, /1 — включить плановую смену/);
+  assert.match(t.env(), /^ROTATION_ENABLED=1$/m);
+  assert.equal(t.env().match(/^ROTATION_ENABLED=/gm).length, 1);
+  // Aeza: по умолчанию только по запросу; включить в автоматические — после предупреждения о цене
+  res = t.run('10\n6\n1\n\n0\n0\n', { AEZA_ON: '1', AEZA_POS: '2', AEZA_MODE_NOW: 'manual' });
+  assert.match(res.out, /втрое дороже Zomro/);
+  assert.match(t.env(), /^AEZA_MODE=auto$/m);
+  res = t.run('10\n6\n\n0\n0\n', { AEZA_ON: '1', AEZA_POS: '2', AEZA_MODE_NOW: 'auto' });
+  assert.match(t.env(), /^AEZA_MODE=manual$/m);
+  assert.match(res.out, /Aeza — только по запросу/);
 });
 
 test('menu.sh: shellcheck без замечаний', { skip: spawnSync('shellcheck', ['--version']).status !== 0 && 'нет shellcheck' }, () => {

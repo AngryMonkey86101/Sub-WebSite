@@ -152,7 +152,9 @@ function createMigration({ config, keys, state, clouds = {}, backups, monitor, o
     }
   }
 
-  const providerList = () => config.providers.filter((name) => clouds[name]);
+  // хостеры этого переезда: по команде — все (или один выбранный), автоматически — только auto
+  let only = null;
+  const providerList = () => (only ?? config.providers).filter((name) => clouds[name]);
 
   // Заказ у хостеров по порядку CLOUD_ORDER: у одного сервер не собрался (или нет денег) —
   // заказ удаляется, и очередь следующего. Zomro, бывает, собирает часами — запасной хостер спасает.
@@ -222,7 +224,11 @@ function createMigration({ config, keys, state, clouds = {}, backups, monitor, o
   }
 
   // --- переезд ---
-  async function migrate({ reason = 'по команде' } = {}) {
+  // providers — хостеры по порядку для этого переезда (по умолчанию — все из CLOUD_ORDER);
+  // automatic — переезд без вашей команды (смена по расписанию, авария): только хостеры в режиме auto
+  async function migrate({ reason = 'по команде', providers = null, automatic = false } = {}) {
+    only = providers ?? (automatic ? config.autoProviders : null);
+    if (automatic && !providerList().length) throw new MigrationError(`Для автоматического переезда нет хостера в режиме auto (сейчас: ${config.providers.map((n) => `${NAMES[n]} — ${config.modes[n]}`).join(', ') || 'ни одного'})`);
     if (!providerList().length) throw new MigrationError('Хостер не настроен: впишите в .env ZOMRO_USER и ZOMRO_PASSWORD или AEZA_API_KEY');
     lock();
     let server = null;

@@ -25,6 +25,7 @@ function schedule({ config, state, now = Date.now() }) {
   const anchor = rotation.lastAt ?? state.get('startedAt') ?? now;
   const next = nextRotation({ anchor, now, everyDays: config.rotation.everyDays, at: config.rotation.at });
   return {
+    enabled: config.rotation.enabled,
     everyDays: config.rotation.everyDays,
     at: config.rotation.at,
     overlapHours: config.rotation.overlapHours,

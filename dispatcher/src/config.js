@@ -60,6 +60,21 @@ function loadConfig(env = process.env) {
   const order = (env.CLOUD_ORDER?.trim() || 'zomro,aeza').split(',').map((s) => s.trim().toLowerCase()).filter(Boolean);
   for (const name of order) if (!(name in configured)) throw new ConfigError(`CLOUD_ORDER: неизвестный хостер ${name} — можно zomro, aeza`);
   const providers = [...new Set(order)].filter((name) => configured[name]);
+  // режим хостера: auto — и в автоматических переездах (плановая смена, авария), manual — только
+  // в переезде по вашей команде. Aeza почасово втрое дороже Zomro — по умолчанию только по запросу
+  const mode = (name, fallback) => {
+    const value = env[name]?.trim().toLowerCase() || fallback;
+    if (!['auto', 'manual'].includes(value)) throw new ConfigError(`${name}: auto или manual`);
+    return value;
+  };
+  const modes = { zomro: mode('ZOMRO_MODE', 'auto'), aeza: mode('AEZA_MODE', 'manual') };
+  const flag = (name, fallback) => {
+    const value = env[name]?.trim().toLowerCase();
+    if (!value) return fallback;
+    if (['1', 'on', 'yes', 'true', 'да'].includes(value)) return true;
+    if (['0', 'off', 'no', 'false', 'нет'].includes(value)) return false;
+    throw new ConfigError(`${name}: 1 (включено) или 0 (выключено)`);
+  };
 
   const repoUrl = env.REPO_URL?.trim() || 'https://github.com/AngryMonkey86101/Sub-WebSite.git';
   if (!/^https:\/\/[\w.-]+\/[\w./-]+$/.test(repoUrl)) throw new ConfigError('REPO_URL: адрес https://… репозитория проекта');
@@ -79,6 +94,8 @@ function loadConfig(env = process.env) {
       keepOldHours: number('MIGRATE_KEEP_OLD_H', 2, { min: 0, max: 72 })
     },
     rotation: {
+      // плановая смена по расписанию; 0 — выключена: сервер работает, пока его не заблокируют
+      enabled: flag('ROTATION_ENABLED', true),
       everyDays: number('ROTATION_DAYS', 3, { min: 1, max: 30 }),
       at: rotationAt,
       overlapHours: number('ROTATION_OVERLAP_H', 20, { min: 1, max: 72 })
@@ -101,6 +118,9 @@ function loadConfig(env = process.env) {
     // Не 7920 «Blitz Intel | NL-3» (0,31): на живом аккаунте серверы этого тарифа собирались часами,
     // один за 12 часов так и не собрался
     providers,
+    // хостеры для автоматических переездов — те, что в режиме auto, в порядке CLOUD_ORDER
+    autoProviders: providers.filter((name) => modes[name] === 'auto'),
+    modes,
     aeza: aezaKey
       ? {
           url: env.AEZA_API_URL?.trim() || 'https://my.aeza.net/api/v2',
