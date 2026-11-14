@@ -46,6 +46,10 @@ function loadConfig(env = process.env) {
     return value;
   };
 
+  const repoUrl = env.REPO_URL?.trim() || 'https://github.com/AngryMonkey86101/Sub-WebSite.git';
+  if (!/^https:\/\/[\w.-]+\/[\w./-]+$/.test(repoUrl)) throw new ConfigError('REPO_URL: адрес https://… репозитория проекта');
+  const repoRef = env.REPO_REF?.trim() || 'main';
+  if (!/^[\w./-]{1,100}$/.test(repoRef)) throw new ConfigError('REPO_REF: ветка или тег');
   const rotationAt = env.ROTATION_TIME?.trim() || '04:00';
   if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(rotationAt)) throw new ConfigError('ROTATION_TIME: время по Москве, например 04:00');
 
@@ -53,6 +57,12 @@ function loadConfig(env = process.env) {
     portalHost,
     // плановая смена сервера (schedule.js): раз в everyDays дней в at по Москве, новый сервер —
     // за overlapHours часов до неё
+    // переезд (migrate.js): откуда новый сервер берёт код и сколько держать старый после переезда
+    migration: {
+      repoUrl: repoUrl,
+      repoRef: repoRef,
+      keepOldHours: number('MIGRATE_KEEP_OLD_H', 2, { min: 0, max: 72 })
+    },
     rotation: {
       everyDays: number('ROTATION_DAYS', 3, { min: 1, max: 30 }),
       at: rotationAt,

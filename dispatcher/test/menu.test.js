@@ -49,6 +49,7 @@ function setup(name) {
   };
   stub('id', 'echo 0');
   stub('clear', 'true');
+  stub('sleep', 'true');
   stub('docker', `echo "$*" >> "$CALLS"
 case "$*" in
   "compose --ansi never ps --status running -q dispatcher") echo abc123 ;;
@@ -59,10 +60,13 @@ case "$*" in
   *" src/cli.js tariffs --tsv") printf '17${T}Netherlands-3 [Cloud]${T}7920${T}Blitz Intel| NL-3${T}0.31${T}0.31 EUR за день${T}1${T}0\\n17${T}Netherlands-3 [Cloud]${T}7864${T}Starter AMD| NL-3 v.3${T}0.36${T}0.36 EUR за день${T}1${T}1\\n19${T}Germany-1 [Cloud]${T}8235${T}Starter AMD| DE-1 v.3${T}0.29${T}0.29 EUR за день${T}1${T}0\\n19${T}Germany-1 [Cloud]${T}8151${T}Essential Intel| DE-1 v.2${T}0.33${T}0.33 EUR за день${T}0${T}0\\n' ;;
   *" src/cli.js tariff-check 8235 19") printf 'ok${T}11111111-2222-4333-8444-555555555555${T}Ubuntu 24.04 x64\\n' ;;
   *" src/cli.js tariff") echo "Тариф: из .env" ;;
+  *" src/cli.js migrate-status") echo "Переездов ещё не было" ;;
+  *"test -f /data/migration.lock") [ -n "\${RUNNING:-}" ] ;;
+  *"tail -n 40 -F /data/migrate.log") echo "[09:00 UTC] Заказан family-vpn-20261114-0900" ;;
   "compose --ansi never up -d") ;;
 esac`);
-  const run = (input) => {
-    const res = spawnSync('bash', [join(app, 'menu.sh')], { input, env: { PATH: `${bin}:${process.env.PATH}`, CALLS: calls, LANG: 'C.UTF-8' } });
+  const run = (input, extra = {}) => {
+    const res = spawnSync('bash', [join(app, 'menu.sh')], { input, env: { PATH: `${bin}:${process.env.PATH}`, CALLS: calls, LANG: 'C.UTF-8', ...extra } });
     return { status: res.status, out: res.stdout.toString(), err: res.stderr.toString(), calls: readFileSync(calls, 'utf8').split('\n').filter(Boolean) };
   };
   return { app, run, env: () => readFileSync(join(app, '.env'), 'utf8') };
@@ -100,6 +104,38 @@ test('menu.sh: смена тарифа — дата-центр, тариф по 
   const back = t.run('6\n1\n0\n0\n0\n');
   assert.equal(back.status, 0, back.err);
   assert.match(back.out, /Starter AMD\| NL-3 v\.3 +0\.36 EUR за день +◀ выбран сейчас/);
+  assert.equal(t.env(), before);
+});
+
+test('menu.sh: переезд сейчас — в фоне, с ходом из лога; идёт — второй не запустить', () => {
+  const t = setup('migrate');
+  // передумали — ничего не запущено
+  let res = t.run('7\n0\n0\n');
+  assert.equal(res.status, 0, res.err);
+  assert.match(res.out, /Что будет:[\s\S]*Заморозка старого[\s\S]*1 — начать переезд/);
+  assert.ok(!res.calls.some((c) => /migrate --yes/.test(c)));
+  // начать: в фоне (exec -d), вывод — в /data/migrate.log, затем ход переезда
+  res = t.run('7\n1\n\n0\n');
+  assert.ok(res.calls.includes("compose --ansi never exec -d dispatcher sh -c node src/cli.js migrate --yes > /data/migrate.log 2>&1"), res.calls.join('\n'));
+  assert.match(res.out, /✓ Переезд запущен в фоне[\s\S]*Заказан family-vpn-20261114-0900/);
+  // уже идёт — только смотреть
+  res = t.run('7\n1\n0\n', { RUNNING: '1' });
+  assert.match(res.out, /Переезд уже идёт/);
+  assert.equal(res.calls.filter((c) => /migrate --yes/.test(c)).length, 1, 'второй переезд не запущен');
+});
+
+test('menu.sh: время и период переезда — проверка ввода, запись в .env, перезапуск', () => {
+  const t = setup('schedule');
+  let res = t.run('8\n25:00\n4:00\n05:30\n\n0\n');
+  assert.equal(res.status, 0, res.err);
+  assert.equal((res.err.match(/Не подходит/g) ?? []).length, 2, '25:00 и 4:00 — не время ЧЧ:ММ');
+  assert.match(t.env(), /^ROTATION_TIME=05:30$/m);
+  res = t.run('9\n0\n31\n7\n\n0\n');
+  assert.match(t.env(), /^ROTATION_DAYS=7$/m);
+  assert.ok(res.calls.includes('compose --ansi never up -d'));
+  // пусто — назад без изменений
+  const before = t.env();
+  t.run('8\n\n0\n');
   assert.equal(t.env(), before);
 });
 

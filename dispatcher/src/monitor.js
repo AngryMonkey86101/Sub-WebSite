@@ -69,12 +69,20 @@ function createMonitor({ config, state, notify, fetch = globalThis.fetch, lookup
     const result = await probeServer();
     const s = state.get('monitor') ?? { status: 'unknown' };
     const next = { ...s, checkedAt: time, selfOfflineAt: null };
+    // идёт переезд (migrate.js): старый портал заморожен, имена переходят на новый — недоступность
+    // сейчас ожидаема, тревога была бы ложной
+    const m = state.get('migration');
+    if (!result.ok && ['freeze', 'finish', 'verify'].includes(m?.phase) && time - (m.updatedAt ?? 0) < 2 * 60 * 60 * 1000) {
+      state.set('monitor', { ...next, reason: `идёт переезд: ${result.reason}` });
+      return { status: 'migrating', result };
+    }
 
     if (result.ok) {
       if (s.status === 'down' && s.alerted) {
         await notify(`🟢 Из РФ сервер снова доступен${result.ip ? ` (${result.ip})` : ''}. Был недоступен ${minutes(time - s.since)}.`);
       }
-      if (s.ip && result.ip && s.ip !== result.ip) {
+      // новый IP после переезда диспетчера — ожидаем: ключ SSH он уже обновил сам
+      if (s.ip && result.ip && s.ip !== result.ip && state.get('rotation')?.server?.ip !== result.ip) {
         await notify(`ℹ️ Портал теперь по адресу ${result.ip} (был ${s.ip}). Если это переезд — на диспетчере выполните trust-host, иначе бэкап не заберётся.`);
       }
       Object.assign(next, { status: 'up', since: s.status === 'up' ? s.since : time, alerted: false, reason: null, ip: result.ip ?? s.ip });
@@ -85,7 +93,7 @@ function createMonitor({ config, state, notify, fetch = globalThis.fetch, lookup
         next.alerted = true;
         await notify(
           `🔴 Из РФ сервер недоступен ${minutes(time - since)}: ${result.reason}.${result.ip ? ` IP: ${result.ip}.` : ''} ` +
-            'Если и за границей он работает (проверка GitHub молчит) — вероятно, IP заблокирован. Переезд пока вручную: docs/RUNBOOK.md.'
+            'Если и за границей он работает (проверка GitHub молчит) — вероятно, IP заблокирован. Переезд: на диспетчере bash ~/sub-website/dispatcher/menu.sh → «Переезд сейчас».'
         );
       } else {
         next.alerted = s.status === 'down' ? Boolean(s.alerted) : false;

@@ -60,7 +60,9 @@ function createBackups({ config, keys, state, notify, isServerUp = () => true, r
   const knownHosts = join(config.dataDir, 'known_hosts');
   let running = null;
 
-  const sshArgs = (command = null) => [
+  // proxy — ProxyCommand: до сервера через другой (при переезде — через новый сервер: из РФ
+  // старый уже может быть заблокирован, а из-за рубежа он доступен)
+  const sshArgs = (command = null, { proxy = null } = {}) => [
     '-F', '/dev/null',
     '-i', keys.sshFile,
     '-p', String(config.ssh.port),
@@ -71,6 +73,7 @@ function createBackups({ config, keys, state, notify, isServerUp = () => true, r
     '-o', 'StrictHostKeyChecking=accept-new',
     '-o', 'ConnectTimeout=20',
     '-o', 'ServerAliveInterval=15',
+    ...(proxy ? ['-o', `ProxyCommand=${proxy}`] : []),
     `${config.ssh.user}@${config.portalHost}`,
     // на сервере ключ диспетчера всё равно выполнит только dispatcher-command.sh; команда — просьба ему
     ...(command ? [command] : [])
@@ -155,16 +158,16 @@ function createBackups({ config, keys, state, notify, isServerUp = () => true, r
   }
 
   // Команда на сервере: backup, freeze, unfreeze, status (server/scripts/dispatcher-command.sh)
-  async function remote(command, timeoutMs = 60000) {
-    const res = await run('ssh', sshArgs(command), { timeoutMs });
+  async function remote(command, timeoutMs = 60000, options = {}) {
+    const res = await run('ssh', sshArgs(command, options), { timeoutMs });
     if (res.code !== 0) throw new Error(sshReason(res, config.portalHost));
     return res.stdout;
   }
 
   // Плановая смена (этап 7): заморозить старый сервер — портал и Caddy остановлены, AmneziaWG работает.
   // Ответ — финальный бэкап и сертификаты Caddy; оба проверяются и сохраняются в rotation/<время>/.
-  async function freeze() {
-    const bundle = await remote('freeze', 10 * 60000);
+  async function freeze(options = {}) {
+    const bundle = await remote('freeze', 10 * 60000, options);
     const files = Object.fromEntries(tarEntries(bundle).filter((e) => e.type === '0').map((e) => [e.name, e.data]));
     const backup = files['backup.tar.gz.age'];
     const caddy = files['caddy.tar.gz.age'];
@@ -184,8 +187,8 @@ function createBackups({ config, keys, state, notify, isServerUp = () => true, r
   }
 
   // Откат: портал и Caddy на старом сервере снова работают
-  async function unfreeze() {
-    const out = (await remote('unfreeze', 3 * 60000)).toString().trim();
+  async function unfreeze(options = {}) {
+    const out = (await remote('unfreeze', 3 * 60000, options)).toString().trim();
     if (out !== 'active') throw new Error(`сервер ответил «${out.slice(0, 80)}» вместо active`);
     return true;
   }

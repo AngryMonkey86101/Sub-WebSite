@@ -2,6 +2,8 @@ import { loadConfig, ConfigError } from './config.js';
 import { createDispatcher, keysHelp } from './app.js';
 import { zomroTest } from './zomroTest.js';
 import { schedule, msk, span } from './schedule.js';
+import { readFileSync, readdirSync } from 'node:fs';
+import { join } from 'node:path';
 
 // Команды диспетчера: docker compose exec dispatcher node src/cli.js <команда>
 
@@ -16,11 +18,16 @@ const HELP = `Команды:
               VPN работает; финальный бэкап и сертификаты — в томе диспетчера
   unfreeze    разморозить: портал, бот и сайт на сервере снова работают
   servers     серверы у Zomro и баланс (свои — с именем family-vpn-…)
-  remove ID --yes  удалить свой сервер у Zomro (только с именем family-vpn-…)
+  remove ID --yes [--foreign]  удалить свой сервер у Zomro (с именем family-vpn-…); --foreign —
+              и сервер, созданный не диспетчером (например, прежний рабочий после переезда)
   tariffs [--tsv]  тарифы Zomro для посуточного заказа во всех дата-центрах, с ценой за день
   tariff      выбранный тариф: дата-центр, название, цена
   tariff-check ТАРИФ ДАТАЦЕНТР  можно ли заказать тариф и какой образ ОС взять (только чтение)
   schedule    расписание плановой смены сервера: когда следующая и сколько осталось
+  migrate --yes  переехать на новый сервер сейчас (заказ, сборка, перенос) — часы; запускать
+              в фоне (меню, пункт «Переезд сейчас»)
+  migrate-status  как идёт или чем закончился последний переезд
+  root-password [ИМЯ]  пароль root сервера, созданного диспетчером (по умолчанию — текущего)
   zomro-test --yes  пробный заказ: заказать сервер, дождаться IP, войти по паролю, удалить
               (несколько центов с баланса). Надёжнее запускать в фоне — см. README`;
 
@@ -149,6 +156,53 @@ async function main(argv, { env = process.env, out = console.log, deps = {} } = 
       out(`\n▶ — выбранный тариф. Сменить: ZOMRO_PRICELIST и ZOMRO_DATACENTER в .env, затем docker compose up -d`);
       return 0;
     }
+    case 'migrate': {
+      if (!argv.includes('--yes')) {
+        out('Переезд: новый сервер у Zomro, перенос портала, ключей и имён, старый — на удаление.\nZomro собирает сервер долго — переезд может занять часы. Если уверены: migrate --yes');
+        return 2;
+      }
+      const r = await d.migration({ out }).migrate({ reason: 'по команде' });
+      return r.ok ? 0 : 1;
+    }
+    case 'migrate-status': {
+      const m = d.state.get('migration');
+      if (!m) {
+        out('Переездов ещё не было');
+        return 0;
+      }
+      const phases = { start: 'начало', building: 'Zomro собирает сервер', ssh: 'жду SSH на новом сервере', prepare: 'подготовка нового сервера', freeze: 'заморозка старого', finish: 'перенос портала и имён', verify: 'проверка из РФ', done: '✓ закончен', failed: '✗ не удался' };
+      out(`Переезд ${m.reason ?? ''}: ${phases[m.phase] ?? m.phase}`);
+      out(`Начат: ${msk(m.startedAt)}${m.finishedAt ? `, закончен: ${msk(m.finishedAt)}` : `, обновлён: ${msk(m.updatedAt)}`}`);
+      if (m.server) out(`Новый сервер: ${m.server}${m.ip ? `, IP ${m.ip}` : ''}`);
+      if (m.error) out(`Ошибка: ${m.error}`);
+      return 0;
+    }
+    case 'root-password': {
+      const dir = join(config.dataDir, 'servers');
+      let name = argv[1];
+      if (!name) name = d.state.get('rotation')?.server?.name;
+      if (!name) {
+        let files = [];
+        try {
+          files = readdirSync(dir).filter((f) => f.endsWith('.json')).sort();
+        } catch {
+          files = [];
+        }
+        name = files.at(-1)?.replace(/\.json$/, '');
+      }
+      if (!name || !/^family-vpn-[a-z0-9-]{1,40}$/.test(name)) {
+        out('Серверов, созданных диспетчером, ещё нет');
+        return 1;
+      }
+      try {
+        const s = JSON.parse(readFileSync(join(dir, `${name}.json`), 'utf8'));
+        out(`${s.name} (id ${s.id}, IP ${s.ip}): root / ${s.password}`);
+        return 0;
+      } catch {
+        out(`Пароля для ${name} нет`);
+        return 1;
+      }
+    }
     case 'remove': {
       if (!d.cloud) throw new ConfigError('Zomro не настроен: впишите ZOMRO_USER и ZOMRO_PASSWORD в .env');
       const id = argv[1];
@@ -157,7 +211,7 @@ async function main(argv, { env = process.env, out = console.log, deps = {} } = 
         return 2;
       }
       const target = await d.cloud.server(id);
-      if (!(await d.cloud.remove(id))) {
+      if (!(await d.cloud.remove(id, { allow: argv.includes('--foreign') ? id : null }))) {
         out(`Сервера ${id} у Zomro нет`);
         return 1;
       }

@@ -202,6 +202,83 @@ screen_change() {
   done
 }
 
+# Ход переезда: лог из тома диспетчера; Ctrl+C — назад в меню, переезд продолжается
+watch_migration() {
+  printf '\n%sХод переезда (Ctrl+C — назад в меню, переезд продолжится):%s\n\n' "$C" "$R"
+  trap ':' INT
+  compose exec -T dispatcher tail -n 40 -F /data/migrate.log
+  trap - INT
+}
+
+migration_running() { compose exec -T dispatcher test -f /data/migration.lock >/dev/null 2>&1; }
+
+screen_migrate() {
+  header 'Переезд сейчас'
+  if migration_running; then
+    printf '%sПереезд уже идёт.%s\n\n' "$Y" "$R"
+    cli migrate-status
+    printf '\n  %s1%s — смотреть ход переезда\n  %s0%s — назад\n' "$B" "$R" "$B" "$R"
+    [ "$(ask)" = 1 ] && watch_migration
+    return
+  fi
+  cli migrate-status
+  printf '\n%sЧто будет:%s\n' "$B" "$R"
+  printf '  1. Заказ нового сервера у Zomro по выбранному тарифу и ожидание сборки — у Zomro это бывает долго.\n'
+  printf '  2. Подготовка нового сервера из последнего бэкапа: AmneziaWG с прежними ключами.\n'
+  printf '  3. Заморозка старого (бот, оплаты и сайт — на паузе, VPN работает) и финальный бэкап.\n'
+  printf '  4. Перенос портала, бота и имён DuckDNS на новый сервер. Ключи у семьи не меняются.\n'
+  printf '  5. Старый сервер — на удаление через несколько часов (свой) или сообщение, чтобы удалили вы.\n'
+  printf '\nСбой до переноса имён — откат: старый снова работает, новый удаляется.\n'
+  printf '\n  %s1%s — начать переезд\n  %s0%s — назад\n' "$B" "$R" "$B" "$R"
+  [ "$(ask)" = 1 ] || return
+  compose exec -d dispatcher sh -c 'node src/cli.js migrate --yes > /data/migrate.log 2>&1' \
+    || { printf '%sПереезд не запустился%s\n' "$RD" "$R"; pause; return; }
+  sleep 3
+  printf '%s✓ Переезд запущен в фоне.%s Итог придёт в Telegram; ход — здесь, в пункте 7.\n' "$G" "$R"
+  watch_migration
+  pause
+}
+
+# Ввод значения, проверка шаблоном; пустой ввод — отмена
+ask_value() {
+  local prompt=$1 pattern=$2 answer
+  while true; do
+    printf '\n%s%s%s ' "$C" "$prompt" "$R" >&2
+    read -r answer || return 1
+    [ -n "$answer" ] || return 1
+    if [[ "$answer" =~ $pattern ]]; then
+      echo "$answer"
+      return 0
+    fi
+    printf '%sНе подходит, попробуйте ещё раз (пусто — отмена)%s\n' "$Y" "$R" >&2
+  done
+}
+
+apply_schedule() {
+  set_env "$1" "$2"
+  compose up -d >/dev/null 2>&1 || { printf '%sДиспетчер не перезапустился%s\n' "$RD" "$R"; return; }
+  printf '\n%s✓ Сохранено.%s\n\n' "$G" "$R"
+  cli schedule
+}
+
+screen_time() {
+  header 'Время переезда'
+  cli schedule
+  local value
+  value=$(ask_value 'Новое время по Москве, ЧЧ:ММ (например 04:00; пусто — назад):' '^([01][0-9]|2[0-3]):[0-5][0-9]$') || return
+  apply_schedule ROTATION_TIME "$value"
+  pause
+}
+
+screen_period() {
+  header 'Период переезда'
+  cli schedule
+  local value
+  value=$(ask_value 'Менять сервер раз в столько дней, 1–30 (пусто — назад):' '^([1-9]|[12][0-9]|30)$') || return
+  apply_schedule ROTATION_DAYS "$value"
+  pause
+}
+
 main_menu() {
   while true; do
     header 'главное меню'
@@ -211,6 +288,9 @@ main_menu() {
     printf '  %s4%s — Актуальные цены на тарифы\n' "$B" "$R"
     printf '  %s5%s — Выбранный тариф\n' "$B" "$R"
     printf '  %s6%s — Изменить тариф\n' "$B" "$R"
+    printf '  %s7%s — Переезд сейчас\n' "$B" "$R"
+    printf '  %s8%s — Изменить время переезда\n' "$B" "$R"
+    printf '  %s9%s — Изменить период переезда\n' "$B" "$R"
     printf '  %s0%s — Выход\n' "$B" "$R"
     case "$(ask)" in
       1) screen_status ;;
@@ -219,6 +299,9 @@ main_menu() {
       4) screen_prices ;;
       5) screen_current ;;
       6) screen_change ;;
+      7) screen_migrate ;;
+      8) screen_time ;;
+      9) screen_period ;;
       0) clear 2>/dev/null || true; exit 0 ;;
       *) ;;
     esac
