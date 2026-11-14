@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createCloud, newPassword, serverName, PREFIX } from '../src/cloud.js';
+import { createCloud, newPassword, serverName, parsePrice, PREFIX } from '../src/cloud.js';
 import { zomroTest } from '../src/zomroTest.js';
 import { loadConfig, ConfigError } from '../src/config.js';
 import { createOrders } from '../src/orders.js';
@@ -39,7 +39,28 @@ function fakeZomro({ activateAfter = 2, deleteFails = false, balance = '4.1502 E
         for (const s of servers) if (s.instance_status === 'creating' && polls - s.orderedAt >= activateAfter) Object.assign(s, { instance_status: 'active', ip: `203.0.113.${s.id % 200}` });
         return reply({ elem: servers.filter((s) => !(flags.hidden && s.orderedAt !== undefined)).map((s) => Object.fromEntries(Object.entries(s).map(([k, val]) => [k, v(val)]))) });
       }
+      case 'instances.order': {
+        // первый шаг заказа: дата-центры, метки фильтра, тарифы выбранного дата-центра
+        const dc = p.get('datacenter') ?? '17';
+        const tariff = (id, desc, price, tags, available = 'on') => ({ pricelist: v(id), desc: v(desc), price: v(price), order_available: v(available), filter: { tag: tags.map(v) } });
+        const list = dc === '17'
+          ? [tariff(7920, 'Blitz Intel| NL-3', '0.31 EUR за день', ['t-intel', 't-cheap', 't-in']), tariff(7864, 'Starter AMD| NL-3 v.3', '0.36 EUR за день', ['t-amd', 't-basic', 't-in'])]
+          : [tariff(8235, 'Starter AMD| DE-1 v.3', "<font color='red'><b>-20.03%</b></font> <del>0.36 EUR за день</del><font color='red'> <b>0.29 EUR за день</b></font>", ['t-amd', 't-basic', 't-in']), tariff(8100, 'Blitz Intel| DE-1', '0.45 EUR за день', ['t-intel', 't-cheap', 't-out'])];
+        return reply({
+          datacenter: v(dc),
+          slist: [{ $name: 'datacenter', val: [{ $key: '17', $: 'Netherlands-3 [Cloud]' }, { $key: '19', $: 'Germany-1 [Cloud]' }] }, { $name: 'period', val: [{ $key: '-50', $: 'День' }] }],
+          flist: { $name: 'fpricelist', val: [['t-intel', 'cpu:Intel'], ['t-amd', 'cpu:AMD'], ['t-cheap', 'type:Cheap'], ['t-basic', 'type:Basic'], ['t-in', 'soldout:False'], ['t-out', 'soldout:True']].map(([key, value]) => ({ $key: key, $value: value })) },
+          list: [{ $name: 'tariflist', elem: list }]
+        });
+      }
       case 'instances.order.param': {
+        // без sok — только форма заказа: образы ОС этого дата-центра
+        if (p.get('sok') !== 'ok') {
+          const images = p.get('datacenter') === '19'
+            ? [['11111111-2222-4333-8444-555555555555', 'Ubuntu 24.04 x64'], ['66666666-7777-4888-8999-000000000000', 'Debian 12']]
+            : [['2140c514-fa2b-4b38-90e4-f9ff394245d1', 'Ubuntu 24.04 x64']];
+          return reply({ slist: [{ $name: 'instances_os', val: images.map(([key, name]) => ({ $key: key, $: name })) }] });
+        }
         orders.push(Object.fromEntries(p));
         if (p.get('sok') === 'ok') servers.push({ id: String(next++), servername: p.get('servername'), ip: '', instance_status: 'creating', pricelist_id: p.get('pricelist'), datacenter: p.get('datacenter'), orderedAt: polls });
         return reply({ ok: v('ok') });
@@ -63,7 +84,7 @@ const noWait = async () => {};
 
 test('Zomro: настройки диспетчера — тариф, дата-центр и образ по умолчанию', () => {
   const config = loadConfig({ PORTAL_HOST: 'm2pr7x.duckdns.org', ZOMRO_USER: USER, ZOMRO_PASSWORD: PASSWORD });
-  assert.deepEqual(config.zomro, { url: 'https://api.zomro.com/', user: USER, password: PASSWORD, pricelist: '7920', datacenter: '17', os: '2140c514-fa2b-4b38-90e4-f9ff394245d1', buildTimeout: 90 * 60000, sshTimeout: 20 * 60000 });
+  assert.deepEqual(config.zomro, { url: 'https://api.zomro.com/', user: USER, password: PASSWORD, pricelist: '7864', datacenter: '17', os: '2140c514-fa2b-4b38-90e4-f9ff394245d1', buildTimeout: 90 * 60000, sshTimeout: 20 * 60000 });
   const slow = loadConfig({ PORTAL_HOST: 'm2pr7x.duckdns.org', ZOMRO_USER: USER, ZOMRO_PASSWORD: PASSWORD, ZOMRO_BUILD_MIN: '180', ZOMRO_SSH_MIN: '30' }).zomro;
   assert.equal(slow.buildTimeout, 180 * 60000);
   assert.equal(slow.sshTimeout, 30 * 60000);
@@ -213,7 +234,7 @@ test('брошенный заказ: тест не дождался сервер
 
     // срок ещё не вышел — служба сервер не трогает, даже если он уже появился
     z.flags.hidden = false;
-    assert.deepEqual(await orders.sweep({ cloud, notify }), { removed: [], forgotten: [] });
+    assert.deepEqual(await orders.sweep({ cloud, notify }), { removed: [], forgotten: [], waiting: [] });
     assert.ok(z.servers.some((s) => s.servername === entry.name));
 
     // срок вышел — удаляет и сообщает; запись вычёркнута
@@ -286,4 +307,30 @@ test('сервер не собрался вовремя: Zomro не даёт у�
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test('tariffs: тарифы всех дата-центров с ценой за день и наличием; ничего не заказывает', async () => {
+  const z = fakeZomro();
+  const cloud = createCloud({ settings, fetch: z.fetch });
+  const list = await cloud.tariffs();
+  assert.deepEqual(list.map((t) => [t.datacenter, t.datacenterName, t.pricelist, t.name, t.perDay, t.available]), [
+    ['17', 'Netherlands-3 [Cloud]', '7920', 'Blitz Intel| NL-3', 0.31, true],
+    ['17', 'Netherlands-3 [Cloud]', '7864', 'Starter AMD| NL-3 v.3', 0.36, true],
+    ['19', 'Germany-1 [Cloud]', '8235', 'Starter AMD| DE-1 v.3', 0.29, true],
+    ['19', 'Germany-1 [Cloud]', '8100', 'Blitz Intel| DE-1', 0.45, false]
+  ]);
+  // скидка: итоговая цена, прежняя и размер скидки — без HTML
+  assert.deepEqual([list[2].price, list[2].was, list[2].discount], ['0.29 EUR за день', 0.36, '-20.03%']);
+  assert.deepEqual(parsePrice('0.31 EUR за день'), { text: '0.31 EUR за день', perDay: 0.31, was: null, discount: null });
+  assert.deepEqual(parsePrice(''), { text: '', perDay: null, was: null, discount: null });
+  assert.deepEqual(list[1].labels, ['cpu:AMD', 'type:Basic', 'soldout:False']);
+  assert.equal(z.orders.length, 0, 'заказ не отправлялся');
+});
+
+test('смена тарифа: образ ОС — свой у каждого дата-центра; прежний, если есть, иначе Ubuntu 24.04', async () => {
+  const z = fakeZomro();
+  const cloud = createCloud({ settings, fetch: z.fetch });
+  assert.deepEqual(await cloud.pickOs({ pricelist: '7864', datacenter: '17' }), { id: '2140c514-fa2b-4b38-90e4-f9ff394245d1', name: 'Ubuntu 24.04 x64' });
+  assert.deepEqual(await cloud.pickOs({ pricelist: '8235', datacenter: '19' }), { id: '11111111-2222-4333-8444-555555555555', name: 'Ubuntu 24.04 x64' });
+  assert.equal(z.orders.length, 0, 'форма заказа без sok — ничего не заказано');
 });

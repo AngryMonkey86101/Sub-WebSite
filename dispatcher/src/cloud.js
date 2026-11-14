@@ -42,6 +42,23 @@ function serverName(ms) {
   return `${PREFIX}${d.getUTCFullYear()}${pad(d.getUTCMonth() + 1)}${pad(d.getUTCDate())}-${pad(d.getUTCHours())}${pad(d.getUTCMinutes())}`;
 }
 
+// Цена тарифа из формы заказа. Со скидкой Zomro отдаёт HTML:
+//   <font color='red'><b>-20.03%</b></font> <del>0.36 EUR за день</del><font color='red'> <b>0.29 EUR за день</b></font>
+// Итог — { text: '0.29 EUR за день', perDay: 0.29, was: 0.36, discount: '-20.03%' }
+function parsePrice(raw) {
+  const html = String(raw ?? '');
+  const strip = (s) => s.replace(/<[^>]*>/g, ' ').replace(/&nbsp;/g, ' ').replace(/\s+/g, ' ').trim();
+  const number = (s) => {
+    const m = String(s).match(/(\d+(?:[.,]\d+)?)\s*[A-Z]{3}/);
+    return m ? Number.parseFloat(m[1].replace(',', '.')) : null;
+  };
+  const old = html.match(/<del>([\s\S]*?)<\/del>/i);
+  const rest = strip(html.replace(/<del>[\s\S]*?<\/del>/gi, ' '));
+  const discount = rest.match(/[-−]\s?\d+(?:[.,]\d+)?\s?%/)?.[0].replace(/\s/g, '') ?? null;
+  const text = strip(rest.replace(/[-−]\s?\d+(?:[.,]\d+)?\s?%/, ''));
+  return { text, perDay: number(text), was: old ? number(strip(old[1])) : null, discount };
+}
+
 // Сервер в удобном виде; IP — только IPv4
 function shape(x) {
   return {
@@ -53,7 +70,8 @@ function shape(x) {
     pricelist: String(x.pricelist_id ?? x.pricelist ?? ''),
     datacenter: String(x.datacenter ?? ''),
     cost: x.cost ?? null,
-    ours: NAME.test(x.servername ?? '')
+    ours: NAME.test(x.servername ?? ''),
+    provider: 'zomro'
   };
 }
 
@@ -100,11 +118,13 @@ function createCloud({ settings, fetch = globalThis.fetch, now = () => Date.now(
 
   // Ждать, пока заказанный сервер станет активным и получит IPv4. Zomro собирает долго — предел
   // по умолчанию из настроек (ZOMRO_BUILD_MIN). progress — раз в reportMs: сколько ждём и состояние.
-  async function waitFor(name, { timeoutMs = settings.buildTimeout ?? 90 * 60000, everyMs = 15000, reportMs = 5 * 60000, progress = null } = {}) {
+  async function waitFor(name, { timeoutMs = settings.buildTimeout ?? 90 * 60000, everyMs = 15000, reportMs = 5 * 60000, progress = null, shouldStop = null } = {}) {
     const started = now();
     const deadline = started + timeoutMs;
     let reported = started;
     for (;;) {
+      // отмена ожидания (cancel.js): бросает CancelledError
+      shouldStop?.();
       const found = (await servers()).find((s) => s.name === name);
       if (found?.ip && found.status === 'active') return found;
       if (progress && now() - reported >= reportMs) {
@@ -145,7 +165,66 @@ function createCloud({ settings, fetch = globalThis.fetch, now = () => Date.now(
     }
   }
 
-  return { servers, server, balance, order, waitFor, remove, removeWhenReady };
+  // Тарифы для заказа посуточно — по всем дата-центрам. Только чтение: первый шаг заказа
+  // (instances.order) без подтверждения ничего не заказывает. Метки тарифа (процессор, тип,
+  // «распродано») — из списка фильтров формы: ключ метки → её значение.
+  async function tariffs() {
+    const asList = (x) => (Array.isArray(x) ? x : x === undefined || x === null ? [] : [x]);
+    const first = await zomro.call('instances.order', { period: '-50' });
+    const centers = asList(first?.slist)
+      .filter((l) => l?.name === 'datacenter')
+      .flatMap((l) => asList(l.val))
+      .map((v) => ({ id: String(v?.key ?? ''), name: String(v?.$ ?? v?.value ?? '') }))
+      .filter((c) => /^\d+$/.test(c.id));
+    if (!centers.length) centers.push({ id: String(first?.datacenter ?? settings.datacenter), name: '' });
+    const out = [];
+    for (const center of centers) {
+      const doc = center.id === String(first?.datacenter) ? first : await zomro.call('instances.order', { period: '-50', datacenter: center.id });
+      const tags = new Map(asList(doc?.flist?.val).map((t) => [String(t?.key ?? ''), String(t?.value ?? t?.$ ?? '')]));
+      const items = asList(doc?.list).flatMap((b) => asList(b?.elem)).filter((e) => e?.pricelist);
+      for (const e of items) {
+        const labels = asList(e.filter?.tag).map((t) => tags.get(String(t?.$ ?? t)) ?? '').filter(Boolean);
+        const price = parsePrice(e.price);
+        out.push({
+          provider: 'zomro',
+          datacenter: center.id,
+          datacenterName: center.name,
+          pricelist: String(e.pricelist),
+          name: String(e.desc ?? ''),
+          price: price.text,
+          perDay: price.perDay,
+          was: price.was,
+          discount: price.discount,
+          available: e.order_available !== 'off' && !labels.includes('soldout:True'),
+          labels
+        });
+      }
+    }
+    return out;
+  }
+
+  // Образы ОС для тарифа в дата-центре — из формы заказа (без sok ничего не заказывается).
+  // У каждого дата-центра свои номера образов: при смене тарифа нужен номер из этого списка.
+  async function osImages({ pricelist, datacenter }) {
+    const doc = await zomro.call('instances.order.param', { datacenter: String(datacenter), pricelist: String(pricelist), period: '-50' });
+    const asList = (x) => (Array.isArray(x) ? x : x === undefined || x === null ? [] : [x]);
+    return asList(doc?.slist)
+      .filter((l) => l?.name === 'instances_os')
+      .flatMap((l) => asList(l.val))
+      .map((v) => ({ id: String(v?.key ?? ''), name: String(v?.value ?? v?.$ ?? '') }))
+      .filter((o) => /^[0-9a-f-]{36}$/.test(o.id));
+  }
+
+  // Образ для нового тарифа: прежний, если он там есть; иначе Ubuntu 24.04, затем 22.04
+  async function pickOs({ pricelist, datacenter, current = settings.os }) {
+    const images = await osImages({ pricelist, datacenter });
+    if (!images.length) throw new ZomroError(`Zomro не отдала образы ОС для тарифа ${pricelist} в дата-центре ${datacenter} — тариф недоступен для заказа посуточно?`);
+    const found = images.find((o) => o.id === current) ?? images.find((o) => /ubuntu.*24\.04/i.test(o.name)) ?? images.find((o) => /ubuntu.*22\.04/i.test(o.name));
+    if (!found) throw new ZomroError(`Для тарифа ${pricelist} нет Ubuntu 24.04 или 22.04 — выберите другой тариф`);
+    return found;
+  }
+
+  return { provider: 'zomro', servers, server, balance, order, waitFor, remove, removeWhenReady, tariffs, osImages, pickOs };
 }
 
-export { createCloud, newPassword, serverName, shape, notReady, PREFIX };
+export { createCloud, newPassword, serverName, shape, notReady, parsePrice, PREFIX };

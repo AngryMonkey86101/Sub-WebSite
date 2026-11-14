@@ -21,7 +21,8 @@ if (d.keys.created.length) {
   await d.notify(`Диспетчер запущен: проверяю ${config.portalHost} из РФ, бэкап — раз в ${Math.round(config.backupInterval / 60000)} мин.`);
 }
 
-const SWEEP_EVERY = 60 * 60 * 1000;
+// очередь на удаление и брошенные заказы — раз в 10 минут: сервер стоит денег, пока не удалён
+const SWEEP_EVERY = 10 * 60 * 1000;
 let lastSweep = 0;
 let busy = false;
 async function cycle() {
@@ -38,11 +39,11 @@ async function cycle() {
   } catch (err) {
     console.error('Ошибка цикла:', err?.message);
   }
-  // раз в час — брошенные заказы у Zomro (orders.js): сервер стоит денег, пока его не удалят
+  // очередь на удаление и брошенные заказы (orders.js)
   if (d.cloud && Date.now() - lastSweep >= SWEEP_EVERY) {
     lastSweep = Date.now();
     try {
-      await d.orders.sweep({ cloud: d.cloud, notify: d.notify });
+      await d.orders.sweep({ clouds: d.clouds, notify: d.notify });
     } catch (err) {
       console.error('Уборка заказов:', err?.message);
     }

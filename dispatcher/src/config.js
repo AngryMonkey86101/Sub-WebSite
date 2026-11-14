@@ -46,8 +46,43 @@ function loadConfig(env = process.env) {
     return value;
   };
 
+  // Aeza (aeza.js) — запасной хостер: ключ API из личного кабинета. Пусто — без Aeza
+  const aezaKey = env.AEZA_API_KEY?.trim() || '';
+  const aezaTerm = env.AEZA_TERM?.trim() || 'hour';
+  if (!['hour', 'half_day', 'day', 'week', 'month'].includes(aezaTerm)) throw new ConfigError('AEZA_TERM: hour, half_day, day, week или month');
+  const aezaProduct = env.AEZA_PRODUCT?.trim() || '';
+  if (aezaProduct && !/^\d{1,9}$/.test(aezaProduct)) throw new ConfigError('AEZA_PRODUCT: номер тарифа (tariffs --provider aeza)');
+  const aezaOs = env.AEZA_OS?.trim() || '';
+  if (aezaOs && !/^[\w.-]{1,64}$/.test(aezaOs)) throw new ConfigError('AEZA_OS: slug или номер образа ОС');
+
+  // порядок хостеров: первый — основной, следующие — запасные (переезд пробует их по очереди)
+  const configured = { zomro: Boolean(zomroUser), aeza: Boolean(aezaKey) };
+  const order = (env.CLOUD_ORDER?.trim() || 'zomro,aeza').split(',').map((s) => s.trim().toLowerCase()).filter(Boolean);
+  for (const name of order) if (!(name in configured)) throw new ConfigError(`CLOUD_ORDER: неизвестный хостер ${name} — можно zomro, aeza`);
+  const providers = [...new Set(order)].filter((name) => configured[name]);
+
+  const repoUrl = env.REPO_URL?.trim() || 'https://github.com/AngryMonkey86101/Sub-WebSite.git';
+  if (!/^https:\/\/[\w.-]+\/[\w./-]+$/.test(repoUrl)) throw new ConfigError('REPO_URL: адрес https://… репозитория проекта');
+  const repoRef = env.REPO_REF?.trim() || 'main';
+  if (!/^[\w./-]{1,100}$/.test(repoRef)) throw new ConfigError('REPO_REF: ветка или тег');
+  const rotationAt = env.ROTATION_TIME?.trim() || '04:00';
+  if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(rotationAt)) throw new ConfigError('ROTATION_TIME: время по Москве, например 04:00');
+
   return {
     portalHost,
+    // плановая смена сервера (schedule.js): раз в everyDays дней в at по Москве, новый сервер —
+    // за overlapHours часов до неё
+    // переезд (migrate.js): откуда новый сервер берёт код и сколько держать старый после переезда
+    migration: {
+      repoUrl: repoUrl,
+      repoRef: repoRef,
+      keepOldHours: number('MIGRATE_KEEP_OLD_H', 2, { min: 0, max: 72 })
+    },
+    rotation: {
+      everyDays: number('ROTATION_DAYS', 3, { min: 1, max: 30 }),
+      at: rotationAt,
+      overlapHours: number('ROTATION_OVERLAP_H', 20, { min: 1, max: 72 })
+    },
     dataDir: env.DATA_DIR?.trim() || '/data',
     telegram: token ? { token, chatId } : null,
     ssh: { user: sshUser, port: number('SSH_PORT', 22, { min: 1, max: 65535 }) },
@@ -62,13 +97,27 @@ function loadConfig(env = process.env) {
     // сообщение, если свежего бэкапа нет дольше этого, а сервер при этом доступен
     backupAlertAfter: number('BACKUP_ALERT_AFTER_HOURS', 3, { min: 1, max: 168 }) * HOUR,
     // тариф, дата-центр и образ ОС новых серверов — по проверке API (docs/PLAN.md, раздел 15):
-    // 7920 «Blitz Intel | NL-3» — 0,31 EUR в день, 17 — Netherlands-3, образ — Ubuntu 24.04
+    // 7864 «Starter AMD | NL-3 v.3» — 0,36 EUR в день, 17 — Netherlands-3, образ — Ubuntu 24.04.
+    // Не 7920 «Blitz Intel | NL-3» (0,31): на живом аккаунте серверы этого тарифа собирались часами,
+    // один за 12 часов так и не собрался
+    providers,
+    aeza: aezaKey
+      ? {
+          url: env.AEZA_API_URL?.trim() || 'https://my.aeza.net/api/v2',
+          key: aezaKey,
+          product: aezaProduct,
+          term: aezaTerm,
+          os: aezaOs,
+          buildTimeout: number('AEZA_BUILD_MIN', 30, { min: 5, max: 360 }) * MINUTE,
+          sshTimeout: number('AEZA_SSH_MIN', 15, { min: 1, max: 120 }) * MINUTE
+        }
+      : null,
     zomro: zomroUser
       ? {
           url: env.ZOMRO_API_URL?.trim() || 'https://api.zomro.com/',
           user: zomroUser,
           password: zomroPassword,
-          pricelist: zomroId('ZOMRO_PRICELIST', '7920', /^\d{1,9}$/),
+          pricelist: zomroId('ZOMRO_PRICELIST', '7864', /^\d{1,9}$/),
           datacenter: zomroId('ZOMRO_DATACENTER', '17', /^\d{1,9}$/),
           os: zomroId('ZOMRO_OS', '2140c514-fa2b-4b38-90e4-f9ff394245d1', /^[0-9a-f-]{36}$/),
           // Zomro собирает серверы долго: сколько ждать, пока сервер станет активным и получит IP,
