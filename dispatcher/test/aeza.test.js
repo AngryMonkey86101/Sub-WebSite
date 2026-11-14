@@ -53,7 +53,11 @@ function fakeAeza({ activateAfter = 2, balance = 1250 } = {}) {
         total: 2
       });
     }
-    if (init.method === 'GET' && path === '/services/operating-systems') return reply(200, { items: [{ id: 940, slug: 'debian_12', name: 'Debian 12' }, { id: 1240, slug: 'ubuntu_2404', name: 'Ubuntu 24.04' }] });
+    // как живой API (разведка 14.11): массив без обёртки; с limit — пусто
+    if (init.method === 'GET' && path === '/services/operating-systems') {
+      if (u.searchParams.has('limit')) return reply(200, []);
+      return reply(200, [{ id: 6, slug: 'ubuntu_2204', name: 'Ubuntu 22.04', group: 'ubuntu', enabled: true }, { id: 12, slug: 'debian_12', name: 'Debian 12', enabled: true }, { id: 30, slug: 'ubuntu_2404_old', name: 'Ubuntu 24.04 (old)', enabled: false }, { id: 31, slug: 'ubuntu_2404', name: 'Ubuntu 24.04', group: 'ubuntu', enabled: true }]);
+    }
     if (init.method === 'POST' && path === '/services/orders') {
       log.orders.push(body);
       const o = body.orders[0];
@@ -122,7 +126,7 @@ test('Aeza: список, баланс, тарифы, заказ почасов�
   // тариф без почасовой оплаты при выборе — отказ с объяснением (живые тарифы Custom: только month и дольше)
   await assert.rejects(aeza.pickOs({ pricelist: '42' }), /нельзя оплатить за час — только день[\s\S]*нужен тариф с почасовой оплатой/);
   await assert.rejects(aeza.pickOs({ pricelist: '999' }), /нет тарифа 999/);
-  assert.deepEqual(await aeza.pickOs(), { id: 'ubuntu_2404', name: 'Ubuntu 24.04', numericId: 1240 });
+  assert.deepEqual(await aeza.pickOs(), { id: 'ubuntu_2404', name: 'Ubuntu 24.04', numericId: 31 }, 'выключенный образ пропущен');
 
   const ordered = await aeza.order();
   assert.equal(ordered.name, 'family-vpn-20261114-0900');
