@@ -70,7 +70,8 @@ function shape(x) {
     pricelist: String(x.pricelist_id ?? x.pricelist ?? ''),
     datacenter: String(x.datacenter ?? ''),
     cost: x.cost ?? null,
-    ours: NAME.test(x.servername ?? '')
+    ours: NAME.test(x.servername ?? ''),
+    provider: 'zomro'
   };
 }
 
@@ -183,6 +184,7 @@ function createCloud({ settings, fetch = globalThis.fetch, now = () => Date.now(
         const labels = asList(e.filter?.tag).map((t) => tags.get(String(t?.$ ?? t)) ?? '').filter(Boolean);
         const price = parsePrice(e.price);
         out.push({
+          provider: 'zomro',
           datacenter: center.id,
           datacenterName: center.name,
           pricelist: String(e.pricelist),
@@ -220,7 +222,7 @@ function createCloud({ settings, fetch = globalThis.fetch, now = () => Date.now(
     return found;
   }
 
-  return { servers, server, balance, order, waitFor, remove, removeWhenReady, tariffs, osImages, pickOs };
+  return { provider: 'zomro', servers, server, balance, order, waitFor, remove, removeWhenReady, tariffs, osImages, pickOs };
 }
 
 export { createCloud, newPassword, serverName, shape, notReady, parsePrice, PREFIX };

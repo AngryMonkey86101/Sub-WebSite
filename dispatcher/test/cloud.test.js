@@ -234,7 +234,7 @@ test('брошенный заказ: тест не дождался сервер
 
     // срок ещё не вышел — служба сервер не трогает, даже если он уже появился
     z.flags.hidden = false;
-    assert.deepEqual(await orders.sweep({ cloud, notify }), { removed: [], forgotten: [] });
+    assert.deepEqual(await orders.sweep({ cloud, notify }), { removed: [], forgotten: [], waiting: [] });
     assert.ok(z.servers.some((s) => s.servername === entry.name));
 
     // срок вышел — удаляет и сообщает; запись вычёркнута

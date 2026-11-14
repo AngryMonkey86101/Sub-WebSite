@@ -103,7 +103,7 @@ async function world(name, { oldOurs = false, probe = 'up', freeze = 'direct', f
     return { code: 0, stdout: Buffer.from(/git -C/.test(script) ? 'abc1234 последний коммит\n' : ''), stderr: '' };
   };
   const lookup = async () => ({ address: namesMoved ? NEW_IP : OLD_IP });
-  const migration = createMigration({ config, keys, state, cloud, backups, monitor, orders, notify: async (t) => log.notes.push(t), run, lookup, now, wait, tcp: async () => true, out: (l) => log.out.push(l) });
+  const migration = createMigration({ config, keys, state, clouds: { zomro: cloud }, backups, monitor, orders, notify: async (t) => log.notes.push(t), run, lookup, now, wait, tcp: async () => true, out: (l) => log.out.push(l) });
   return { config, keys, state, orders, log, migration, dataDir, plainLatest, plainFinal };
 }
 

@@ -2,6 +2,7 @@ import { mkdirSync, readFileSync, writeFileSync, rmSync, statSync } from 'node:f
 import { join } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { tcpOpen } from './zomroTest.js';
+import { serverName } from './cloud.js';
 
 // Переезд на новый сервер (docs/PLAN.md, раздел 15, этапы 5–7). Один и тот же порядок и для
 // переезда по команде, и для плановой смены, и для аварии:
@@ -32,7 +33,9 @@ const MARK = 'family-vpn-dispatcher-migration';
 
 class MigrationError extends Error {}
 
-function createMigration({ config, keys, state, cloud, backups, monitor, orders, notify, run, lookup, now = () => Date.now(), wait = sleep, tcp = tcpOpen, out = console.log }) {
+const NAMES = { zomro: 'Zomro', aeza: 'Aeza' };
+
+function createMigration({ config, keys, state, clouds = {}, backups, monitor, orders, notify, run, lookup, now = () => Date.now(), wait = sleep, tcp = tcpOpen, out = console.log }) {
   const dir = join(config.dataDir, 'migration');
   const lockFile = join(config.dataDir, 'migration.lock');
   const knownRoot = join(dir, 'known_hosts_root');
@@ -148,9 +151,67 @@ function createMigration({ config, keys, state, cloud, backups, monitor, orders,
     }
   }
 
+  const providerList = () => config.providers.filter((name) => clouds[name]);
+
+  // Заказ у хостеров по порядку CLOUD_ORDER: у одного сервер не собрался (или нет денег) —
+  // заказ удаляется, и очередь следующего. Zomro, бывает, собирает часами — запасной хостер спасает.
+  async function orderServer() {
+    const errors = [];
+    const list = providerList();
+    for (const name of list) {
+      const cloud = clouds[name];
+      const settings = config[name];
+      let ordered = null;
+      try {
+        const { amount, currency } = await cloud.balance();
+        if (amount < 1) throw new MigrationError(`на балансе ${amount} ${currency} — пополните хотя бы до 2 EUR`);
+        // имя — уникальное: заказ у прежнего хостера мог остаться в учёте с тем же временем
+        let wanted = serverName(now());
+        if (orders.list().some((e) => e.name === wanted)) wanted = `${wanted}-${name}`;
+        ordered = await cloud.order({ name: wanted });
+        orders.track(ordered.name, { until: now() + settings.buildTimeout + settings.sshTimeout + 2 * HOUR, purpose: 'migration', provider: name });
+        phase('building', { server: ordered.name, provider: name });
+        say(`Заказан ${ordered.name} у ${NAMES[name]}, жду сборку до ${Math.round(settings.buildTimeout / MIN)} мин`);
+        const built = await cloud.waitFor(ordered.name, {
+          timeoutMs: settings.buildTimeout,
+          progress: ({ minutes, status }) => {
+            touch();
+            say(`  … собирается ${minutes} мин, состояние: ${status}`);
+          }
+        });
+        const server = { ...built, password: ordered.password, provider: name };
+        saveServer(server);
+        phase('ssh', { serverId: server.id, ip: server.ip });
+        const sshDeadline = now() + settings.sshTimeout;
+        while (!(await tcp(server.ip, 22))) {
+          if (now() >= sshDeadline) throw new MigrationError(`на новом сервере ${server.ip} не открылся SSH за ${Math.round(settings.sshTimeout / MIN)} мин`);
+          await wait(10000);
+        }
+        return server;
+      } catch (err) {
+        errors.push(`${NAMES[name]}: ${err.message}`);
+        say(`✗ ${NAMES[name]}: ${err.message}`);
+        if (ordered) {
+          const target = (await cloud.servers().catch(() => [])).find((x) => x.name === ordered.name);
+          if (target) {
+            try {
+              await cloud.removeWhenReady(target.id, { timeoutMs: 5 * MIN });
+              orders.done(ordered.name);
+              say(`  заказ ${ordered.name} у ${NAMES[name]} удалён`);
+            } catch (e) {
+              say(`  заказ ${ordered.name} удалю позже (учёт заказов): ${e.message}`);
+            }
+          }
+        }
+        if (name !== list.at(-1)) await notify(`⚠️ ${NAMES[name]} не дала сервер (${err.message}) — заказываю у следующего хостера: ${NAMES[list[list.indexOf(name) + 1]]}.`);
+      }
+    }
+    throw new MigrationError(`ни один хостер не дал сервер — ${errors.join('; ')}`);
+  }
+
   // --- переезд ---
   async function migrate({ reason = 'по команде' } = {}) {
-    if (!cloud) throw new MigrationError('Zomro не настроен: впишите ZOMRO_USER и ZOMRO_PASSWORD в .env');
+    if (!providerList().length) throw new MigrationError('Хостер не настроен: впишите в .env ZOMRO_USER и ZOMRO_PASSWORD или AEZA_API_KEY');
     lock();
     let server = null;
     let frozen = null;
@@ -160,34 +221,19 @@ function createMigration({ config, keys, state, cloud, backups, monitor, orders,
       const latest = backups.latest();
       if (!latest) throw new MigrationError('На диспетчере нет ни одного бэкапа — переезжать не с чего');
       const oldIp = await resolves();
-      const oldServer = oldIp ? (await cloud.servers()).find((s) => s.ip === oldIp) ?? null : null;
-      const { amount, currency } = await cloud.balance();
-      if (amount < 1) throw new MigrationError(`На балансе Zomro ${amount} ${currency} — пополните хотя бы до 2 EUR`);
-      const probe = await monitor.probeServer();
-      say(`Переезд ${reason}. Сейчас: ${config.portalHost} → ${oldIp ?? '?'}${oldServer ? ` (${oldServer.name || oldServer.id})` : ''}, из РФ ${probe.ok ? 'доступен' : `недоступен: ${probe.reason}`}`);
-      await notify(`🚚 Переезд ${reason}: заказываю новый сервер. Zomro собирает долго — сообщу, когда он будет готов.`);
-
-      // 1. заказ и сборка
-      const ordered = await cloud.order();
-      orders.track(ordered.name, { until: now() + config.zomro.buildTimeout + config.zomro.sshTimeout + 2 * HOUR, purpose: 'migration' });
-      phase('building', { server: ordered.name });
-      say(`Заказан ${ordered.name}, жду сборку до ${Math.round(config.zomro.buildTimeout / MIN)} мин`);
-      const built = await cloud.waitFor(ordered.name, {
-        timeoutMs: config.zomro.buildTimeout,
-        progress: ({ minutes, status }) => {
-          touch();
-          say(`  … собирается ${minutes} мин, состояние: ${status}`);
-        }
-      });
-      server = { ...built, password: ordered.password };
-      saveServer(server);
-      phase('ssh', { serverId: server.id, ip: server.ip });
-      const sshDeadline = now() + config.zomro.sshTimeout;
-      while (!(await tcp(server.ip, 22))) {
-        if (now() >= sshDeadline) throw new MigrationError(`на новом сервере ${server.ip} не открылся SSH за ${Math.round(config.zomro.sshTimeout / MIN)} мин`);
-        await wait(10000);
+      let oldServer = null;
+      for (const name of providerList()) {
+        if (oldServer || !oldIp) break;
+        const found = (await clouds[name].servers().catch(() => [])).find((x) => x.ip === oldIp);
+        if (found) oldServer = { ...found, provider: name };
       }
-      say(`✓ Сервер готов: ${server.name}, IP ${server.ip} (через ${elapsed()})`);
+      const probe = await monitor.probeServer();
+      say(`Переезд ${reason}. Сейчас: ${config.portalHost} → ${oldIp ?? '?'}${oldServer ? ` (${oldServer.name || oldServer.id}, ${NAMES[oldServer.provider]})` : ''}, из РФ ${probe.ok ? 'доступен' : `недоступен: ${probe.reason}`}. Хостеры по очереди: ${providerList().map((n) => NAMES[n]).join(' → ')}`);
+      await notify(`🚚 Переезд ${reason}: заказываю новый сервер (${providerList().map((n) => NAMES[n]).join(', затем ')}). Сообщу, когда он будет готов.`);
+
+      // 1. заказ и сборка — у первого хостера, который даст сервер
+      server = await orderServer();
+      say(`✓ Сервер готов: ${server.name} у ${NAMES[server.provider]}, IP ${server.ip} (через ${elapsed()})`);
 
       // 2. подготовка заранее — старый сервер работает
       phase('prepare');
@@ -257,13 +303,13 @@ function createMigration({ config, keys, state, cloud, backups, monitor, orders,
       let oldNote = '';
       if (oldServer && oldServer.id !== server.id) {
         if (oldServer.ours) {
-          orders.track(oldServer.name, { until: now() + config.migration.keepOldHours * HOUR, purpose: 'old' });
+          orders.track(oldServer.name, { until: now() + config.migration.keepOldHours * HOUR, purpose: 'old', provider: oldServer.provider });
           oldNote = `Старый сервер ${oldServer.name} удалю через ${config.migration.keepOldHours} ч.`;
         } else {
           oldNote = `Старый сервер ${oldServer.name || oldServer.id} (id ${oldServer.id}) создан не диспетчером — удалите его сами: в кабинете Zomro или командой remove ${oldServer.id} --yes --foreign.`;
         }
       }
-      state.set('rotation', { lastAt: now(), server: { id: server.id, name: server.name, ip: server.ip }, previous: oldServer ? { id: oldServer.id, name: oldServer.name, ip: oldServer.ip } : null });
+      state.set('rotation', { lastAt: now(), server: { id: server.id, name: server.name, ip: server.ip, provider: server.provider }, previous: oldServer ? { id: oldServer.id, name: oldServer.name, ip: oldServer.ip, provider: oldServer.provider } : null });
       phase('done', { finishedAt: now() });
       say(`✓ Переезд закончен за ${elapsed()}. ${oldNote}`);
       await notify(`✅ Переезд ${reason} закончен за ${elapsed()}: ${config.portalHost} → ${server.ip} (${server.name}).${reachable ? '' : ' ⚠️ Из РФ новый сервер пока не виден — проверьте через 15 минут.'} Семье: выключить и включить VPN. ${oldNote}`);
@@ -287,10 +333,11 @@ function createMigration({ config, keys, state, cloud, backups, monitor, orders,
           await notify(`⚠️ Переезд не удался, и старый сервер не разморозился: ${e.message}. Бот и сайт остановлены — выполните unfreeze.`);
         }
       }
-      const target = server ?? (await cloud.servers().catch(() => [])).find((s) => s.name === state.get('migration')?.server);
+      // неудачные заказы orderServer убрал сам; здесь — готовый новый сервер
+      const target = server;
       if (target) {
         try {
-          await cloud.removeWhenReady(target.id, { timeoutMs: 5 * MIN });
+          await clouds[target.provider].removeWhenReady(target.id, { timeoutMs: 5 * MIN });
           if (target.name) orders.done(target.name);
           say(`↩ Новый сервер ${target.name} удалён`);
         } catch (e) {

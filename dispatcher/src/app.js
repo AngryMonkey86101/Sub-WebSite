@@ -6,6 +6,7 @@ import { createBackups } from './backups.js';
 import { createMonitor } from './monitor.js';
 import { run as defaultRun } from './run.js';
 import { createCloud } from './cloud.js';
+import { createAeza } from './aeza.js';
 import { createOrders } from './orders.js';
 import { createMigration } from './migrate.js';
 import { lookup as dnsLookup } from 'node:dns/promises';
@@ -31,12 +32,15 @@ async function createDispatcher({ config, fetch = globalThis.fetch, run = defaul
   const keys = await ensureKeys(config.dataDir, { run });
   monitor = createMonitor({ config, state, notify, fetch, ...(lookup ? { lookup } : {}), now, log });
   backups = createBackups({ config, keys, state, notify, isServerUp: monitor.isUp, run, now, log });
-  const cloud = config.zomro ? createCloud({ settings: config.zomro, fetch, now }) : null;
+  // хостеры в порядке CLOUD_ORDER: первый — основной; cloud — он же (для команд без --provider)
+  const make = { zomro: () => createCloud({ settings: config.zomro, fetch, now }), aeza: () => createAeza({ settings: config.aeza, fetch, now }) };
+  const clouds = Object.fromEntries(config.providers.map((name) => [name, make[name]()]));
+  const cloud = clouds[config.providers[0]] ?? null;
   const orders = createOrders(config.dataDir, { now });
   const resolve = lookup ?? ((host) => dnsLookup(host, { family: 4 }));
   // переезд — по запросу: out (вывод хода) у команды свой
-  const migration = (options = {}) => createMigration({ config, keys, state, cloud, backups, monitor, orders, notify, run, lookup: resolve, now, ...options });
-  return { config, state, notify, keys, monitor, backups, cloud, orders, migration, run };
+  const migration = (options = {}) => createMigration({ config, keys, state, clouds, backups, monitor, orders, notify, run, lookup: resolve, now, ...options });
+  return { config, state, notify, keys, monitor, backups, cloud, clouds, orders, migration, run };
 }
 
 // Подсказка, что вписать в .env сервера: открытые ключи диспетчера

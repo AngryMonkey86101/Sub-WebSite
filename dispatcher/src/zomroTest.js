@@ -30,7 +30,7 @@ async function zomroTest({ cloud, run, notify, orders = null, out = console.log,
 
   const ordered = await cloud.order();
   // до этого срока заказ ждёт сам тест; потом, если сервер так и остался, его удалит служба
-  orders?.track(ordered.name, { until: now() + buildTimeoutMs + sshTimeoutMs + 15 * 60000 });
+  orders?.track(ordered.name, { until: now() + buildTimeoutMs + sshTimeoutMs + 15 * 60000, provider: cloud.provider ?? 'zomro' });
   out(`✓ Заказ отправлен: ${ordered.name}. Жду сборку до ${Math.round(buildTimeoutMs / 60000)} мин`);
   let server = null;
   try {

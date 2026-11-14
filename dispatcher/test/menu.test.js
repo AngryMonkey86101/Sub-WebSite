@@ -57,9 +57,15 @@ case "$*" in
   *" src/cli.js server") echo "Портал на m2pr7x.duckdns.org: active" ;;
   *" src/cli.js servers") echo "Баланс Zomro: 3.2 EUR" ;;
   *" src/cli.js schedule") echo "Следующая смена: 16.11 04:00 МСК — через 1 д 18 ч" ;;
-  *" src/cli.js tariffs --tsv") printf '17${T}Netherlands-3 [Cloud]${T}7920${T}Blitz Intel| NL-3${T}0.31${T}0.31 EUR за день${T}1${T}0\\n17${T}Netherlands-3 [Cloud]${T}7864${T}Starter AMD| NL-3 v.3${T}0.36${T}0.36 EUR за день${T}1${T}1\\n19${T}Germany-1 [Cloud]${T}8235${T}Starter AMD| DE-1 v.3${T}0.29${T}0.29 EUR за день${T}1${T}0\\n19${T}Germany-1 [Cloud]${T}8151${T}Essential Intel| DE-1 v.2${T}0.33${T}0.33 EUR за день${T}0${T}0\\n' ;;
-  *" src/cli.js tariff-check 8235 19") printf 'ok${T}11111111-2222-4333-8444-555555555555${T}Ubuntu 24.04 x64\\n' ;;
-  *" src/cli.js tariff") echo "Тариф: из .env" ;;
+  *" src/cli.js providers") printf "zomro${T}Zomro${T}1${T}1\naeza${T}Aeza${T}\${AEZA_ON:-0}${T}\${AEZA_POS:-0}\n" ;;
+  *" src/cli.js servers --tsv") printf 'zomro${T}7273993${T}family-vpn-20261113-1644${T}-${T}building${T}0.31${T}1${T}0\nzomro${T}7269056${T}vless-2${T}45.91.201.169${T}active${T}0.31${T}0${T}0\n' ;;
+  *" src/cli.js delete-queue") echo "Очередь на удаление пуста" ;;
+  *" src/cli.js delete-queue add "*) echo "✓ в очереди: $*" ;;
+  *" src/cli.js aeza-probe") echo "— Баланс (GET /accounts/me)" ;;
+  *" src/cli.js tariffs --tsv --provider zomro") printf '17${T}Netherlands-3 [Cloud]${T}7920${T}Blitz Intel| NL-3${T}0.31${T}0.31 EUR за день${T}1${T}0\\n17${T}Netherlands-3 [Cloud]${T}7864${T}Starter AMD| NL-3 v.3${T}0.36${T}0.36 EUR за день${T}1${T}1\\n19${T}Germany-1 [Cloud]${T}8235${T}Starter AMD| DE-1 v.3${T}0.29${T}0.29 EUR за день${T}1${T}0\\n19${T}Germany-1 [Cloud]${T}8151${T}Essential Intel| DE-1 v.2${T}0.33${T}0.33 EUR за день${T}0${T}0\\n' ;;
+  *" src/cli.js tariff-check 8235 19 --provider zomro") printf 'ok${T}11111111-2222-4333-8444-555555555555${T}Ubuntu 24.04 x64\\n' ;;
+  *" src/cli.js tariff --provider "*) echo "Тариф: из .env ($*)" ;;
+  *" src/cli.js tariffs --provider "*) echo "Тарифы ($*)" ;;
   *" src/cli.js migrate-status") echo "Переездов ещё не было" ;;
   *"test -f /data/migration.lock") [ -n "\${RUNNING:-}" ] ;;
   *"tail -n 40 -F /data/migrate.log") echo "[09:00 UTC] Заказан family-vpn-20261114-0900" ;;
@@ -137,6 +143,46 @@ test('menu.sh: время и период переезда — проверка 
   const before = t.env();
   t.run('8\n\n0\n');
   assert.equal(t.env(), before);
+});
+
+test('menu.sh: хостеры — очередь, ключ Aeza, разведка; при двух хостерах тариф спрашивает хостера', () => {
+  const t = setup('providers');
+  // ключ Aeza: вводится скрыто, сохраняется в .env, порядок хостеров — Zomro основной
+  let res = t.run('10\n2\nAEZAkey0123456789abcdef\n\n0\n0\n');
+  assert.equal(res.status, 0, res.err);
+  assert.match(res.out, /Zomro — основной[\s\S]*Aeza — не настроен/);
+  assert.match(t.env(), /^AEZA_API_KEY=AEZAkey0123456789abcdef$/m);
+  assert.match(t.env(), /^CLOUD_ORDER=zomro,aeza$/m);
+  assert.ok(!res.out.includes('AEZAkey0123456789abcdef'), 'ключ на экран не выводится');
+  // оба настроены: основным становится Aeza
+  const both = { AEZA_ON: '1', AEZA_POS: '2' };
+  res = t.run('10\n1\n\n0\n0\n', both);
+  assert.match(t.env(), /^CLOUD_ORDER=aeza,zomro$/m);
+  assert.equal(t.env().match(/^CLOUD_ORDER=/gm).length, 1);
+  res = t.run('10\n3\n\n0\n0\n', both);
+  assert.match(res.out, /Баланс \(GET \/accounts\/me\)/);
+  // цены — по каждому хостеру; смена тарифа сначала спрашивает хостера
+  res = t.run('4\n\n6\n0\n0\n', both);
+  assert.match(res.out, /Тарифы \(.*tariffs --provider zomro\)[\s\S]*Тарифы \(.*tariffs --provider aeza\)/);
+  assert.match(res.err, /Хостер:\n {2}1 — Zomro \(основной\)\n {2}2 — Aeza \(запасной\)/, 'вопрос — в stderr, как и прочие вопросы меню');
+});
+
+test('menu.sh: удаление серверов — выбрать, чужой — с предупреждением, в очередь', () => {
+  const t = setup('delete');
+  // свой собирающийся сервер — в очередь
+  let res = t.run('11\n1\n1\n\n0\n0\n');
+  assert.equal(res.status, 0, res.err);
+  assert.match(res.out, /1 — ◆ zomro 7273993 +family-vpn-20261113-1644[\s\S]*2 — {3}zomro 7269056 +vless-2/);
+  assert.ok(res.calls.some((c) => /src\/cli\.js delete-queue add zomro 7273993$/.test(c)), res.calls.join('\n'));
+  assert.match(res.out, /Пока сервер собирается, хостер удалить не даст — служба дождётся и удалит/);
+  // чужой — предупреждение и --foreign
+  res = t.run('11\n2\n1\n\n0\n0\n');
+  assert.match(res.out, /⚠ Сервер создан не диспетчером/);
+  assert.ok(res.calls.some((c) => /delete-queue add zomro 7269056 --foreign$/.test(c)));
+  // передумали
+  const before = res.calls.length;
+  res = t.run('11\n2\n0\n0\n0\n');
+  assert.ok(!res.calls.slice(before).some((c) => /delete-queue add/.test(c)));
 });
 
 test('menu.sh: shellcheck без замечаний', { skip: spawnSync('shellcheck', ['--version']).status !== 0 && 'нет shellcheck' }, () => {

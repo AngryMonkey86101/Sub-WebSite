@@ -117,26 +117,56 @@ screen_ping() {
   pause
 }
 
+# Настроенные хостеры по очереди CLOUD_ORDER: строки «имя<TAB>название»
+providers() { cli providers | awk -F'\t' '$3 == 1 && $4 > 0 { print $4 "\t" $1 "\t" $2 }' | sort -n | cut -f2-; }
+
+# Выбрать хостера: один — сразу он; несколько — спросить. Печатает имя (zomro, aeza)
+choose_provider() {
+  local list=() titles=() name title i=1
+  while IFS=$'\t' read -r name title; do list+=("$name"); titles+=("$title"); done < <(providers)
+  if [ "${#list[@]}" -eq 0 ]; then
+    printf '%sНи один хостер не настроен — пункт «Хостеры»%s\n' "$RD" "$R" >&2
+    return 1
+  fi
+  if [ "${#list[@]}" -eq 1 ]; then echo "${list[0]}"; return 0; fi
+  printf '%sХостер:%s\n' "$B" "$R" >&2
+  for title in "${titles[@]}"; do printf '  %s%d%s — %s%s\n' "$B" "$i" "$R" "$title" "$([ "$i" = 1 ] && echo ' (основной)' || echo ' (запасной)')" >&2; i=$((i + 1)); done
+  printf '  %s0%s — назад\n' "$B" "$R" >&2
+  local n
+  n=$(ask 'Хостер:')
+  [ "$n" -ge 1 ] 2>/dev/null && [ "$n" -le "${#list[@]}" ] || return 1
+  echo "${list[$((n - 1))]}"
+}
+
 screen_prices() {
   header 'Цены на тарифы'
-  printf 'Загружаю тарифы из Zomro (несколько секунд)…\n'
-  cli tariffs
+  local name title
+  while IFS=$'\t' read -r name title; do
+    printf '%sЗагружаю тарифы %s (несколько секунд)…%s\n' "$C" "$title" "$R"
+    cli tariffs --provider "$name"
+    printf '\n'
+  done < <(providers)
   pause
 }
 
 screen_current() {
   header 'Выбранный тариф'
-  cli tariff
+  local name title
+  while IFS=$'\t' read -r name title; do
+    cli tariff --provider "$name"
+    printf '\n'
+  done < <(providers)
   pause
 }
 
 # Сменить тариф: дата-центр → тариф → проверка образа ОС → запись в .env и перезапуск
 screen_change() {
-  local tsv
+  local tsv provider
   header 'Изменить тариф'
-  printf 'Загружаю тарифы из Zomro (несколько секунд)…\n'
-  tsv=$(cli tariffs --tsv) || { printf '%sНе удалось получить тарифы%s\n' "$RD" "$R"; pause; return; }
-  [ -n "$tsv" ] || { printf '%sZomro не отдала тарифы%s\n' "$RD" "$R"; pause; return; }
+  provider=$(choose_provider) || return
+  printf 'Загружаю тарифы (несколько секунд)…\n'
+  tsv=$(cli tariffs --tsv --provider "$provider") || { printf '%sНе удалось получить тарифы%s\n' "$RD" "$R"; pause; return; }
+  [ -n "$tsv" ] || { printf '%sХостер не отдал тарифы%s\n' "$RD" "$R"; pause; return; }
 
   while true; do
     header 'Изменить тариф — дата-центр'
@@ -173,9 +203,9 @@ screen_change() {
       local new=${ids[$((t - 1))]}
 
       printf '\nВыбрано: %s%s%s, %s — %s\n' "$B" "${titles[$((t - 1))]}" "$R" "$dcname" "${prices[$((t - 1))]}"
-      printf 'Проверяю у Zomro, можно ли заказать и какой образ ОС взять…\n'
+      printf 'Проверяю у хостера, можно ли заказать и какой образ ОС взять…\n'
       local check
-      check=$(cli tariff-check "$new" "$dc" 2>&1)
+      check=$(cli tariff-check "$new" "$dc" --provider "$provider" 2>&1)
       if [[ "$check" != ok$'\t'* ]]; then
         printf '%sНельзя: %s%s\n' "$RD" "$check" "$R"
         pause
@@ -188,14 +218,18 @@ screen_change() {
       [ "$(ask)" = 1 ] || continue
 
       cp -p "$ENV_FILE" "$ENV_FILE.before-tariff"
-      set_env ZOMRO_DATACENTER "$dc"
-      set_env ZOMRO_PRICELIST "$new"
-      set_env ZOMRO_OS "$os"
+      if [ "$provider" = aeza ]; then
+        set_env AEZA_PRODUCT "$new"
+        set_env AEZA_OS "$os"
+      else
+        set_env ZOMRO_DATACENTER "$dc"
+        set_env ZOMRO_PRICELIST "$new"
+        set_env ZOMRO_OS "$os"
+      fi
       compose up -d >/dev/null 2>&1 || { printf '%sДиспетчер не перезапустился — прежние настройки: %s.before-tariff%s\n' "$RD" "$ENV_FILE" "$R"; pause; return; }
       printf '\n%s✓ Тариф сменён.%s Новые серверы будут заказываться так:\n\n' "$G" "$R"
-      cli tariff
-      printf '\nПроверить заказ на деле — пробный заказ (несколько центов):\n'
-      printf '  cd %s && docker compose exec -d dispatcher sh -c '\''node src/cli.js zomro-test --yes > /data/zomro-test.log 2>&1'\''\n' "$DIR"
+      cli tariff --provider "$provider"
+      printf '\nПроверить заказ на деле — пункт «Хостеры» → «Пробный заказ» (несколько центов)\n'
       pause
       return
     done
@@ -223,7 +257,7 @@ screen_migrate() {
   fi
   cli migrate-status
   printf '\n%sЧто будет:%s\n' "$B" "$R"
-  printf '  1. Заказ нового сервера у Zomro по выбранному тарифу и ожидание сборки — у Zomro это бывает долго.\n'
+  printf '  1. Заказ нового сервера у основного хостера и ожидание сборки; не собрался — заказ у запасного.\n'
   printf '  2. Подготовка нового сервера из последнего бэкапа: AmneziaWG с прежними ключами.\n'
   printf '  3. Заморозка старого (бот, оплаты и сайт — на паузе, VPN работает) и финальный бэкап.\n'
   printf '  4. Перенос портала, бота и имён DuckDNS на новый сервер. Ключи у семьи не меняются.\n'
@@ -279,6 +313,128 @@ screen_period() {
   pause
 }
 
+# Фоновая команда диспетчера с логом в томе данных; ход — из лога (Ctrl+C — назад)
+background() {
+  local log=$1
+  shift
+  compose exec -d dispatcher sh -c "node src/cli.js $* > /data/$log 2>&1" \
+    || { printf '%sНе запустилось%s\n' "$RD" "$R"; return 1; }
+  sleep 3
+  printf '\n%sИдёт в фоне (Ctrl+C — назад в меню, работа продолжится):%s\n\n' "$C" "$R"
+  trap ':' INT
+  compose exec -T dispatcher tail -n 40 -F "/data/$log"
+  trap - INT
+}
+
+screen_providers() {
+  while true; do
+    header 'Хостеры'
+    local name title on pos
+    printf 'Переезд заказывает сервер у первого; не собрался — у следующего.\n\n'
+    while IFS=$'\t' read -r name title on pos; do
+      if [ "$on" = 1 ]; then
+        printf '  %s — %s%s%s\n' "$title" "$G" "$([ "$pos" = 1 ] && echo 'основной' || echo "запасной ($pos)")" "$R"
+      else
+        printf '  %s — %sне настроен%s\n' "$title" "$Y" "$R"
+      fi
+    done < <(cli providers)
+    printf '\n  %s1%s — сделать основным другого хостера\n' "$B" "$R"
+    printf '  %s2%s — ключ API Aeza\n' "$B" "$R"
+    printf '  %s3%s — разведка Aeza (только чтение)\n' "$B" "$R"
+    printf '  %s4%s — пробный заказ у хостера (несколько центов)\n' "$B" "$R"
+    printf '  %s0%s — назад\n' "$B" "$R"
+    case "$(ask)" in
+      1)
+        local order
+        order=$(providers | cut -f1 | paste -sd, -)
+        if [[ "$order" != *,* ]]; then printf '%sНастроен один хостер — менять нечего%s\n' "$Y" "$R"; pause; continue; fi
+        # первый — в конец: zomro,aeza → aeza,zomro
+        set_env CLOUD_ORDER "${order#*,},${order%%,*}"
+        compose up -d >/dev/null 2>&1
+        printf '%s✓ Очередь хостеров: %s%s\n' "$G" "$(setting CLOUD_ORDER)" "$R"
+        pause
+        ;;
+      2)
+        printf '\nКлюч — в личном кабинете Aeza, раздел «API». На экране он не появится.\n'
+        printf '%sКлюч API Aeza (пусто — отмена):%s ' "$C" "$R"
+        local key
+        read -rs key || key=''
+        printf '\n'
+        if [ -z "$key" ]; then continue; fi
+        if ! [[ "$key" =~ ^[A-Za-z0-9._:-]{16,200}$ ]]; then printf '%sНе похоже на ключ API%s\n' "$RD" "$R"; pause; continue; fi
+        set_env AEZA_API_KEY "$key"
+        unset key
+        [ -n "$(setting CLOUD_ORDER)" ] || set_env CLOUD_ORDER 'zomro,aeza'
+        compose up -d >/dev/null 2>&1
+        printf '%s✓ Ключ сохранён.%s Проверка — пункт 3, затем выберите тариф Aeza в «Изменить тариф»\n' "$G" "$R"
+        pause
+        ;;
+      3)
+        header 'Разведка Aeza'
+        cli aeza-probe
+        pause
+        ;;
+      4)
+        local p
+        p=$(choose_provider) || continue
+        printf '\nЗаказать сервер по выбранному тарифу, проверить вход и сразу удалить? 1 — да, 0 — нет\n'
+        [ "$(ask)" = 1 ] || continue
+        background cloud-test.log "cloud-test --yes --provider $p"
+        pause
+        ;;
+      0) return ;;
+      *) ;;
+    esac
+  done
+}
+
+# Удаление серверов: выбрать — служба удалит, как только хостер позволит (пока сервер собирается,
+# нельзя), и следит за состоянием
+screen_delete() {
+  while true; do
+    header 'Удаление серверов'
+    cli delete-queue
+    printf '\n%sЗагружаю серверы…%s\n' "$C" "$R"
+    local rows=() line i=1 p id name ip status ours queued mark
+    while IFS= read -r line; do
+      [ -n "$line" ] || continue
+      rows+=("$line")
+      IFS=$'\t' read -r p id name ip status _ ours queued <<< "$line"
+      mark='  '
+      [ "$ours" = 1 ] && mark='◆ '
+      [ "$queued" = 1 ] && mark='🗑 '
+      printf '  %s%2d%s — %s%-5s %-10s %-28s %-15s %s\n' "$B" "$i" "$R" "$mark" "$p" "$id" "$name" "$ip" "$status"
+      i=$((i + 1))
+    done < <(cli servers --tsv)
+    printf '\n  ◆ — создан диспетчером, 🗑 — в очереди на удаление\n'
+    printf '  %s 0%s — назад (Enter — обновить)\n' "$B" "$R"
+    local n
+    printf '\n%sСервер (номер):%s ' "$C" "$R"
+    read -r n || return
+    [ -z "$n" ] && continue
+    [ "$n" = 0 ] && return
+    [[ "$n" =~ ^[0-9]+$ ]] && [ "$n" -ge 1 ] && [ "$n" -le "${#rows[@]}" ] || continue
+    IFS=$'\t' read -r p id name ip status _ ours queued <<< "${rows[$((n - 1))]}"
+    if [ "$queued" = 1 ]; then
+      printf '\n%s (%s) уже в очереди. 1 — убрать из очереди, 0 — назад\n' "$name" "$id"
+      [ "$(ask)" = 1 ] && cli delete-queue drop "$p" "$id"
+      pause
+      continue
+    fi
+    local extra=''
+    printf '\nУдалить %s%s%s (%s, %s, %s)? Пока сервер собирается, хостер удалить не даст — служба дождётся и удалит.\n' "$B" "$name" "$R" "$p" "$id" "$status"
+    if [ "$ours" != 1 ]; then
+      printf '%s⚠ Сервер создан не диспетчером. Если на нём работает что-то нужное — оно пропадёт.%s\n' "$Y" "$R"
+      extra='--foreign'
+    fi
+    printf '  %s1%s — поставить в очередь на удаление\n  %s0%s — назад\n' "$B" "$R" "$B" "$R"
+    [ "$(ask)" = 1 ] || continue
+    # shellcheck disable=SC2086 # extra — пусто или один флаг
+    cli delete-queue add "$p" "$id" $extra
+    pause
+  done
+}
+
 main_menu() {
   while true; do
     header 'главное меню'
@@ -291,6 +447,8 @@ main_menu() {
     printf '  %s7%s — Переезд сейчас\n' "$B" "$R"
     printf '  %s8%s — Изменить время переезда\n' "$B" "$R"
     printf '  %s9%s — Изменить период переезда\n' "$B" "$R"
+    printf '  %s10%s — Хостеры (Zomro, Aeza)\n' "$B" "$R"
+    printf '  %s11%s — Удаление серверов\n' "$B" "$R"
     printf '  %s0%s — Выход\n' "$B" "$R"
     case "$(ask)" in
       1) screen_status ;;
@@ -302,6 +460,8 @@ main_menu() {
       7) screen_migrate ;;
       8) screen_time ;;
       9) screen_period ;;
+      10) screen_providers ;;
+      11) screen_delete ;;
       0) clear 2>/dev/null || true; exit 0 ;;
       *) ;;
     esac
