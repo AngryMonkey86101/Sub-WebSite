@@ -203,6 +203,32 @@ function createBackups({ config, keys, state, notify, isServerUp = () => true, r
 
   const remoteStatus = async () => (await remote('status')).toString().trim();
 
+  // Старый портал на сервере не знает новых команд — первое обновление делается вручную
+  const OLD_PORTAL = 'портал на сервере старый и сам обновляться не умеет. Один раз обновите его вручную (INSTRUCTIONS.md, «Обновить портал вручную»), дальше — из меню диспетчера';
+  const tooOld = (err) => /Команда не разрешена/.test(err.message);
+
+  // Версия портала на сервере: коммит из GitHub
+  async function portalVersion() {
+    try {
+      return (await remote('version', 60000)).toString().trim().slice(0, 200);
+    } catch (err) {
+      if (tooOld(err)) throw new Error(OLD_PORTAL);
+      throw err;
+    }
+  }
+
+  // Обновить портал на сервере из GitHub (dispatcher-command.sh update): сборка — минуты.
+  // Не собрался — сервер сам возвращает прежнюю версию; ответ — его последняя строка
+  async function updatePortal() {
+    try {
+      const out = (await remote('update', 20 * 60000)).toString().trim().split('\n').filter(Boolean);
+      return out.at(-1)?.slice(0, 300) ?? '✓ Портал обновлён';
+    } catch (err) {
+      if (tooOld(err)) throw new Error(OLD_PORTAL);
+      throw new Error(err.message.replace(/^ssh: (✗ )?/, ''));
+    }
+  }
+
   // Сообщение админу через бота портала на сервере (из РФ Telegram недоступен; telegram.js)
   async function relay(text) {
     const res = await run('ssh', sshArgs('notify'), { input: Buffer.from(text), timeoutMs: 90000 });
@@ -219,7 +245,7 @@ function createBackups({ config, keys, state, notify, isServerUp = () => true, r
 
   const status = () => ({ ...(state.get('backup') ?? {}), latest: latest() });
 
-  return { pull, tick, latest, status, trustHost, verify, freeze, unfreeze, remoteStatus, relay };
+  return { pull, tick, latest, status, trustHost, verify, freeze, unfreeze, remoteStatus, relay, portalVersion, updatePortal };
 }
 
 export { createBackups, tarNames, tarEntries, sshReason };

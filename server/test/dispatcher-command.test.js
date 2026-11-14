@@ -121,6 +121,87 @@ test('dispatcher-command.sh: notify — сообщение админу чере
   assert.equal(res.stdout.toString(), `RELAY[run]:${'x'.repeat(4096)}`, 'длинное обрезается до 4 КБ');
 });
 
+// Обновление: вместо git — заглушка, «скачивает» каталог $SRC (код проекта) в ~/sub-website;
+// вместо docker — сборка падает, если стоит BROKEN и в каталоге портала новая версия
+function setupUpdate(name) {
+  const t = setup(name);
+  const bin = join(t.root, 'bin');
+  const src = join(t.root, 'src');
+  mkdirSync(join(src, 'server', 'scripts'), { recursive: true });
+  writeFileSync(join(src, 'server', 'docker-compose.yml'), 'services: {}\n');
+  writeFileSync(join(src, 'server', 'marker'), 'new\n');
+  copyFileSync(SCRIPT, join(src, 'server', 'scripts', 'dispatcher-command.sh'));
+  writeFileSync(join(t.app, 'marker'), 'old\n');
+  writeFileSync(join(bin, 'git'), `#!/usr/bin/env bash
+echo "git $*" >> "$CALLS"
+if [ "$1" = clone ]; then repo=\${@: -1}; mkdir -p "$repo/.git"; cp -r "$SRC/." "$repo/"; exit 0; fi
+[ "$1" = -C ] || exit 1
+repo=$2; shift 2
+case "$1" in
+  fetch) [ -z "\${NO_NET:-}" ] || { echo "fatal: unable to access" >&2; exit 128; } ;;
+  checkout) cp -r "$SRC/." "$repo/" ;;
+  log) echo "\${VERSION:-abc1234 Портал: новая версия}" ;;
+esac
+`);
+  chmodSync(join(bin, 'git'), 0o755);
+  writeFileSync(join(bin, 'docker'), `#!/usr/bin/env bash
+echo "$*" >> "$CALLS"
+case "$*" in
+  "compose --ansi never up -d --build --remove-orphans") [ -n "\${BROKEN:-}" ] && grep -q new marker && { echo "Error: build failed" >&2; exit 1; }; exit 0 ;;
+  "compose --ansi never exec -T portal node -e"*) exit 0 ;;
+esac
+`);
+  chmodSync(join(bin, 'docker'), 0o755);
+  const run = (command, env = {}) => {
+    const res = spawnSync('bash', [join(t.app, 'scripts', 'dispatcher-command.sh')], {
+      env: { PATH: `${bin}:${process.env.PATH}`, CALLS: join(t.root, 'calls.log'), SRC: src, SSH_ORIGINAL_COMMAND: command, ...env }
+    });
+    return { status: res.status, stdout: res.stdout.toString(), stderr: res.stderr.toString() };
+  };
+  return { ...t, run, marker: () => readFileSync(join(t.app, 'marker'), 'utf8').trim() };
+}
+
+test('dispatcher-command.sh: update — код из GitHub, сборка, проверка; повтор — уже последняя', () => {
+  const t = setupUpdate('update');
+  assert.match(t.run('version').stdout, /неизвестна/);
+  const env = readFileSync(join(t.app, '.env'), 'utf8');
+  let res = t.run('update');
+  assert.equal(res.status, 0, res.stderr);
+  assert.match(res.stdout, /✓ Портал обновлён: неизвестна .* → abc1234 Портал: новая версия/);
+  assert.equal(t.marker(), 'new', 'файлы портала — новые');
+  assert.equal(readFileSync(join(t.app, '.env'), 'utf8'), env, '.env не тронут');
+  assert.equal(t.run('version').stdout.trim(), 'abc1234 Портал: новая версия');
+  assert.ok(t.log().some((l) => l.startsWith('git clone -q --depth 1 --branch main https://github.com/AngryMonkey86101/Sub-WebSite.git')), t.log().join('\n'));
+  assert.ok(t.log().includes('compose --ansi never up -d --build --remove-orphans'));
+  res = t.run('update');
+  assert.equal(res.status, 0, res.stderr);
+  assert.match(res.stdout, /✓ Уже последняя версия: abc1234/);
+});
+
+test('dispatcher-command.sh: update — новая версия не собралась — прежняя вернулась; заморожен, нет сети, чужой REPO_URL — отказ', () => {
+  const t = setupUpdate('update-fail');
+  let res = t.run('update', { BROKEN: '1' });
+  assert.equal(res.status, 1);
+  assert.match(res.stderr, /Новая версия \(abc1234 Портал: новая версия\) не запустилась — вернул прежнюю \(неизвестна[^)]*\)\)?\. Причина: Error: build failed/);
+  assert.equal(t.marker(), 'old', 'файлы портала — прежние');
+  assert.match(t.run('version').stdout, /неизвестна/, 'версия не записана');
+
+  res = t.run('update', { NO_NET: '1' });
+  assert.equal(res.status, 1);
+  assert.match(res.stderr, /Код из GitHub не скачался: fatal: unable to access/);
+
+  writeFileSync(join(t.app, '.frozen'), '');
+  res = t.run('update');
+  assert.equal(res.status, 1);
+  assert.match(res.stderr, /Портал заморожен/);
+  rmSync(join(t.app, '.frozen'));
+
+  writeFileSync(join(t.app, '.env'), 'REPO_URL=http://evil.example/x.git\n', { flag: 'a' });
+  res = t.run('update');
+  assert.equal(res.status, 1);
+  assert.match(res.stderr, /REPO_URL в \.env — не адрес https/);
+});
+
 test('dispatcher-command.sh: shellcheck без замечаний', { skip: spawnSync('shellcheck', ['--version']).status !== 0 && 'нет shellcheck' }, () => {
   const res = spawnSync('shellcheck', [SCRIPT]);
   assert.equal(res.status, 0, res.stdout.toString());

@@ -596,6 +596,19 @@ screen_emergency() {
   done
 }
 
+# Обновление портала на сервере VPN из GitHub — по ключу диспетчера (dispatcher-command.sh update)
+screen_portal_update() {
+  header 'Обновить портал на сервере VPN'
+  printf 'Код — из GitHub, ветка main. Сайт и бот перезапустятся (минута-две), VPN не прерывается.\n'
+  printf 'Не собрался или не отвечает — сервер сам вернёт прежнюю версию.\n\n'
+  cli portal-version || { pause; return; }
+  if migration_running; then printf '\n%sИдёт переезд — обновить можно после него%s\n' "$Y" "$R"; pause; return; fi
+  printf '\n  %s1%s — обновить сейчас\n  %s0%s — назад\n' "$B" "$R" "$B" "$R"
+  [ "$(ask)" = 1 ] || return
+  background portal-update.log "portal-update --yes"
+  pause
+}
+
 main_menu() {
   while true; do
     header 'главное меню'
@@ -612,6 +625,7 @@ main_menu() {
     printf '  %s11%s — Удаление серверов\n' "$B" "$R"
     printf '  %s12%s — Плановая смена: включить или выключить\n' "$B" "$R"
     printf '  %s13%s — Аварийный переезд: включить, выключить, через сколько минут\n' "$B" "$R"
+    printf '  %s14%s — Обновить портал на сервере VPN\n' "$B" "$R"
     printf '  %s0%s — Выход\n' "$B" "$R"
     case "$(ask)" in
       1) screen_status ;;
@@ -627,6 +641,7 @@ main_menu() {
       11) screen_delete ;;
       12) screen_rotation ;;
       13) screen_emergency ;;
+      14) screen_portal_update ;;
       0) clear 2>/dev/null || true; exit 0 ;;
       *) ;;
     esac

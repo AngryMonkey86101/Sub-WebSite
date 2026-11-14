@@ -14,6 +14,9 @@ const HELP = `Команды:
   backup      забрать бэкап сейчас
   trust-host  забыть ключ SSH сервера — после переезда на новый сервер
   server      состояние портала на сервере: active или frozen
+  portal-version  какая версия портала стоит на сервере (коммит из GitHub)
+  portal-update --yes  обновить портал на сервере из GitHub (ветка main): сборка — минуты; не
+              собрался — сервер вернёт прежнюю версию. Во время переезда нельзя
   freeze --yes  заморозить портал на сервере (плановая смена): бот, оплаты и сайт остановятся,
               VPN работает; финальный бэкап и сертификаты — в томе диспетчера
   unfreeze    разморозить: портал, бот и сайт на сервере снова работают
@@ -174,6 +177,28 @@ async function main(argv, { env = process.env, out = console.log, deps = {} } = 
     case 'server': {
       out(`Портал на ${config.portalHost}: ${await d.backups.remoteStatus()}`);
       return 0;
+    }
+    case 'portal-version': {
+      out(`Версия портала на ${config.portalHost}: ${await d.backups.portalVersion()}`);
+      return 0;
+    }
+    case 'portal-update': {
+      if (!argv.includes('--yes')) {
+        out('Обновить портал на сервере VPN из GitHub (ветка main): скачать код, собрать и запустить. VPN не прерывается, сайт и бот — на минуту-две. Не собрался — вернётся прежняя версия. Если уверены: portal-update --yes');
+        return 2;
+      }
+      if (d.emergency.migrating()) throw new Error('Идёт переезд — обновить портал можно после него');
+      out(`Обновляю портал на ${config.portalHost} (до нескольких минут)…`);
+      try {
+        const result = await d.backups.updatePortal();
+        out(result);
+        await d.notify(/Уже последняя/.test(result) ? `ℹ️ Портал на сервере: ${result.replace(/^✓ /, '')}` : `⬆️ ${result.replace(/^✓ /, '')}`);
+        return 0;
+      } catch (err) {
+        out(`✗ ${err.message}`);
+        await d.notify(`⚠️ Обновление портала не удалось: ${err.message}`);
+        return 1;
+      }
     }
     case 'freeze': {
       if (!argv.includes('--yes')) {
