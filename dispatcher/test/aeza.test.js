@@ -18,7 +18,8 @@ before(() => {
 });
 after(() => rmSync(dir, { recursive: true, force: true }));
 
-function fakeAeza({ activateAfter = 2, balance = 12.5 } = {}) {
+// цены и баланс — в центах, как у живого API
+function fakeAeza({ activateAfter = 2, balance = 1250 } = {}) {
   const services = [
     { id: 501, name: 'old-vpn', ip: '77.1.2.3', status: 'active', productId: 30, productName: 'SWE-PROMO', locationCode: 'se', price: 4.94, paymentTerm: 'month', currentTask: null }
   ];
@@ -46,8 +47,8 @@ function fakeAeza({ activateAfter = 2, balance = 12.5 } = {}) {
       assert.equal(u.searchParams.get('type'), 'vps');
       return reply(200, {
         items: [
-          { id: 41, name: 'DEs-1', group: { id: 7, name: 'Германия' }, isAvailable: true, prices: { base: { hour: 0.012, month: 6 } }, rawPrices: { hour: 0.012, month: 6 }, tags: [] },
-          { id: 42, name: 'NLs-1', group: { id: 8, name: 'Нидерланды' }, isAvailable: false, prices: { base: { day: 0.25 } }, tags: ['soldout'] }
+          { id: 41, name: 'DEs-1', group: { id: 7, name: 'Германия' }, isAvailable: true, prices: { base: { hour: 1.2, month: 600 } }, rawPrices: { hour: 1.2, month: 600 }, tags: [] },
+          { id: 42, name: 'NLs-1', group: { id: 8, name: 'Нидерланды' }, isAvailable: false, prices: { base: { day: 25 } }, tags: ['soldout'] }
         ],
         total: 2
       });
@@ -94,9 +95,10 @@ test('Aeza: настройки — ключ, тариф, срок; порядо�
 });
 
 test('Aeza: цены по срокам и за день', () => {
-  assert.deepEqual(termPrices({ prices: { base: { hour: 0.01 } } }), { hour: 0.01 });
-  assert.deepEqual(termPrices({ prices: { month: 5 } }), { month: 5 });
-  assert.deepEqual(termPrices({ prices: {}, rawPrices: { day: 0.2 } }), { day: 0.2 });
+  // в API — центы (живой ответ: month 450 — 4,50 EUR)
+  assert.deepEqual(termPrices({ prices: { base: { year: 4752, month: 450, half_year: 2457, quarter_year: 1283 }, first: {} } }), { year: 47.52, month: 4.5, half_year: 24.57, quarter_year: 12.83 });
+  assert.deepEqual(termPrices({ prices: { base: { hour: 1 } } }), { hour: 0.01 });
+  assert.deepEqual(termPrices({ prices: {}, rawPrices: { day: 20 } }), { day: 0.2 });
   assert.equal(perDayOf({ hour: 0.012 }), 0.288);
   assert.equal(perDayOf({ day: 0.25, hour: 1 }), 0.25);
   assert.equal(perDayOf({ month: 6 }), 0.2);
@@ -113,9 +115,13 @@ test('Aeza: список, баланс, тарифы, заказ почасов�
 
   const tariffs = await aeza.tariffs();
   assert.deepEqual(tariffs.map((t) => [t.pricelist, t.datacenterName, t.perDay, t.available, t.price]), [
-    ['41', 'Германия', 0.288, true, '0.012 EUR за час'],
-    ['42', 'Нидерланды', 0.25, false, '0.25 EUR за день']
+    ['41', 'Германия · DEs-1…', 0.288, true, '0.012 EUR за час'],
+    ['42', 'Нидерланды · NLs-1…', 0.25, false, '0.25 EUR за день']
   ]);
+  assert.deepEqual(tariffs[1].labels, ['soldout', 'нет оплаты за час'], 'без почасовой оплаты — недоступен для смены');
+  // тариф без почасовой оплаты при выборе — отказ с объяснением (живые тарифы Custom: только month и дольше)
+  await assert.rejects(aeza.pickOs({ pricelist: '42' }), /нельзя оплатить за час — только день[\s\S]*нужен тариф с почасовой оплатой/);
+  await assert.rejects(aeza.pickOs({ pricelist: '999' }), /нет тарифа 999/);
   assert.deepEqual(await aeza.pickOs(), { id: 'ubuntu_2404', name: 'Ubuntu 24.04', numericId: 1240 });
 
   const ordered = await aeza.order();

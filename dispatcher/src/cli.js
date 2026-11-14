@@ -65,21 +65,40 @@ async function aezaProbe(aeza, out) {
   });
   await step('Группы тарифов VPS (GET /services/groups?type=vps)', async () => {
     const data = await aeza.call('GET', '/services/groups', { query: { type: 'vps' } });
-    for (const g of (data?.items ?? []).slice(0, 20)) out(`  ${g.id} ${g.name} handler=${g.type?.serviceHandler ?? '?'} params=${JSON.stringify(g.type?.parameters ?? [])}`);
+    const groups = data?.items ?? [];
+    out(`  ${groups.map((g) => `${g.id} ${g.name}`).join(', ')}`);
+    if (groups[0]) out(`  обработчик ${groups[0].type?.serviceHandler ?? '?'}, параметры заказа: ${(groups[0].type?.parameters ?? []).map((x) => `${x.field}:${x.type}`).join(', ')}`);
   });
-  await step('Тарифы VPS (GET /services/products?type=vps) — первые три как есть', async () => {
+  await step('Тарифы VPS (GET /services/products?type=vps) — с почасовой оплатой, как есть', async () => {
     const data = await aeza.call('GET', '/services/products', { query: { type: 'vps' } });
     out(`  всего ${data?.items?.length ?? 0}`);
-    for (const p of (data?.items ?? []).slice(0, 3)) out(`  ${short({ id: p.id, name: p.name, group: p.group, prices: p.prices, rawPrices: p.rawPrices, firstPrices: p.firstPrices, parameters: p.parameters, payload: p.payload, isAvailable: p.isAvailable })}`);
+    const hourly = (data?.items ?? []).filter((p) => JSON.stringify(p.rawPrices ?? p.prices ?? {}).includes('"hour"'));
+    out(`  с ценой за час: ${hourly.length}`);
+    for (const p of (hourly.length ? hourly : data?.items ?? []).slice(0, 2)) out(`  ${short({ id: p.id, name: p.name, group: p.group, prices: p.prices, rawPrices: p.rawPrices, firstPrices: p.firstPrices, parameters: p.parameters, payload: p.payload, isAvailable: p.isAvailable })}`);
   });
-  await step('Тарифы — как их видит диспетчер (самые дешёвые)', async () => {
-    for (const t of (await aeza.tariffs()).sort((a, b) => (a.perDay ?? 1e9) - (b.perDay ?? 1e9)).slice(0, 10)) out(`  ${t.pricelist} ${t.name} — ${t.datacenterName}: ${t.price} (≈${t.perDay}/день), сроки: ${t.terms.join(',')}${t.available ? '' : ', нет в наличии'}`);
+  await step('Тарифы с почасовой или посуточной оплатой — самые дешёвые (цены из центов в EUR)', async () => {
+    const list = (await aeza.tariffs()).filter((t) => t.terms.some((x) => ['hour', 'half_day', 'day', 'week'].includes(x)));
+    out(`  таких тарифов: ${list.length}`);
+    for (const t of list.sort((a, b) => (a.perDay ?? 1e9) - (b.perDay ?? 1e9)).slice(0, 15)) out(`  ${t.pricelist} ${t.name} — ${t.datacenterName}: ${t.price} (≈${t.perDay} EUR/день), сроки: ${t.terms.join(',')}${t.available ? '' : ', недоступен'}`);
+    // цена заказа на час у трёх самых дешёвых — только расчёт, без заказа
+    for (const t of list.filter((x) => x.terms.includes('hour')).slice(0, 3)) {
+      try {
+        out(`    расчёт заказа ${t.pricelist} на час (GET /services/orders/price): ${short(await aeza.call('GET', '/services/orders/price', { query: { productId: t.pricelist, paymentTerm: 'hour' } }))}`);
+      } catch (err) {
+        out(`    расчёт ${t.pricelist}: ✗ ${err.message}`);
+      }
+    }
   });
-  await step('Образы ОС (GET /services/operating-systems)', async () => {
-    const data = await aeza.call('GET', '/services/operating-systems', { query: { limit: 200 } });
-    const list = data?.items ?? data?.data?.items ?? [];
-    out(`  всего ${list.length}; первый как есть: ${short(list[0] ?? null)}`);
-    for (const o of list.filter((x) => /ubuntu/i.test(JSON.stringify(x))).slice(0, 8)) out(`  ${o.id} ${o.slug ?? ''} ${o.name ?? ''}`);
+  await step('Все тарифы — самые дешёвые за месяц', async () => {
+    for (const t of (await aeza.tariffs()).sort((a, b) => (a.perDay ?? 1e9) - (b.perDay ?? 1e9)).slice(0, 8)) out(`  ${t.pricelist} ${t.name} — ${t.datacenterName}: ${t.price}, сроки: ${t.terms.join(',')}`);
+  });
+  await step('Образы ОС — сырой ответ (GET /services/operating-systems)', async () => {
+    out(`  без параметров: ${short(await aeza.call('GET', '/services/operating-systems'))}`);
+    out(`  recipes: ${short(await aeza.call('GET', '/services/operating-systems/recipes'))}`);
+  });
+  await step('Почасовые группы (GET /services/groups) — все типы', async () => {
+    const data = await aeza.call('GET', '/services/groups');
+    for (const g of (data?.items ?? []).filter((x) => /hour|час|vps|vds/i.test(JSON.stringify([x.name, x.type?.slug, x.payload, x.description]))).slice(0, 25)) out(`  ${g.id} ${g.name} type=${g.type?.slug ?? '?'} ${(g.description ?? '').slice(0, 60)}`);
   });
   await step('Лимиты (GET /services/limits)', async () => out(`  ${short(await aeza.call('GET', '/services/limits'))}`));
   out('\nГотово. Пришлите этот вывод в чат: ключа, почты и полных IP в нём нет.');
