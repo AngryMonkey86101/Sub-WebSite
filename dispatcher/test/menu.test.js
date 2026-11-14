@@ -63,6 +63,8 @@ case "$*" in
   *" src/cli.js delete-queue add "*) echo "✓ в очереди: $*" ;;
   *" src/cli.js aeza-probe") echo "— Баланс (GET /accounts/me)" ;;
   *" src/cli.js tariffs --tsv --provider zomro") printf '17${T}Netherlands-3 [Cloud]${T}7920${T}Blitz Intel| NL-3${T}0.31${T}0.31 EUR за день${T}1${T}0\\n17${T}Netherlands-3 [Cloud]${T}7864${T}Starter AMD| NL-3 v.3${T}0.36${T}0.36 EUR за день${T}1${T}1\\n19${T}Germany-1 [Cloud]${T}8235${T}Starter AMD| DE-1 v.3${T}0.29${T}0.29 EUR за день${T}1${T}0\\n19${T}Germany-1 [Cloud]${T}8151${T}Essential Intel| DE-1 v.2${T}0.33${T}0.33 EUR за день${T}0${T}0\\n' ;;
+  *" src/cli.js available 19 --tsv --provider zomro") printf '19${T}Germany-1 [Cloud]${T}8151${T}Essential Intel| DE-1 v.2${T}0.33${T}0.33 EUR за день${T}0${T}0${T}-${T}распродан\\n19${T}Germany-1 [Cloud]${T}8300${T}Blitz Intel| DE-1${T}0.25${T}0.25 EUR за день${T}0${T}0${T}-${T}нет образов ОС — нет свободных мест?\\n19${T}Germany-1 [Cloud]${T}8235${T}Starter AMD| DE-1 v.3${T}0.29${T}0.29 EUR за день${T}1${T}0${T}11111111-2222-4333-8444-555555555555${T}Ubuntu 24.04 x64\\n' ;;
+  *" src/cli.js available --provider "*) echo "Можно заказать ($*)" ;;
   *" src/cli.js tariff-check 8235 19 --provider zomro") printf 'ok${T}11111111-2222-4333-8444-555555555555${T}Ubuntu 24.04 x64\\n' ;;
   *" src/cli.js tariff --provider "*) echo "Тариф: из .env ($*)" ;;
   *" src/cli.js tariffs --provider "*) echo "Тарифы ($*)" ;;
@@ -91,11 +93,14 @@ test('menu.sh: главное меню, экраны и возврат по Ente
 
 test('menu.sh: смена тарифа — дата-центр, тариф по цене, проверка образа ОС, запись в .env', () => {
   const t = setup('change');
-  // 6 → Германия (2) → самый дешёвый (1) → сохранить (1) → Enter → выход
-  const res = t.run('6\n2\n1\n1\n\n0\n');
+  // 6 → Германия (2) → тариф без свободных мест (2): нельзя → Enter → доступный (1) → сохранить (1) → Enter → выход
+  const res = t.run('6\n2\n2\n\n1\n1\n\n0\n');
   assert.equal(res.status, 0, res.err);
   assert.match(res.out, /1 — Netherlands-3 \[Cloud\] \(17\)\n {2}2 — Germany-1 \[Cloud\] \(19\)/);
-  assert.match(res.out, /1 — Starter AMD\| DE-1 v\.3 +0\.29 EUR за день[\s\S]*2 — Essential Intel\| DE-1 v\.2 +0\.33 EUR за день +нет в наличии/);
+  // сначала те, что можно заказать, потом остальные — по цене, с причиной
+  assert.match(res.out, /1 — Starter AMD\| DE-1 v\.3 +0\.29 EUR за день +✓ можно заказать\n {2} 2 — Blitz Intel\| DE-1 +0\.25 EUR за день +✗ нет образов ОС — нет свободных мест\?\n {2} 3 — Essential Intel\| DE-1 v\.2 +0\.33 EUR за день +✗ распродан/);
+  assert.match(res.out, /Выбрано: Blitz Intel\| DE-1[^\n]*\nНельзя: нет образов ОС — нет свободных мест\?/);
+  assert.ok(!res.calls.some((c) => /tariff-check/.test(c)), 'образ уже известен из проверки — отдельная проверка не нужна');
   assert.match(res.out, /Образ ОС: Ubuntu 24\.04 x64[\s\S]*✓ Тариф сменён/);
   const env = t.env();
   assert.match(env, /^ZOMRO_DATACENTER=19$/m);
@@ -109,7 +114,7 @@ test('menu.sh: смена тарифа — дата-центр, тариф по 
   const before = t.env();
   const back = t.run('6\n1\n0\n0\n0\n');
   assert.equal(back.status, 0, back.err);
-  assert.match(back.out, /Starter AMD\| NL-3 v\.3 +0\.36 EUR за день +◀ выбран сейчас/);
+  assert.match(back.out, /Проверка не удалась — показываю тарифы без неё[\s\S]*Starter AMD\| NL-3 v\.3 +0\.36 EUR за день +◀ выбран сейчас/);
   assert.equal(t.env(), before);
 });
 
@@ -181,8 +186,11 @@ test('menu.sh: хостеры — очередь, ключ Aeza, разведк�
   res = t.run('10\n3\n\n0\n0\n', both);
   assert.match(res.out, /Баланс \(GET \/accounts\/me\)/);
   // цены — по каждому хостеру; смена тарифа сначала спрашивает хостера
-  res = t.run('4\n\n6\n0\n0\n', both);
+  res = t.run('4\n0\n6\n0\n0\n', both);
   assert.match(res.out, /Тарифы \(.*tariffs --provider zomro\)[\s\S]*Тарифы \(.*tariffs --provider aeza\)/);
+  assert.ok(!res.calls.some((c) => / available /.test(c)), 'проверка наличия — только по просьбе');
+  const avail = t.run('4\n1\n\n0\n', both);
+  assert.match(avail.out, /Можно заказать \(.*available --provider zomro\)[\s\S]*Можно заказать \(.*available --provider aeza\)/);
   assert.match(res.err, /Хостер:\n {2}1 — Zomro \(основной\)\n {2}2 — Aeza \(запасной\)/, 'вопрос — в stderr, как и прочие вопросы меню');
 });
 

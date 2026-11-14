@@ -146,6 +146,13 @@ screen_prices() {
     cli tariffs --provider "$name"
     printf '\n'
   done < <(providers)
+  printf '«Нет в наличии» — по пометке хостера. Заказать можно не всё, что есть в наличии:\n'
+  printf '  %s1%s — проверить, какие тарифы можно заказать прямо сейчас (до минуты)\n  %s0%s — назад\n' "$B" "$R" "$B" "$R"
+  [ "$(ask)" = 1 ] || return
+  while IFS=$'\t' read -r name title; do
+    printf '\n%sПроверяю %s…%s\n' "$C" "$title" "$R"
+    cli available --provider "$name"
+  done < <(providers)
   pause
 }
 
@@ -182,37 +189,63 @@ screen_change() {
     [ "$n" = 0 ] && return
     if [ "$n" -lt 1 ] || [ "$n" -gt "${#centers[@]}" ]; then continue; fi
     local dc=${centers[$((n - 1))]} dcname=${names[$((n - 1))]}
+    # какие тарифы дата-центра можно заказать прямо сейчас: форма заказа у каждого (только чтение)
+    printf '\nПроверяю у хостера, какие тарифы %s можно заказать прямо сейчас (до минуты)…\n' "$dcname"
+    local avail
+    avail=$(cli available "$dc" --tsv --provider "$provider" 2>/dev/null) || avail=''
+    [ -n "$avail" ] || printf '%sПроверка не удалась — показываю тарифы без неё%s\n' "$Y" "$R"
 
     while true; do
       header "Изменить тариф — $dcname"
-      local ids=() titles=() prices=() pl title price available chosen
+      local ids=() titles=() prices=() cans=() oses=() infos=() pl title price chosen can osid info rows
       i=1
-      while IFS=$'\t' read -r _ _ pl title _ price available chosen; do
-        ids+=("$pl"); titles+=("$title"); prices+=("$price")
+      if [ -n "$avail" ]; then
+        rows=$(printf '%s\n' "$avail" | sort -t$'\t' -k7,7r -k5,5g)
+      else
+        # без проверки: поля как у available — «можно» = есть в наличии, образ проверит tariff-check
+        rows=$(printf '%s\n' "$tsv" | awk -F'\t' -v dc="$dc" 'BEGIN { OFS = "\t" } $1 == dc { print $1, $2, $3, $4, $5, $6, $7, $8, "?", ($7 == 1 ? "-" : "нет в наличии") }' | sort -t$'\t' -k5,5g)
+      fi
+      while IFS=$'\t' read -r _ _ pl title _ price can chosen osid info; do
+        [ -n "$pl" ] || continue
+        ids+=("$pl"); titles+=("$title"); prices+=("$price"); cans+=("$can"); oses+=("$osid"); infos+=("$info")
         local note=''
         [ "$chosen" = 1 ] && note=" ${G}◀ выбран сейчас${R}"
-        [ "$available" = 1 ] || note="$note ${RD}нет в наличии${R}"
+        if [ "$can" = 1 ]; then
+          [ "$osid" = '?' ] || note="$note ${G}✓ можно заказать${R}"
+        else
+          note="$note ${RD}✗ $info${R}"
+        fi
         printf '  %s%2d%s — %-28s %-18s%s\n' "$B" "$i" "$R" "$title" "$price" "$note"
         i=$((i + 1))
-      done < <(printf '%s\n' "$tsv" | awk -F'\t' -v dc="$dc" '$1 == dc' | sort -t$'\t' -k5,5g)
+      done <<< "$rows"
       printf '  %s 0%s — назад к дата-центрам\n' "$B" "$R"
       local t
       t=$(ask 'Тариф:')
       [ "$t" = 0 ] && break
       if [ "$t" -lt 1 ] || [ "$t" -gt "${#ids[@]}" ]; then continue; fi
-      local new=${ids[$((t - 1))]}
+      local k=$((t - 1))
+      local new=${ids[$k]}
 
-      printf '\nВыбрано: %s%s%s, %s — %s\n' "$B" "${titles[$((t - 1))]}" "$R" "$dcname" "${prices[$((t - 1))]}"
-      printf 'Проверяю у хостера, можно ли заказать и какой образ ОС взять…\n'
-      local check
-      check=$(cli tariff-check "$new" "$dc" --provider "$provider" 2>&1)
-      if [[ "$check" != ok$'\t'* ]]; then
-        printf '%sНельзя: %s%s\n' "$RD" "$check" "$R"
+      printf '\nВыбрано: %s%s%s, %s — %s\n' "$B" "${titles[$k]}" "$R" "$dcname" "${prices[$k]}"
+      if [ "${cans[$k]}" != 1 ]; then
+        printf '%sНельзя: %s%s\n' "$RD" "${infos[$k]}" "$R"
         pause
         continue
       fi
       local os osname
-      IFS=$'\t' read -r _ os osname <<< "$check"
+      if [ "${oses[$k]}" = '?' ]; then
+        printf 'Проверяю у хостера, можно ли заказать и какой образ ОС взять…\n'
+        local check
+        check=$(cli tariff-check "$new" "$dc" --provider "$provider" 2>&1)
+        if [[ "$check" != ok$'\t'* ]]; then
+          printf '%sНельзя: %s%s\n' "$RD" "$check" "$R"
+          pause
+          continue
+        fi
+        IFS=$'\t' read -r _ os osname <<< "$check"
+      else
+        os=${oses[$k]} osname=${infos[$k]}
+      fi
       printf 'Образ ОС: %s\n' "$osname"
       printf '\n  %s1%s — сохранить и перезапустить диспетчер\n  %s0%s — назад к тарифам\n' "$B" "$R" "$B" "$R"
       [ "$(ask)" = 1 ] || continue

@@ -203,28 +203,66 @@ function createCloud({ settings, fetch = globalThis.fetch, now = () => Date.now(
     return out;
   }
 
-  // Образы ОС для тарифа в дата-центре — из формы заказа (без sok ничего не заказывается).
-  // У каждого дата-центра свои номера образов: при смене тарифа нужен номер из этого списка.
-  async function osImages({ pricelist, datacenter }) {
+  // Форма заказа тарифа в дата-центре (без sok ничего не заказывается): образы ОС и что ещё в ней
+  // есть — для разбора, когда образов нет. У каждого дата-центра свои номера образов: при смене
+  // тарифа нужен номер из этого списка. Образы — списки с «os» или «image» в имени (instances_os);
+  // номер — любой короткий ключ, не только UUID: в других дата-центрах они бывают числами.
+  async function orderForm({ pricelist, datacenter }) {
     const doc = await zomro.call('instances.order.param', { datacenter: String(datacenter), pricelist: String(pricelist), period: '-50' });
     const asList = (x) => (Array.isArray(x) ? x : x === undefined || x === null ? [] : [x]);
-    return asList(doc?.slist)
-      .filter((l) => l?.name === 'instances_os')
-      .flatMap((l) => asList(l.val))
-      .map((v) => ({ id: String(v?.key ?? ''), name: String(v?.value ?? v?.$ ?? '') }))
-      .filter((o) => /^[0-9a-f-]{36}$/.test(o.id));
+    const lists = asList(doc?.slist).map((l) => ({ name: String(l?.name ?? ''), values: asList(l?.val) }));
+    const images = lists
+      .filter((l) => /(^|_)(os|image|images|ostempl|template)s?$/i.test(l.name))
+      .flatMap((l) => l.values)
+      .map((v) => ({ id: String(v?.key ?? ''), name: String(v?.value ?? v?.$ ?? '').trim() }))
+      .filter((o) => /^[\w.:-]{1,64}$/.test(o.id) && !/^(null|none|0|-1)$/i.test(o.id));
+    const text = (x) => (typeof x === 'object' && x !== null ? x.value ?? x.msg ?? '' : x ?? '');
+    const note = ['banner', 'msg', 'message', 'warning', 'info']
+      .map((k) => String(text(doc?.[k])).replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim())
+      .filter(Boolean)
+      .join('; ')
+      .slice(0, 300);
+    return { images, lists: lists.map((l) => `${l.name}(${l.values.length})`), note };
+  }
+
+  async function osImages({ pricelist, datacenter }) {
+    return (await orderForm({ pricelist, datacenter })).images;
   }
 
   // Образ для нового тарифа: прежний, если он там есть; иначе Ubuntu 24.04, затем 22.04
   async function pickOs({ pricelist, datacenter, current = settings.os }) {
-    const images = await osImages({ pricelist, datacenter });
-    if (!images.length) throw new ZomroError(`Zomro не отдала образы ОС для тарифа ${pricelist} в дата-центре ${datacenter} — тариф недоступен для заказа посуточно?`);
+    const form = await orderForm({ pricelist, datacenter });
+    const images = form.images;
+    if (!images.length) {
+      const seen = form.lists.length ? `в форме заказа только ${form.lists.join(', ')}` : 'форма заказа пустая';
+      throw new ZomroError(`Zomro не даёт заказать тариф ${pricelist} в дата-центре ${datacenter}: нет образов ОС (${seen}${form.note ? `; Zomro пишет: ${form.note}` : ''}). Скорее всего, в дата-центре нет свободных мест под этот тариф`);
+    }
     const found = images.find((o) => o.id === current) ?? images.find((o) => /ubuntu.*24\.04/i.test(o.name)) ?? images.find((o) => /ubuntu.*22\.04/i.test(o.name));
-    if (!found) throw new ZomroError(`Для тарифа ${pricelist} нет Ubuntu 24.04 или 22.04 — выберите другой тариф`);
+    if (!found) throw new ZomroError(`Для тарифа ${pricelist} нет Ubuntu 24.04 или 22.04 (есть: ${images.slice(0, 6).map((o) => o.name || o.id).join(', ')}) — выберите другой тариф`);
     return found;
   }
 
-  return { provider: 'zomro', servers, server, balance, order, waitFor, remove, removeWhenReady, tariffs, osImages, pickOs };
+  // Какие тарифы можно заказать прямо сейчас: для каждого — форма заказа (только чтение, по
+  // запросу на тариф). datacenter — только этот дата-центр. Итог: тариф + can, os или reason.
+  async function check({ datacenter = null, list = null } = {}) {
+    const all = list ?? (await tariffs());
+    const out = [];
+    for (const t of all.filter((x) => !datacenter || x.datacenter === String(datacenter))) {
+      if (!t.available) {
+        out.push({ ...t, can: false, reason: 'распродан' });
+        continue;
+      }
+      try {
+        const os = await pickOs({ pricelist: t.pricelist, datacenter: t.datacenter });
+        out.push({ ...t, can: true, os });
+      } catch (err) {
+        out.push({ ...t, can: false, reason: /нет образов ОС/.test(err.message) ? 'нет образов ОС — нет свободных мест?' : err.message });
+      }
+    }
+    return out;
+  }
+
+  return { provider: 'zomro', servers, server, balance, order, waitFor, remove, removeWhenReady, tariffs, osImages, orderForm, pickOs, check };
 }
 
 export { createCloud, newPassword, serverName, shape, notReady, parsePrice, PREFIX };

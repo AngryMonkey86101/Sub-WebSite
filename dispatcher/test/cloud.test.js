@@ -4,6 +4,7 @@ import { createCloud, newPassword, serverName, parsePrice, PREFIX } from '../src
 import { zomroTest } from '../src/zomroTest.js';
 import { loadConfig, ConfigError } from '../src/config.js';
 import { createOrders } from '../src/orders.js';
+import { main } from '../src/cli.js';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -17,7 +18,7 @@ const v = (x) => ({ $: String(x) });
 
 // hidden — заказанные серверы пока не видны в списке (Zomro ещё обрабатывает заказ)
 // busyWhileCreating — как живая Zomro: пока сервер собирается, удаление — «Услуга не активна»
-function fakeZomro({ activateAfter = 2, deleteFails = false, balance = '4.1502 EUR', hidden = false, busyWhileCreating = false } = {}) {
+function fakeZomro({ activateAfter = 2, deleteFails = false, balance = '4.1502 EUR', hidden = false, busyWhileCreating = false, forms = {} } = {}) {
   const flags = { hidden };
   const servers = [
     { id: '7232925', servername: 'proxyizi', ip: '77.1.2.3', instance_status: 'active', pricelist_id: '7864', datacenter: '17', cost: '6.95 EUR / Месяц' },
@@ -55,6 +56,7 @@ function fakeZomro({ activateAfter = 2, deleteFails = false, balance = '4.1502 E
       }
       case 'instances.order.param': {
         // без sok — только форма заказа: образы ОС этого дата-центра
+        if (p.get('sok') !== 'ok' && forms[p.get('pricelist')]) return reply(forms[p.get('pricelist')]);
         if (p.get('sok') !== 'ok') {
           const images = p.get('datacenter') === '19'
             ? [['11111111-2222-4333-8444-555555555555', 'Ubuntu 24.04 x64'], ['66666666-7777-4888-8999-000000000000', 'Debian 12']]
@@ -333,4 +335,53 @@ test('смена тарифа: образ ОС — свой у каждого д
   assert.deepEqual(await cloud.pickOs({ pricelist: '7864', datacenter: '17' }), { id: '2140c514-fa2b-4b38-90e4-f9ff394245d1', name: 'Ubuntu 24.04 x64' });
   assert.deepEqual(await cloud.pickOs({ pricelist: '8235', datacenter: '19' }), { id: '11111111-2222-4333-8444-555555555555', name: 'Ubuntu 24.04 x64' });
   assert.equal(z.orders.length, 0, 'форма заказа без sok — ничего не заказано');
+});
+
+test('какие тарифы можно заказать: форма заказа у каждого; нет образов — нельзя, с объяснением', async () => {
+  const z = fakeZomro({
+    forms: {
+      // в дата-центре нет мест: в форме только период, Zomro пишет почему
+      7920: { slist: [{ $name: 'period', val: [{ $key: '-50', $: 'День' }] }], banner: v('<b>Нет свободных ресурсов</b>') },
+      // номера образов — числа (не UUID): тоже годятся
+      7864: { slist: [{ $name: 'instances_os', val: [{ $key: 'null', $: '— выберите —' }, { $key: '412', $: 'Debian 12' }, { $key: '415', $: 'Ubuntu 22.04' }] }] }
+    }
+  });
+  const cloud = createCloud({ settings: { ...settings, os: '' }, fetch: z.fetch });
+  const list = await cloud.check();
+  assert.deepEqual(list.map((t) => [t.pricelist, t.can, t.can ? t.os.id : t.reason]), [
+    ['7920', false, 'нет образов ОС — нет свободных мест?'],
+    ['7864', true, '415'],
+    ['8235', true, '11111111-2222-4333-8444-555555555555'],
+    ['8100', false, 'распродан']
+  ]);
+  await assert.rejects(cloud.pickOs({ pricelist: '7920', datacenter: '17' }), /не даёт заказать тариф 7920 в дата-центре 17: нет образов ОС \(в форме заказа только period\(1\); Zomro пишет: Нет свободных ресурсов\)/);
+  // только один дата-центр — форма заказа только у его тарифов
+  const before = z.orders.length;
+  assert.deepEqual((await cloud.check({ datacenter: '19' })).map((t) => t.pricelist), ['8235', '8100']);
+  assert.equal(z.orders.length, before, 'ничего не заказано');
+  assert.equal(z.orders.length, 0);
+});
+
+test('available: что можно заказать — по дата-центрам, с причиной; выбранный недоступен — предупреждение', async () => {
+  const z = fakeZomro({ forms: { 7864: { slist: [] } } });
+  const dir = mkdtempSync(join(tmpdir(), 'avail-'));
+  try {
+    const env = { PORTAL_HOST: 'm2pr7x.duckdns.org', DATA_DIR: dir, ZOMRO_USER: USER, ZOMRO_PASSWORD: PASSWORD, ZOMRO_PRICELIST: '7864', ZOMRO_DATACENTER: '17' };
+    const lines = [];
+    assert.equal(await main(['available'], { env, out: (l) => lines.push(l), deps: { fetch: z.fetch } }), 0);
+    const text = lines.join('\n');
+    assert.match(text, /Дата-центр 17 — Netherlands-3 \[Cloud\]:\n {2}✓ 7920 +Blitz Intel\| NL-3 +0\.31 EUR за день +Ubuntu 24\.04 x64\n▶ ✗ 7864 +Starter AMD\| NL-3 v\.3 +0\.36 EUR за день +нет образов ОС — нет свободных мест\?/);
+    assert.match(text, /✗ 8100 +Blitz Intel\| DE-1 +0\.45 EUR за день +распродан/);
+    assert.match(text, /Можно заказать: 2 из 4\. Дешевле всех: Starter AMD\| DE-1 v\.3, Germany-1 \[Cloud\] — 0\.29 EUR за день/);
+    assert.match(text, /⚠️ Выбранный тариф Starter AMD\| NL-3 v\.3 сейчас заказать нельзя/);
+    lines.length = 0;
+    assert.equal(await main(['available', '19', '--tsv'], { env, out: (l) => lines.push(l), deps: { fetch: z.fetch } }), 0);
+    assert.deepEqual(lines.map((l) => l.split('\t')), [
+      ['19', 'Germany-1 [Cloud]', '8235', 'Starter AMD| DE-1 v.3', '0.29', '0.29 EUR за день', '1', '0', '11111111-2222-4333-8444-555555555555', 'Ubuntu 24.04 x64'],
+      ['19', 'Germany-1 [Cloud]', '8100', 'Blitz Intel| DE-1', '0.45', '0.45 EUR за день', '0', '0', '-', 'распродан']
+    ]);
+    assert.equal(z.orders.length, 0, 'ничего не заказано');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

@@ -209,6 +209,25 @@ function createAeza({ settings, fetch = globalThis.fetch, now = () => Date.now()
     return found;
   }
 
+  // Какие тарифы можно заказать прямо сейчас. У Aeza наличие и сроки оплаты — в самом тарифе,
+  // образы ОС общие: один запрос на все тарифы
+  async function check({ datacenter = null, list = null } = {}) {
+    const all = (list ?? (await tariffs())).filter((x) => !datacenter || x.datacenter === String(datacenter));
+    let os = null;
+    let osError = null;
+    try {
+      os = await pickOs({ pricelist: null });
+    } catch (err) {
+      osError = err.message;
+    }
+    return all.map((t) => {
+      if (!t.termOk) return { ...t, can: false, reason: `нет оплаты за ${TERM_NAME[settings.term ?? 'hour'] ?? settings.term}` };
+      if (!t.available) return { ...t, can: false, reason: 'распродан' };
+      if (!os) return { ...t, can: false, reason: osError };
+      return { ...t, can: true, os };
+    });
+  }
+
   async function order({ name = serverName(now()), password = newPassword() } = {}) {
     if (!NAME.test(name)) throw new AezaError(`Имя сервера должно начинаться с ${PREFIX}`);
     if (!settings.product) throw new AezaError('Тариф Aeza не выбран: AEZA_PRODUCT (меню — «Изменить тариф»)');
@@ -279,7 +298,7 @@ function createAeza({ settings, fetch = globalThis.fetch, now = () => Date.now()
     }
   }
 
-  return { provider: 'aeza', servers, server, balance, order, waitFor, remove, removeWhenReady, tariffs, osImages, pickOs, call };
+  return { provider: 'aeza', servers, server, balance, order, waitFor, remove, removeWhenReady, tariffs, osImages, pickOs, check, call };
 }
 
 export { createAeza, createAezaApi, AezaError, termPrices, perDayOf, DEFAULT_URL, TERMS };
