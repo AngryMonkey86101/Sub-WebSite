@@ -292,6 +292,7 @@ const EVENT_LABELS = {
   pending_cleaned: 'удалён брошенный ключ',
   member_paused: 'пауза',
   member_resumed: 'возобновлён',
+  keys_repaired: 'ключи AmneziaWG исправлены',
   member_deleted: 'участник удалён',
   limit_changed: 'изменён лимит',
   telegram_linked: 'Telegram подключён',
@@ -318,9 +319,12 @@ const EVENT_LABELS = {
   promo_settings: 'изменена реклама в боте'
 };
 
-function memberState(member) {
+function memberState(member, nowMs = Date.now()) {
   if (member.role === 'client' && member.paid_until) {
-    return `${member.status === 'paused' ? 'срок закончился' : 'покупатель'} до ${formatMsk(member.paid_until)}${member.hasAccess ? '' : ', кабинет не открыт'}`;
+    // пауза при оплаченном сроке — пауза админа, а не конец срока
+    const ended = member.paid_until <= nowMs;
+    const state = member.status === 'paused' ? (ended ? 'срок закончился' : 'на паузе, оплачено') : 'покупатель';
+    return `${state} до ${formatMsk(member.paid_until)}${member.hasAccess ? '' : ', кабинет не открыт'}`;
   }
   if (member.status === 'invited') {
     return member.inviteExpiresAt ? `приглашение до ${formatDate(member.inviteExpiresAt)}` : 'приглашение истекло';
@@ -473,7 +477,7 @@ function adminPage({ admin, members, statuses, foreign, statusError, ipHosts, ev
         <li>
           <div class="member-head">
             <b>${member.code}</b>${member.role === 'admin' ? ' · админ' : ''}
-            <span class="muted">${memberState(member)} · устройств ${deviceCount(member, member.devices.length)}</span>
+            <span class="muted">${memberState(member, nowMs)} · устройств ${deviceCount(member, member.devices.length)}</span>
           </div>
           ${member.devices.length
             ? html`<ul class="devices compact">${member.devices.map((device) => html`

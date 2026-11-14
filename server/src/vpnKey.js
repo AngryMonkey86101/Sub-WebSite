@@ -26,6 +26,28 @@ function encodeVpnKey(config) {
 const hostOfKey = (key) => decodeVpnKey(key).hostName ?? null;
 
 const IPV4 = /^\d{1,3}(\.\d{1,3}){3}$/;
+
+// Адрес устройства внутри VPN и его открытый ключ — из сохранённого ключа vpn:// (last_config:
+// client_ip, client_pub_key; иначе Address в тексте конфига). По нему портал возвращает ключу
+// адрес, если amnezia-api его забыл. null — ключ не AmneziaWG или адреса в нём нет
+function clientOfKey(key) {
+  const data = decodeVpnKey(key);
+  for (const container of Array.isArray(data?.containers) ? data.containers : []) {
+    const raw = container?.awg?.last_config;
+    if (typeof raw !== 'string') continue;
+    let last;
+    try {
+      last = JSON.parse(raw);
+    } catch {
+      continue;
+    }
+    const fromField = String(last?.client_ip ?? '').split('/')[0].trim();
+    const fromText = String(last?.config ?? '').match(/^[ \t]*Address[ \t]*=[ \t]*(\d{1,3}(?:\.\d{1,3}){3})/m)?.[1] ?? '';
+    const address = IPV4.test(fromField) ? fromField : IPV4.test(fromText) ? fromText : null;
+    if (address) return { address, publicKey: typeof last?.client_pub_key === 'string' ? last.client_pub_key : null };
+  }
+  return null;
+}
 const isIpAddress = (host) => IPV4.test(host) || host.includes(':');
 
-export { decodeVpnKey, encodeVpnKey, hostOfKey, isIpAddress };
+export { decodeVpnKey, encodeVpnKey, hostOfKey, isIpAddress, clientOfKey };

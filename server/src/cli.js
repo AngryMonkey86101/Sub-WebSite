@@ -27,6 +27,9 @@ const USAGE = `Команды:
   restore-vpn < amnezia.json      загрузить ключи сервера VPN из бэкапа в amnezia-api
   check [--keys]                  имена DuckDNS, бот Telegram и связь с amnezia-api; с --keys —
                                   пробный ключ каждого протокола (создаётся и сразу удаляется)
+  repair-keys [--dry-run]         ключи AmneziaWG против портала: у участника не на паузе ключ
+                                  выключен — вернуть адрес из сохранённого ключа; у участника на
+                                  паузе ключ работает — выключить. --dry-run — только показать
   relay < текст                   сообщение админу через бота — для диспетчера в РФ, откуда
                                   Telegram недоступен (scripts/dispatcher-command.sh notify)`;
 
@@ -115,7 +118,8 @@ async function main(argv, {
       devices: { type: 'string' },
       keys: { type: 'boolean', default: false },
       takeover: { type: 'boolean', default: false },
-      stdout: { type: 'boolean', default: false }
+      stdout: { type: 'boolean', default: false },
+      'dry-run': { type: 'boolean', default: false }
     }
   });
   const [command, argument] = positionals;
@@ -197,6 +201,15 @@ async function main(argv, {
         // ключи прежние — первый бэкап с этого сервера придёт в течение 10 минут
         db.prepare("DELETE FROM settings WHERE key = 'backup_last_at'").run();
         return;
+      case 'repair-keys': {
+        const r = await portal.repairKeys({ apply: !values['dry-run'] });
+        for (const x of r.fixed) out(`${r.applied ? '✓ включён' : 'будет включён'}: ${x.name} — адрес ${x.address}`);
+        for (const x of r.paused) out(`${r.applied ? '✓ выключен' : 'будет выключен'} (участник на паузе): ${x.name}`);
+        for (const x of r.failed) out(`✗ ${x.name}: ${x.reason} — удалите устройство и выдайте новый ключ`);
+        if (!r.fixed.length && !r.paused.length && !r.failed.length) out('✓ Все ключи AmneziaWG совпадают с порталом');
+        else if (values['dry-run'] && (r.fixed.length || r.paused.length)) out('Это проверка: ничего не изменено. Исправить — без --dry-run');
+        return;
+      }
       case 'relay': {
         // текст от диспетчера — как есть, без разметки; длиннее лимита Telegram — обрезать
         const text = (await readAll(stdin)).replace(/[\u0000-\u0008\u000b-\u001f\u007f]/g, '').trim().slice(0, 4000);
