@@ -33,7 +33,8 @@ const HELP = `Команды:
   tariff      выбранный тариф: дата-центр, название, цена
   tariff-check ТАРИФ ДАТАЦЕНТР  можно ли заказать тариф и какой образ ОС взять (только чтение)
   schedule    расписание плановой смены сервера: когда следующая и сколько осталось
-  migrate --yes  переехать на новый сервер сейчас (заказ, сборка, перенос) — часы; запускать
+  migrate --yes [--provider aeza]  переехать на новый сервер сейчас (--provider — только у этого
+              хостера, иначе по очереди CLOUD_ORDER, включая хостеров «по запросу») (заказ, сборка, перенос) — часы; запускать
               в фоне (меню, пункт «Переезд сейчас»)
   migrate-status  как идёт или чем закончился последний переезд
   root-password [ИМЯ]  пароль root сервера, созданного диспетчером (по умолчанию — текущего)
@@ -220,8 +221,8 @@ async function main(argv, { env = process.env, out = console.log, deps = {} } = 
       return 0;
     }
     case 'providers': {
-      // для menu.sh: хостер, название, настроен ли, место в очереди (0 — не в очереди)
-      for (const name of ['zomro', 'aeza']) out([name, NAMES[name], d.clouds[name] ? 1 : 0, config.providers.indexOf(name) + 1].join('\t'));
+      // для menu.sh: хостер, название, настроен ли, место в очереди (0 — не в очереди), режим
+      for (const name of ['zomro', 'aeza']) out([name, NAMES[name], d.clouds[name] ? 1 : 0, config.providers.indexOf(name) + 1, config.modes[name]].join('\t'));
       return 0;
     }
     case 'delete-queue': {
@@ -274,7 +275,16 @@ async function main(argv, { env = process.env, out = console.log, deps = {} } = 
     }
     case 'schedule': {
       const s = schedule({ config, state: d.state });
+      const auto = config.autoProviders.map((n) => NAMES[n]).join(' → ') || 'нет';
+      const manual = config.providers.filter((n) => config.modes[n] === 'manual').map((n) => NAMES[n]);
+      if (!s.enabled) {
+        out('Плановая смена: ВЫКЛЮЧЕНА — сервер работает, пока его не заблокируют. Переезд — по вашей команде (меню, «Переезд сейчас»)');
+        out(`Последняя смена: ${s.lastAt ? msk(s.lastAt) : 'ещё не было'}`);
+        out(`Хостеры для автоматического переезда (авария): ${auto}${manual.length ? `; только по запросу: ${manual.join(', ')}` : ''}`);
+        return 0;
+      }
       out(`Плановая смена: каждые ${s.everyDays} дн. в ${s.at} МСК, новый сервер заказывается за ${s.overlapHours} ч`);
+      out(`Хостеры для смены: ${auto}${manual.length ? `; только по запросу: ${manual.join(', ')}` : ''}`);
       out(`Последняя смена: ${s.lastAt ? msk(s.lastAt) : 'ещё не было'}`);
       out(`Следующая смена: ${msk(s.next)} — через ${span(s.left)}`);
       out(`Заказ нового сервера: ${msk(s.orderAt)}${s.orderAt <= Date.now() ? ' (время уже наступило)' : ` — через ${span(s.orderAt - Date.now())}`}`);
@@ -345,7 +355,11 @@ async function main(argv, { env = process.env, out = console.log, deps = {} } = 
         out('Переезд: новый сервер у Zomro, перенос портала, ключей и имён, старый — на удаление.\nZomro собирает сервер долго — переезд может занять часы. Если уверены: migrate --yes');
         return 2;
       }
-      const r = await d.migration({ out }).migrate({ reason: 'по команде' });
+      // --provider ИМЯ — только у этого хостера; иначе все по CLOUD_ORDER (и те, что «по запросу»)
+      const i = argv.indexOf('--provider');
+      const chosen = i >= 0 ? argv[i + 1] : null;
+      if (chosen && !d.clouds[chosen]) throw new ConfigError(`${NAMES[chosen] ?? chosen} не настроен`);
+      const r = await d.migration({ out }).migrate({ reason: chosen ? `по команде, ${NAMES[chosen]}` : 'по команде', providers: chosen ? [chosen] : null });
       return r.ok ? 0 : 1;
     }
     case 'migrate-status': {

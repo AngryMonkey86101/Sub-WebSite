@@ -272,9 +272,32 @@ screen_migrate() {
   printf '  4. Перенос портала, бота и имён DuckDNS на новый сервер. Ключи у семьи не меняются.\n'
   printf '  5. Старый сервер — на удаление через несколько часов (свой) или сообщение, чтобы удалили вы.\n'
   printf '\nСбой до переноса имён — откат: старый снова работает, новый удаляется.\n'
-  printf '\n  %s1%s — начать переезд\n  %s0%s — назад\n' "$B" "$R" "$B" "$R"
+  # у какого хостера заказать: по очереди или один выбранный (Aeza почасово дороже — по запросу)
+  local names=() titles=() name title order=''
+  while IFS=$'\t' read -r name title; do names+=("$name"); titles+=("$title"); order="${order:+$order → }$title"; done < <(providers)
+  if [ "${#names[@]}" -eq 0 ]; then printf '%sНи один хостер не настроен — пункт «Хостеры»%s\n' "$RD" "$R"; pause; return; fi
+  printf '\n%sГде заказать новый сервер:%s\n' "$B" "$R"
+  local i=1
+  if [ "${#names[@]}" -gt 1 ]; then
+    printf '  %s1%s — по очереди: %s (не собрался у первого — у следующего)\n' "$B" "$R" "$order"
+    i=2
+  fi
+  local first=$i
+  for title in "${titles[@]}"; do printf '  %s%d%s — только %s\n' "$B" "$i" "$R" "$title"; i=$((i + 1)); done
+  printf '  %s0%s — назад\n' "$B" "$R"
+  local n args=''
+  n=$(ask 'Хостер:')
+  [ "$n" = 0 ] && return
+  if [ "${#names[@]}" -gt 1 ] && [ "$n" = 1 ]; then
+    args=''
+  elif [ "$n" -ge "$first" ] 2>/dev/null && [ "$n" -lt "$i" ]; then
+    args="--provider ${names[$((n - first))]}"
+  else
+    return
+  fi
+  printf '\nНачать переезд%s? 1 — да, 0 — нет\n' "$([ -n "$args" ] && echo " (только ${args#--provider })" || echo ' (по очереди)')"
   [ "$(ask)" = 1 ] || return
-  compose exec -d dispatcher sh -c 'node src/cli.js migrate --yes > /data/migrate.log 2>&1' \
+  compose exec -d dispatcher sh -c "node src/cli.js migrate --yes $args > /data/migrate.log 2>&1" \
     || { printf '%sПереезд не запустился%s\n' "$RD" "$R"; pause; return; }
   sleep 3
   printf '%s✓ Переезд запущен в фоне.%s Итог придёт в Telegram; ход — здесь, в пункте 7.\n' "$G" "$R"
@@ -338,11 +361,12 @@ background() {
 screen_providers() {
   while true; do
     header 'Хостеры'
-    local name title on pos
-    printf 'Переезд заказывает сервер у первого; не собрался — у следующего.\n\n'
-    while IFS=$'\t' read -r name title on pos; do
+    local name title on pos mode
+    printf 'Переезд заказывает сервер у первого; не собрался — у следующего.\n'
+    printf '«По запросу» — хостер не участвует в автоматических переездах (смена по расписанию, авария).\n\n'
+    while IFS=$'\t' read -r name title on pos mode; do
       if [ "$on" = 1 ]; then
-        printf '  %s — %s%s%s\n' "$title" "$G" "$([ "$pos" = 1 ] && echo 'основной' || echo "запасной ($pos)")" "$R"
+        printf '  %s — %s%s%s, %s\n' "$title" "$G" "$([ "$pos" = 1 ] && echo 'основной' || echo "запасной ($pos)")" "$R" "$([ "$mode" = manual ] && echo 'только по запросу' || echo 'и в автоматических переездах')"
       else
         printf '  %s — %sне настроен%s\n' "$title" "$Y" "$R"
       fi
@@ -352,6 +376,7 @@ screen_providers() {
     printf '  %s3%s — разведка Aeza (только чтение)\n' "$B" "$R"
     printf '  %s4%s — пробный заказ у хостера (несколько центов)\n' "$B" "$R"
     printf '  %s5%s — отменить ожидание сборки в пробном заказе\n' "$B" "$R"
+    printf '  %s6%s — Aeza: только по запросу или и в автоматических переездах\n' "$B" "$R"
     printf '  %s0%s — назад\n' "$B" "$R"
     case "$(ask)" in
       1)
@@ -411,6 +436,21 @@ screen_providers() {
         cli cancel-wait --all
         pause
         ;;
+      6)
+        local now
+        now=$(cli providers | awk -F'\t' '$1 == "aeza" { print $5 }')
+        if [ "$now" = auto ]; then
+          set_env AEZA_MODE manual
+          printf '\n%s✓ Aeza — только по запросу:%s автоматические переезды её не используют, переезд к ней — пункт 7\n' "$G" "$R"
+        else
+          printf '\nAeza почасово ≈0,96 EUR в сутки — втрое дороже Zomro. Разрешить ей автоматические переезды? 1 — да, 0 — нет\n'
+          [ "$(ask)" = 1 ] || continue
+          set_env AEZA_MODE auto
+          printf '\n%s✓ Aeza — и в автоматических переездах%s (запасной после основного)\n' "$G" "$R"
+        fi
+        compose up -d >/dev/null 2>&1
+        pause
+        ;;
       0) return ;;
       *) ;;
     esac
@@ -464,6 +504,26 @@ screen_delete() {
   done
 }
 
+screen_rotation() {
+  header 'Плановая смена сервера'
+  cli schedule
+  local on
+  on=$(setting ROTATION_ENABLED)
+  printf '\n'
+  if [ "$on" = 0 ] || [ "$on" = off ] || [ "$on" = no ]; then
+    printf '  %s1%s — включить плановую смену (раз в %s дн.)\n' "$B" "$R" "$(setting ROTATION_DAYS | grep . || echo 3)"
+  else
+    printf '  %s1%s — выключить плановую смену: сервер работает, пока его не заблокируют\n' "$B" "$R"
+  fi
+  printf '  %s0%s — назад\n' "$B" "$R"
+  [ "$(ask)" = 1 ] || return
+  if [ "$on" = 0 ] || [ "$on" = off ] || [ "$on" = no ]; then set_env ROTATION_ENABLED 1; else set_env ROTATION_ENABLED 0; fi
+  compose up -d >/dev/null 2>&1 || { printf '%sДиспетчер не перезапустился%s\n' "$RD" "$R"; pause; return; }
+  printf '\n%s✓ Сохранено.%s\n\n' "$G" "$R"
+  cli schedule
+  pause
+}
+
 main_menu() {
   while true; do
     header 'главное меню'
@@ -478,6 +538,7 @@ main_menu() {
     printf '  %s9%s — Изменить период переезда\n' "$B" "$R"
     printf '  %s10%s — Хостеры (Zomro, Aeza)\n' "$B" "$R"
     printf '  %s11%s — Удаление серверов\n' "$B" "$R"
+    printf '  %s12%s — Плановая смена: включить или выключить\n' "$B" "$R"
     printf '  %s0%s — Выход\n' "$B" "$R"
     case "$(ask)" in
       1) screen_status ;;
@@ -491,6 +552,7 @@ main_menu() {
       9) screen_period ;;
       10) screen_providers ;;
       11) screen_delete ;;
+      12) screen_rotation ;;
       0) clear 2>/dev/null || true; exit 0 ;;
       *) ;;
     esac

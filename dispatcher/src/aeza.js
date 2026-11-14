@@ -11,7 +11,8 @@ import { newPassword, serverName, PREFIX } from './cloud.js';
 //                                        currentTask { status: queued|running|success|failed… }
 //   GET  /services/products?type=vps    — тарифы: id, name, group { id, name } (локация),
 //                                        isAvailable, prices / rawPrices по срокам (hour, day, month…)
-//   GET  /services/operating-systems    — образы ОС
+//   GET  /services/operating-systems    — образы ОС: массив { id, slug, name, group, enabled }.
+//                                        Без параметров: с limit живой API отдаёт пустой список
 //   POST /services/orders               — { method: "balance", orders: [{ productId, count, name,
 //                                        term: "hour"|"day"|…, termCount, autoProlong, parameters }] }
 //   POST /services/{id}/change-password — { password } (8–32 символа): пароль root
@@ -182,7 +183,7 @@ function createAeza({ settings, fetch = globalThis.fetch, now = () => Date.now()
   }
 
   async function osImages() {
-    return items(await call('GET', '/services/operating-systems', { query: { limit: 200 } })).map((o) => ({
+    return items(await call('GET', '/services/operating-systems')).filter((o) => o.enabled !== false).map((o) => ({
       id: String(o.slug ?? o.id ?? ''),
       name: String(o.name ?? o.title ?? o.slug ?? ''),
       numericId: o.id ?? null

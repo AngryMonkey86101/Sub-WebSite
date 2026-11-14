@@ -53,7 +53,11 @@ function fakeAeza({ activateAfter = 2, balance = 1250 } = {}) {
         total: 2
       });
     }
-    if (init.method === 'GET' && path === '/services/operating-systems') return reply(200, { items: [{ id: 940, slug: 'debian_12', name: 'Debian 12' }, { id: 1240, slug: 'ubuntu_2404', name: 'Ubuntu 24.04' }] });
+    // как живой API (разведка 14.11): массив без обёртки; с limit — пусто
+    if (init.method === 'GET' && path === '/services/operating-systems') {
+      if (u.searchParams.has('limit')) return reply(200, []);
+      return reply(200, [{ id: 6, slug: 'ubuntu_2204', name: 'Ubuntu 22.04', group: 'ubuntu', enabled: true }, { id: 12, slug: 'debian_12', name: 'Debian 12', enabled: true }, { id: 30, slug: 'ubuntu_2404_old', name: 'Ubuntu 24.04 (old)', enabled: false }, { id: 31, slug: 'ubuntu_2404', name: 'Ubuntu 24.04', group: 'ubuntu', enabled: true }]);
+    }
     if (init.method === 'POST' && path === '/services/orders') {
       log.orders.push(body);
       const o = body.orders[0];
@@ -92,6 +96,17 @@ test('Aeza: настройки — ключ, тариф, срок; порядо�
   assert.throws(() => loadConfig({ ...env, CLOUD_ORDER: 'aeza,hetzner' }), (e) => e instanceof ConfigError && /hetzner/.test(e.message));
   assert.throws(() => loadConfig({ ...env, AEZA_TERM: 'decade' }), /AEZA_TERM/);
   assert.equal(loadConfig({ PORTAL_HOST: 'proxyizi.duckdns.org' }).aeza, null);
+  // Aeza по умолчанию — только по запросу: в автоматических переездах её нет
+  const both = loadConfig({ ...env, ZOMRO_USER: 'u', ZOMRO_PASSWORD: 'p' });
+  assert.deepEqual(both.modes, { zomro: 'auto', aeza: 'manual' });
+  assert.deepEqual(both.autoProviders, ['zomro']);
+  assert.deepEqual(loadConfig({ ...env, ZOMRO_USER: 'u', ZOMRO_PASSWORD: 'p', AEZA_MODE: 'auto' }).autoProviders, ['zomro', 'aeza']);
+  assert.throws(() => loadConfig({ ...env, AEZA_MODE: 'sometimes' }), /AEZA_MODE: auto или manual/);
+  // плановая смена: включена по умолчанию, ROTATION_ENABLED=0 — выключена
+  assert.equal(both.rotation.enabled, true);
+  assert.equal(loadConfig({ ...env, ROTATION_ENABLED: '0' }).rotation.enabled, false);
+  assert.equal(loadConfig({ ...env, ROTATION_ENABLED: 'off' }).rotation.enabled, false);
+  assert.throws(() => loadConfig({ ...env, ROTATION_ENABLED: 'maybe' }), /ROTATION_ENABLED/);
 });
 
 test('Aeza: цены по срокам и за день', () => {
@@ -122,7 +137,7 @@ test('Aeza: список, баланс, тарифы, заказ почасов�
   // тариф без почасовой оплаты при выборе — отказ с объяснением (живые тарифы Custom: только month и дольше)
   await assert.rejects(aeza.pickOs({ pricelist: '42' }), /нельзя оплатить за час — только день[\s\S]*нужен тариф с почасовой оплатой/);
   await assert.rejects(aeza.pickOs({ pricelist: '999' }), /нет тарифа 999/);
-  assert.deepEqual(await aeza.pickOs(), { id: 'ubuntu_2404', name: 'Ubuntu 24.04', numericId: 1240 });
+  assert.deepEqual(await aeza.pickOs(), { id: 'ubuntu_2404', name: 'Ubuntu 24.04', numericId: 31 }, 'выключенный образ пропущен');
 
   const ordered = await aeza.order();
   assert.equal(ordered.name, 'family-vpn-20261114-0900');
@@ -253,6 +268,41 @@ test('переезд: Zomro не собрала сервер — заказ уд
   assert.equal(state.get('migration').provider, 'aeza');
   // откат: готовый сервер Aeza удалён
   assert.equal(a.log.deleted.length, 1);
+});
+
+test('автоматический переезд — без хостеров «по запросу»; по команде — с ними или один выбранный', async () => {
+  const { createMigration } = await import('../src/migrate.js');
+  const { createState } = await import('../src/state.js');
+  const { mkdirSync, writeFileSync } = await import('node:fs');
+  const dataDir = join(dir, 'modes');
+  mkdirSync(dataDir, { recursive: true });
+  writeFileSync(join(dataDir, 'latest.age'), 'x');
+  const orderedAt = [];
+  const make = (name) => ({
+    balance: async () => ({ amount: 5, currency: 'EUR' }),
+    servers: async () => [],
+    order: async ({ name: n }) => { orderedAt.push(name); return { name: n, password: 'x'.repeat(24) }; },
+    waitFor: async () => { throw new Error('не собрался'); },
+    removeWhenReady: async () => true
+  });
+  const run = (env, options) => {
+    const config = loadConfig({ PORTAL_HOST: 'proxyizi.duckdns.org', DATA_DIR: dataDir, ZOMRO_USER: 'u', ZOMRO_PASSWORD: 'p', AEZA_API_KEY: KEY, AEZA_PRODUCT: '41', ...env });
+    const m = createMigration({
+      config, keys: {}, state: createState(dataDir), clouds: { zomro: make('zomro'), aeza: make('aeza') }, orders: createOrders(dataDir),
+      backups: { latest: () => ({ file: join(dataDir, 'latest.age') }) }, monitor: { probeServer: async () => ({ ok: false, reason: 'заблокирован' }) },
+      notify: async () => {}, run: async () => ({ code: 1 }), lookup: async () => ({ address: '77.1.2.3' }), wait: async () => {}, tcp: async () => true, out: () => {}
+    });
+    return m.migrate(options);
+  };
+  await assert.rejects(run({}, { automatic: true }), /ни один хостер не дал сервер — Zomro/);
+  assert.deepEqual(orderedAt, ['zomro'], 'авария/расписание: Aeza (по запросу) не заказывается');
+  orderedAt.length = 0;
+  await assert.rejects(run({}, {}), /ни один хостер/);
+  assert.deepEqual(orderedAt, ['zomro', 'aeza'], 'по команде — по очереди, с Aeza');
+  orderedAt.length = 0;
+  await assert.rejects(run({}, { providers: ['aeza'] }), /ни один хостер/);
+  assert.deepEqual(orderedAt, ['aeza'], 'по команде — только выбранный');
+  await assert.rejects(run({ ZOMRO_MODE: 'manual' }, { automatic: true }), /нет хостера в режиме auto/);
 });
 
 test('Zomro — тот же набор действий, что и Aeza (провайдер помечен)', () => {
