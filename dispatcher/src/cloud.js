@@ -70,6 +70,9 @@ function shape(x) {
     pricelist: String(x.pricelist_id ?? x.pricelist ?? ''),
     datacenter: String(x.datacenter ?? ''),
     cost: x.cost ?? null,
+    // образ ОС, с которого сервер собран: тот же номер годится для заказа в этом дата-центре
+    os: typeof x.instances_os === 'string' && x.instances_os ? x.instances_os : null,
+    osName: [x.os_distro, x.os_version].filter((v) => typeof v === 'string' && v).join(' '),
     ours: NAME.test(x.servername ?? ''),
     provider: 'zomro'
   };
@@ -203,49 +206,112 @@ function createCloud({ settings, fetch = globalThis.fetch, now = () => Date.now(
     return out;
   }
 
-  // Форма заказа тарифа в дата-центре (без sok ничего не заказывается): образы ОС и что ещё в ней
-  // есть — для разбора, когда образов нет. У каждого дата-центра свои номера образов: при смене
-  // тарифа нужен номер из этого списка. Образы — списки с «os» или «image» в имени (instances_os);
-  // номер — любой короткий ключ, не только UUID: в других дата-центрах они бывают числами.
+  // Форма заказа тарифа в дата-центре (без sok ничего не заказывается). Открылась без ошибки —
+  // тариф заказать можно; нет мест или тариф закрыт — Zomro отвечает ошибкой (ZomroError).
+  //
+  // Образы ОС. На живом аккаунте (14.11.2026) списка образов в форме не оказалось: в ней только
+  // дополнения (addon_*) и автопродление. Поэтому образ ищется так:
+  //   1) список в форме (slist с «os» или «image» в имени) — если Zomro его когда-нибудь отдаст;
+  //   2) тот же запрос с sv_field=instances_os — так BILLmanager догружает зависимые списки;
+  //   3) образ уже купленного сервера в этом дата-центре (instances_os в списке серверов) —
+  //      так был найден номер, по которому заказы проходили.
+  // Номер — любой короткий ключ, не только UUID.
+  const asList = (x) => (Array.isArray(x) ? x : x === undefined || x === null ? [] : [x]);
+  const imagesOf = (doc) => asList(doc?.slist)
+    .filter((l) => /(^|_)(os|image|images|ostempl|template)s?$/i.test(String(l?.name ?? '')))
+    .flatMap((l) => asList(l.val))
+    .map((v) => ({ id: String(v?.key ?? ''), name: String(v?.value ?? v?.$ ?? '').trim() }))
+    .filter((o) => /^[\w.:-]{1,64}$/.test(o.id) && !/^(null|none|0|-1)$/i.test(o.id));
+  // имена полей формы из её описания (metadata) — для разбора
+  const fieldsOf = (node, out = new Set(), depth = 0) => {
+    if (depth > 12 || node === null || typeof node !== 'object') return out;
+    if (Array.isArray(node)) {
+      for (const x of node) fieldsOf(x, out, depth + 1);
+      return out;
+    }
+    if (typeof node.name === 'string' && /^[\w.-]{1,60}$/.test(node.name)) out.add(node.name);
+    for (const v of Object.values(node)) fieldsOf(v, out, depth + 1);
+    return out;
+  };
+
+  const listsOf = (doc) => asList(doc?.slist).map((l) => `${l?.name ?? ''}(${asList(l?.val).length})`);
+  const fieldsList = (metadata) => [...fieldsOf(metadata)];
+
+  const formParams = (pricelist, datacenter) => ({ datacenter: String(datacenter), pricelist: String(pricelist), period: '-50' });
+
+  // как есть — для команды order-form: форма и ответ на догрузку списка образов
+  async function orderFormRaw({ pricelist, datacenter }) {
+    const doc = await zomro.call('instances.order.param', formParams(pricelist, datacenter));
+    let sv;
+    try {
+      sv = await zomro.call('instances.order.param', { ...formParams(pricelist, datacenter), sv_field: 'instances_os' });
+    } catch (err) {
+      sv = { error: err.message };
+    }
+    return { form: doc, sv };
+  }
+
   async function orderForm({ pricelist, datacenter }) {
-    const doc = await zomro.call('instances.order.param', { datacenter: String(datacenter), pricelist: String(pricelist), period: '-50' });
-    const asList = (x) => (Array.isArray(x) ? x : x === undefined || x === null ? [] : [x]);
-    const lists = asList(doc?.slist).map((l) => ({ name: String(l?.name ?? ''), values: asList(l?.val) }));
-    const images = lists
-      .filter((l) => /(^|_)(os|image|images|ostempl|template)s?$/i.test(l.name))
-      .flatMap((l) => l.values)
-      .map((v) => ({ id: String(v?.key ?? ''), name: String(v?.value ?? v?.$ ?? '').trim() }))
-      .filter((o) => /^[\w.:-]{1,64}$/.test(o.id) && !/^(null|none|0|-1)$/i.test(o.id));
+    const doc = await zomro.call('instances.order.param', formParams(pricelist, datacenter));
+    let images = imagesOf(doc);
+    let source = 'form';
+    if (!images.length) {
+      try {
+        images = imagesOf(await zomro.call('instances.order.param', { ...formParams(pricelist, datacenter), sv_field: 'instances_os' }));
+        source = 'sv_field';
+      } catch {
+        // догрузка не поддерживается — не беда, дальше образ купленного сервера
+      }
+    }
     const text = (x) => (typeof x === 'object' && x !== null ? x.value ?? x.msg ?? '' : x ?? '');
     const note = ['banner', 'msg', 'message', 'warning', 'info']
       .map((k) => String(text(doc?.[k])).replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim())
       .filter(Boolean)
       .join('; ')
       .slice(0, 300);
-    return { images, lists: lists.map((l) => `${l.name}(${l.values.length})`), note };
+    return { images, source, lists: listsOf(doc), fields: fieldsList(doc?.metadata).slice(0, 40), note };
   }
 
   async function osImages({ pricelist, datacenter }) {
     return (await orderForm({ pricelist, datacenter })).images;
   }
 
-  // Образ для нового тарифа: прежний, если он там есть; иначе Ubuntu 24.04, затем 22.04
-  async function pickOs({ pricelist, datacenter, current = settings.os }) {
-    const form = await orderForm({ pricelist, datacenter });
-    const images = form.images;
-    if (!images.length) {
-      const seen = form.lists.length ? `в форме заказа только ${form.lists.join(', ')}` : 'форма заказа пустая';
-      throw new ZomroError(`Zomro не даёт заказать тариф ${pricelist} в дата-центре ${datacenter}: нет образов ОС (${seen}${form.note ? `; Zomro пишет: ${form.note}` : ''}). Скорее всего, в дата-центре нет свободных мест под этот тариф`);
+  // Образы купленных серверов в дата-центре: сначала рабочие, потом прочие
+  function serverImages(list, datacenter) {
+    const seen = new Map();
+    for (const s of [...list].sort((a, b) => Number(b.status === 'active') - Number(a.status === 'active'))) {
+      if (s.os && s.datacenter === String(datacenter) && !seen.has(s.os)) seen.set(s.os, { id: s.os, name: s.osName || `как у сервера ${s.name || s.id}`, from: s.name || s.id });
     }
-    const found = images.find((o) => o.id === current) ?? images.find((o) => /ubuntu.*24\.04/i.test(o.name)) ?? images.find((o) => /ubuntu.*22\.04/i.test(o.name));
+    return [...seen.values()];
+  }
+
+  // Образ для заказа: прежний, если он есть; иначе Ubuntu 24.04, затем 22.04; образ купленного
+  // сервера в этом дата-центре — если ничего другого нет. Форма не открылась — ошибка Zomro как есть.
+  // known — список серверов, если уже получен (check проверяет много тарифов подряд)
+  async function pickOs({ pricelist, datacenter, current = settings.os, known = null }) {
+    const form = await orderForm({ pricelist, datacenter });
+    let images = form.images;
+    let fromServers = false;
+    if (!images.length) {
+      images = serverImages(known ?? (await servers()), datacenter);
+      fromServers = images.length > 0;
+    }
+    if (!images.length) {
+      const seen = [form.lists.length ? `списки: ${form.lists.join(', ')}` : '', form.fields.length ? `поля: ${form.fields.slice(0, 15).join(', ')}` : ''].filter(Boolean).join('; ') || 'форма пустая';
+      const err = new ZomroError(`Форма заказа тарифа ${pricelist} в дата-центре ${datacenter} открылась, но номера образа ОС в ней нет (${seen}${form.note ? `; Zomro пишет: ${form.note}` : ''}), и в этом дата-центре нет ваших серверов, чей образ можно взять. Пришлите вывод: order-form ${pricelist} ${datacenter}`);
+      err.noImage = true;
+      throw err;
+    }
+    const found = images.find((o) => o.id === current) ?? images.find((o) => /ubuntu.*24\.04/i.test(o.name)) ?? images.find((o) => /ubuntu.*22\.04/i.test(o.name)) ?? (fromServers ? images[0] : null);
     if (!found) throw new ZomroError(`Для тарифа ${pricelist} нет Ubuntu 24.04 или 22.04 (есть: ${images.slice(0, 6).map((o) => o.name || o.id).join(', ')}) — выберите другой тариф`);
-    return found;
+    return { id: found.id, name: fromServers ? `${found.name} (образ вашего сервера ${found.from})` : found.name };
   }
 
   // Какие тарифы можно заказать прямо сейчас: для каждого — форма заказа (только чтение, по
   // запросу на тариф). datacenter — только этот дата-центр. Итог: тариф + can, os или reason.
   async function check({ datacenter = null, list = null } = {}) {
     const all = list ?? (await tariffs());
+    let known = null;
     const out = [];
     for (const t of all.filter((x) => !datacenter || x.datacenter === String(datacenter))) {
       if (!t.available) {
@@ -253,16 +319,17 @@ function createCloud({ settings, fetch = globalThis.fetch, now = () => Date.now(
         continue;
       }
       try {
-        const os = await pickOs({ pricelist: t.pricelist, datacenter: t.datacenter });
+        known ??= await servers().catch(() => []);
+        const os = await pickOs({ pricelist: t.pricelist, datacenter: t.datacenter, known });
         out.push({ ...t, can: true, os });
       } catch (err) {
-        out.push({ ...t, can: false, reason: /нет образов ОС/.test(err.message) ? 'нет образов ОС — нет свободных мест?' : err.message });
+        out.push({ ...t, can: false, reason: err.noImage ? `форма открыта, номер образа ОС неизвестен — order-form ${t.pricelist} ${t.datacenter}` : err.message });
       }
     }
     return out;
   }
 
-  return { provider: 'zomro', servers, server, balance, order, waitFor, remove, removeWhenReady, tariffs, osImages, orderForm, pickOs, check };
+  return { provider: 'zomro', servers, server, balance, order, waitFor, remove, removeWhenReady, tariffs, osImages, orderForm, orderFormRaw, pickOs, check, listsOf, fieldsOf: fieldsList };
 }
 
 export { createCloud, newPassword, serverName, shape, notReady, parsePrice, PREFIX };

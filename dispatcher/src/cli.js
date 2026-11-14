@@ -32,6 +32,8 @@ const HELP = `Команды:
   tariffs [--tsv]  тарифы Zomro для посуточного заказа во всех дата-центрах, с ценой за день
   tariff      выбранный тариф: дата-центр, название, цена
   tariff-check ТАРИФ ДАТАЦЕНТР  можно ли заказать тариф и какой образ ОС взять (только чтение)
+  order-form ТАРИФ ДАТАЦЕНТР  форма заказа Zomro как есть, сокращённо (только чтение): где искать
+              образы ОС; пароли, почта и телефоны скрыты
   available [ДАТАЦЕНТР] [--tsv]  какие тарифы можно заказать прямо сейчас: проверка формы заказа
               у каждого тарифа (только чтение, у Zomro — около минуты)
   schedule    расписание плановой смены сервера: когда следующая и сколько осталось
@@ -108,6 +110,20 @@ async function aezaProbe(aeza, out) {
 }
 
 const fmt = (ms) => (ms ? new Date(ms).toISOString().replace('T', ' ').slice(0, 16) + ' UTC' : '—');
+
+// Ответ API — коротко, для разбора: длинные списки обрезаны, секреты и личное скрыто
+function compact(node, { maxLines = 400 } = {}) {
+  const SECRET = /pass|auth|token|secret|session|email|mail|phone|login|user|realname|person/i;
+  const walk = (x, depth) => {
+    if (typeof x === 'string') return x.replace(/[\w.+-]+@[\w-]+\.[\w.]+/g, '***@***').replace(/\+?\d[\d\s()-]{9,}\d/g, '***').slice(0, 120);
+    if (x === null || typeof x !== 'object') return x;
+    if (depth > 8) return '…';
+    if (Array.isArray(x)) return [...x.slice(0, 6).map((v) => walk(v, depth + 1)), ...(x.length > 6 ? [`… ещё ${x.length - 6}`] : [])];
+    return Object.fromEntries(Object.entries(x).map(([k, v]) => [k, SECRET.test(k) ? '***' : walk(v, depth + 1)]));
+  };
+  const lines = JSON.stringify(walk(node, 0), null, 1).split('\n');
+  return lines.length > maxLines ? [...lines.slice(0, maxLines), `… ещё ${lines.length - maxLines} строк`].join('\n') : lines.join('\n');
+}
 
 async function main(argv, { env = process.env, out = console.log, deps = {} } = {}) {
   const [command] = argv;
@@ -320,6 +336,26 @@ async function main(argv, { env = process.env, out = console.log, deps = {} } = 
       const os = await cloud.pickOs({ pricelist, datacenter });
       // одна строка для menu.sh: ok, номер образа, название
       out(`ok\t${os.id}\t${os.name}`);
+      return 0;
+    }
+    case 'order-form': {
+      const { cloud } = pick('zomro');
+      const [, pricelist, datacenter] = argv;
+      if (!/^\d{1,9}$/.test(pricelist ?? '') || !/^\d{1,9}$/.test(datacenter ?? '')) {
+        out('order-form ТАРИФ ДАТАЦЕНТР — номера из available или tariffs');
+        return 2;
+      }
+      const { form, sv } = await cloud.orderFormRaw({ pricelist, datacenter });
+      const mine = (await cloud.servers().catch(() => [])).filter((x) => x.datacenter === datacenter).map((x) => ({ id: x.id, name: x.name, status: x.status, os: x.os, osName: x.osName }));
+      out(`Форма заказа тарифа ${pricelist} в дата-центре ${datacenter} (instances.order.param, period=-50, без заказа):`);
+      out(`Ключи ответа: ${Object.keys(form ?? {}).join(', ') || 'нет'}`);
+      out(`Списки (slist): ${cloud.listsOf(form).join(', ') || 'нет'}`);
+      out(`Поля формы: ${cloud.fieldsOf(form?.metadata).join(', ') || 'нет описания'}`);
+      out(compact(form));
+      out('\nТо же с sv_field=instances_os (догрузка списка образов):');
+      out(compact(sv));
+      out(`\nВаши серверы в дата-центре ${datacenter} и их образы: ${mine.length ? JSON.stringify(mine) : 'нет'}`);
+      out('\nПришлите этот вывод в чат: пароли, почта и телефоны в нём скрыты.');
       return 0;
     }
     case 'available': {
