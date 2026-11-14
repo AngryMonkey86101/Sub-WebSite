@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createCloud, newPassword, serverName, parsePrice, PREFIX } from '../src/cloud.js';
+import { createCloud, newPassword, strongPassword, serverName, parsePrice, PREFIX } from '../src/cloud.js';
 import { zomroTest } from '../src/zomroTest.js';
 import { loadConfig, ConfigError } from '../src/config.js';
 import { createOrders } from '../src/orders.js';
@@ -101,9 +101,14 @@ test('Zomro: пароль root и имя сервера', () => {
   for (let i = 0; i < 50; i++) {
     const p = newPassword();
     assert.equal(p.length, 24);
-    assert.ok(/[a-z]/.test(p) && /[A-Z]/.test(p) && /[0-9]/.test(p), p);
-    assert.ok(/^[A-Za-z0-9]+$/.test(p));
+    // требования Zomro: от 12 символов, строчная, заглавная, цифра, спецсимвол
+    assert.ok(/[a-z]/.test(p) && /[A-Z]/.test(p) && /[0-9]/.test(p) && /[^A-Za-z0-9]/.test(p), p);
+    assert.ok((p.match(/[@#%+=_-]/g) ?? []).length >= 2, `два спецсимвола: ${p}`);
+    assert.ok(/^[A-Za-z][A-Za-z0-9@#%+=_-]+$/.test(p), `начинается с буквы, без опасных для оболочки символов: ${p}`);
+    assert.ok(strongPassword(p), p);
   }
+  assert.ok(!strongPassword('Abcdefgh2345'), 'без спецсимвола — не годится');
+  assert.ok(!strongPassword('Ab2#-'), 'короче 12 — не годится');
   assert.notEqual(newPassword(), newPassword());
   assert.equal(serverName(Date.UTC(2026, 10, 13, 1, 0)), 'family-vpn-20261113-0100');
 });
