@@ -124,9 +124,13 @@ test('menu.sh: переезд сейчас — в фоне, с ходом из �
   res = t.run('7\n1\n\n0\n');
   assert.ok(res.calls.includes("compose --ansi never exec -d dispatcher sh -c node src/cli.js migrate --yes > /data/migrate.log 2>&1"), res.calls.join('\n'));
   assert.match(res.out, /✓ Переезд запущен в фоне[\s\S]*Заказан family-vpn-20261114-0900/);
-  // уже идёт — только смотреть
+  // уже идёт — смотреть или отменить ожидание сборки
   res = t.run('7\n1\n0\n', { RUNNING: '1' });
-  assert.match(res.out, /Переезд уже идёт/);
+  assert.match(res.out, /Переезд уже идёт[\s\S]*2 — отменить ожидание сборки[\s\S]*3 — отменить переезд/);
+  res = t.run('7\n2\n\n0\n', { RUNNING: '1' });
+  assert.ok(res.calls.some((c) => /src\/cli\.js cancel-wait$/.test(c)), 'к следующему хостеру');
+  res = t.run('7\n3\n1\n\n0\n', { RUNNING: '1' });
+  assert.ok(res.calls.some((c) => /src\/cli\.js cancel-wait --all$/.test(c)), 'отменить переезд — после подтверждения');
   assert.equal(res.calls.filter((c) => /migrate --yes/.test(c)).length, 1, 'второй переезд не запущен');
 });
 

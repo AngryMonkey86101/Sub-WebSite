@@ -9,6 +9,7 @@ import { createCloud } from './cloud.js';
 import { createAeza } from './aeza.js';
 import { createOrders } from './orders.js';
 import { createMigration } from './migrate.js';
+import { createCancel } from './cancel.js';
 import { lookup as dnsLookup } from 'node:dns/promises';
 
 // Сборка диспетчера из частей — общая для службы (index.js) и команд (cli.js)
@@ -38,9 +39,10 @@ async function createDispatcher({ config, fetch = globalThis.fetch, run = defaul
   const cloud = clouds[config.providers[0]] ?? null;
   const orders = createOrders(config.dataDir, { now });
   const resolve = lookup ?? ((host) => dnsLookup(host, { family: 4 }));
+  const cancel = createCancel(config.dataDir, { now });
   // переезд — по запросу: out (вывод хода) у команды свой
-  const migration = (options = {}) => createMigration({ config, keys, state, clouds, backups, monitor, orders, notify, run, lookup: resolve, now, ...options });
-  return { config, state, notify, keys, monitor, backups, cloud, clouds, orders, migration, run };
+  const migration = (options = {}) => createMigration({ config, keys, state, clouds, backups, monitor, orders, notify, run, lookup: resolve, now, cancel, ...options });
+  return { config, state, notify, keys, monitor, backups, cloud, clouds, orders, migration, cancel, run };
 }
 
 // Подсказка, что вписать в .env сервера: открытые ключи диспетчера

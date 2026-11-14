@@ -25,6 +25,8 @@ const HELP = `Команды:
               (пока сервер собирается — нельзя); --foreign — сервер, созданный не диспетчером
   aeza-probe  разведка API Aeza на вашем аккаунте — только чтение
   providers   хостеры: настроен ли, место в очереди (для меню)
+  cancel-wait [--all]  отменить ожидание сборки: переезд — к следующему хостеру (--all — отменить
+              переезд совсем), пробный заказ — прекратить; заказ встанет в очередь на удаление
   remove ID --yes [--foreign]  удалить свой сервер у Zomro (с именем family-vpn-…); --foreign —
               и сервер, созданный не диспетчером (например, прежний рабочий после переезда)
   tariffs [--tsv]  тарифы Zomro для посуточного заказа во всех дата-центрах, с ценой за день
@@ -176,6 +178,26 @@ async function main(argv, { env = process.env, out = console.log, deps = {} } = 
       out('\n◆ — серверы диспетчера, 🗑 — в очереди на удаление (delete-queue)');
       const pending = d.orders.list().filter((o) => o.purpose !== 'manual');
       if (pending.length) out(`Ждут уборки, если их не довели до конца: ${pending.map((o) => `${o.name} (${NAMES[o.provider ?? 'zomro']}, после ${fmt(o.until)})`).join(', ')}`);
+      return 0;
+    }
+    case 'cancel-wait': {
+      // просьба ждущему процессу (переезд или пробный заказ в фоне) — см. cancel.js
+      const mode = argv.includes('--all') ? 'abort' : 'skip';
+      const m = d.state.get('migration');
+      const building = ['building', 'ssh'].includes(m?.phase) && Date.now() - (m.updatedAt ?? 0) < 8 * 3600000;
+      if (m && ['prepare', 'freeze', 'finish', 'verify'].includes(m.phase) && Date.now() - (m.updatedAt ?? 0) < 8 * 3600000) {
+        out('Сервер уже собран, переезд на следующем шаге — ожидания сборки нет. Сбой дальше откатится сам');
+        return 1;
+      }
+      d.cancel.request(mode);
+      if (building) {
+        const rest = config.providers.slice(config.providers.indexOf(m.provider ?? config.providers[0]) + 1);
+        out(mode === 'abort' || !rest.length
+          ? `✓ Переезд будет отменён в течение 15 секунд: заказ ${m.server ?? ''} — в очередь на удаление, старый сервер не трогали`
+          : `✓ Ожидание сборки у ${NAMES[m.provider] ?? m.provider} будет отменено в течение 15 секунд: заказ ${m.server ?? ''} — в очередь на удаление, следующий хостер — ${NAMES[rest[0]]}`);
+      } else {
+        out('✓ Просьба отправлена: ожидание сборки (пробный заказ в фоне) прервётся в течение 15 секунд, заказ встанет в очередь на удаление. Если сейчас ничего не ждёт — просьба сгорит через 10 минут');
+      }
       return 0;
     }
     case 'providers': {
@@ -370,7 +392,7 @@ async function main(argv, { env = process.env, out = console.log, deps = {} } = 
         out(`Пробный заказ: сервер у ${NAMES[name]} будет заказан по выбранному тарифу, проверен и сразу удалён.\nСтоит несколько центов с баланса. Если уверены: ${command} --yes${command === 'cloud-test' ? ' [--provider aeza]' : ''}`);
         return 2;
       }
-      const r = await zomroTest({ cloud, run: d.run, notify: d.notify, orders: d.orders, out, buildTimeoutMs: settings.buildTimeout, sshTimeoutMs: settings.sshTimeout });
+      const r = await zomroTest({ cloud, run: d.run, notify: d.notify, orders: d.orders, cancel: d.cancel, out, buildTimeoutMs: settings.buildTimeout, sshTimeoutMs: settings.sshTimeout });
       await d.notify(r.ok ? `Пробный заказ у ${NAMES[name]} прошёл: сервер заказан, активирован, вход по паролю работает, сервер удалён.` : `⚠️ Пробный заказ у ${NAMES[name]}: сервер удалён не до конца — проверьте кабинет.`);
       return r.ok ? 0 : 1;
     }

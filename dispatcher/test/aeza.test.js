@@ -259,3 +259,107 @@ test('Zomro — тот же набор действий, что и Aeza (про�
   assert.equal(cloud.provider, 'zomro');
   assert.equal(aeza.provider, 'aeza');
 });
+
+test('отмена ожидания: просьба живёт 10 минут и действует только на ожидание, начатое раньше', async () => {
+  const { createCancel, stopper, CancelledError } = await import('../src/cancel.js');
+  let clock = 1_000_000;
+  const cancel = createCancel(join(dir), { now: () => clock });
+  const since = clock;
+  assert.equal(cancel.check(since), null);
+  clock += 1000;
+  cancel.request('skip');
+  assert.equal(cancel.check(since), 'skip');
+  assert.equal(cancel.check(clock + 1), null, 'ожидание, начатое после просьбы, она не трогает');
+  const stop = stopper(cancel, since);
+  assert.throws(stop, (e) => e instanceof CancelledError && e.mode === 'skip');
+  assert.equal(cancel.pending(), null, 'принятая просьба убрана');
+  cancel.request('abort');
+  clock += 11 * 60000;
+  assert.equal(cancel.check(since), null, 'старше 10 минут — сгорела');
+  assert.throws(() => cancel.request('later'), /skip или abort/);
+});
+
+async function cancelWorld(name, mode) {
+  const { createMigration } = await import('../src/migrate.js');
+  const { createState } = await import('../src/state.js');
+  const { createCancel } = await import('../src/cancel.js');
+  const { mkdirSync, writeFileSync } = await import('node:fs');
+  const dataDir = join(dir, name);
+  mkdirSync(dataDir, { recursive: true });
+  const config = loadConfig({ PORTAL_HOST: 'proxyizi.duckdns.org', DATA_DIR: dataDir, ZOMRO_USER: 'u', ZOMRO_PASSWORD: 'p', AEZA_API_KEY: KEY, AEZA_PRODUCT: '41' });
+  let clock = Date.UTC(2026, 10, 14, 9, 0);
+  const now = () => clock;
+  const wait = async (ms) => { clock += ms; };
+  const orders = createOrders(dataDir, { now });
+  const cancel = createCancel(dataDir, { now });
+  const notes = [];
+  const zomroWaits = [];
+  const zomro = {
+    balance: async () => ({ amount: 3, currency: 'EUR' }),
+    servers: async () => [{ id: '7276000', name: 'family-vpn-20261114-0900', ip: null, status: 'building', ours: true }],
+    order: async ({ name: n }) => ({ name: n, password: 'x'.repeat(24) }),
+    // Zomro собирает долго: вы отменяете ожидание из меню, ждущий видит это на следующем опросе
+    waitFor: async (n, { shouldStop }) => {
+      zomroWaits.push(n);
+      clock += 60000;
+      cancel.request(mode);
+      clock += 15000;
+      shouldStop();
+      throw new Error('не должно дойти');
+    },
+    removeWhenReady: async () => { throw new Error('собирающийся сервер не удаляют — его ставят в очередь'); }
+  };
+  const a = fakeAeza();
+  const aeza = createAeza({ settings: config.aeza, fetch: a.fetch, now, wait });
+  writeFileSync(join(dataDir, 'latest.age'), 'x');
+  const migration = createMigration({
+    config, keys: { sshPublic: 'ssh-ed25519 AAAA family-vpn-dispatcher', sshFile: '/k', ageFile: '/a' }, state: createState(dataDir), clouds: { zomro, aeza }, orders, cancel,
+    backups: { latest: () => ({ file: join(dataDir, 'latest.age') }) },
+    monitor: { probeServer: async () => ({ ok: true, ip: '77.1.2.3' }) },
+    notify: async (t) => notes.push(t),
+    run: async () => ({ code: 1, stdout: Buffer.alloc(0), stderr: 'стоп после выбора хостера' }),
+    lookup: async () => ({ address: '77.1.2.3' }),
+    now, wait, tcp: async () => true, out: () => {}
+  });
+  return { migration, orders, notes, a, zomroWaits, cancel };
+}
+
+test('отмена ожидания в переезде: заказ у Zomro — в очередь на удаление, сервер — у Aeza', async () => {
+  const w = await cancelWorld('cancel-skip', 'skip');
+  await assert.rejects(w.migration.migrate(), /ключ диспетчера на новом сервере/, 'дальше подготовки тест не идёт');
+  assert.deepEqual(w.orders.queue().map((e) => [e.provider, e.id]), [['zomro', '7276000']]);
+  assert.ok(!w.orders.list().some((e) => e.purpose !== 'manual' && e.provider === 'zomro'), 'заказ Zomro переведён в очередь, не висит как брошенный');
+  assert.equal(w.a.log.orders.length, 1, 'заказ ушёл к Aeza');
+  assert.ok(w.notes.some((t) => /⏭ Ожидание сборки у Zomro отменено — заказываю у следующего хостера: Aeza/.test(t)));
+  assert.equal(w.cancel.pending(), null);
+});
+
+test('отмена переезда во время сборки: ничего не заморожено, заказ — в очередь на удаление', async () => {
+  const w = await cancelWorld('cancel-abort', 'abort');
+  await assert.rejects(w.migration.migrate(), /переезд отменён: ожидание сборки у Zomro прервано по вашей просьбе/);
+  assert.equal(w.a.log.orders.length, 0, 'к Aeza не переходили');
+  assert.deepEqual(w.orders.queue().map((e) => e.id), ['7276000']);
+  assert.match(w.notes.at(-1), /не удался: переезд отменён[\s\S]*Старый сервер не трогали/);
+});
+
+test('отмена ожидания в пробном заказе: сервер — в очередь на удаление, тест не ждёт конца сборки', async () => {
+  const { zomroTest } = await import('../src/zomroTest.js');
+  const { createCancel, CancelledError } = await import('../src/cancel.js');
+  const a = fakeAeza({ activateAfter: 1e9 });
+  let clock = Date.UTC(2026, 10, 14, 9, 0);
+  const now = () => clock;
+  const cancel = createCancel(join(dir), { now });
+  const orders = createOrders(join(dir, 'cancel-test'), { now });
+  let polls = 0;
+  const wait = async (ms) => {
+    clock += ms;
+    if (++polls === 3) cancel.request('abort');
+  };
+  const aeza = createAeza({ settings, fetch: a.fetch, now, wait });
+  const lines = [];
+  await assert.rejects(zomroTest({ cloud: aeza, run: async () => ({ code: 0 }), notify: async () => {}, orders, cancel, out: (l) => lines.push(l), now, wait, tcp: async () => true }), (e) => e instanceof CancelledError);
+  assert.match(lines.join('\n'), /✗ ожидание сборки отменено[\s\S]*в очереди на удаление: служба удалит его после сборки/);
+  assert.equal(orders.queue().length, 1);
+  assert.deepEqual(a.log.deleted, [], 'собирающийся сервер не трогали');
+  assert.ok(clock - Date.UTC(2026, 10, 14, 9, 0) < 5 * 60000, 'не ждали конца сборки');
+});

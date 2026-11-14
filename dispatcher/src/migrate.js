@@ -3,6 +3,7 @@ import { join } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { tcpOpen } from './zomroTest.js';
 import { serverName } from './cloud.js';
+import { stopper, CancelledError } from './cancel.js';
 
 // Переезд на новый сервер (docs/PLAN.md, раздел 15, этапы 5–7). Один и тот же порядок и для
 // переезда по команде, и для плановой смены, и для аварии:
@@ -35,7 +36,7 @@ class MigrationError extends Error {}
 
 const NAMES = { zomro: 'Zomro', aeza: 'Aeza' };
 
-function createMigration({ config, keys, state, clouds = {}, backups, monitor, orders, notify, run, lookup, now = () => Date.now(), wait = sleep, tcp = tcpOpen, out = console.log }) {
+function createMigration({ config, keys, state, clouds = {}, backups, monitor, orders, notify, run, lookup, now = () => Date.now(), wait = sleep, tcp = tcpOpen, out = console.log, cancel = null }) {
   const dir = join(config.dataDir, 'migration');
   const lockFile = join(config.dataDir, 'migration.lock');
   const knownRoot = join(dir, 'known_hosts_root');
@@ -171,9 +172,11 @@ function createMigration({ config, keys, state, clouds = {}, backups, monitor, o
         ordered = await cloud.order({ name: wanted });
         orders.track(ordered.name, { until: now() + settings.buildTimeout + settings.sshTimeout + 2 * HOUR, purpose: 'migration', provider: name });
         phase('building', { server: ordered.name, provider: name });
-        say(`Заказан ${ordered.name} у ${NAMES[name]}, жду сборку до ${Math.round(settings.buildTimeout / MIN)} мин`);
+        say(`Заказан ${ordered.name} у ${NAMES[name]}, жду сборку до ${Math.round(settings.buildTimeout / MIN)} мин (отменить ожидание — меню, «Переезд сейчас»)`);
+        const stop = stopper(cancel, now());
         const built = await cloud.waitFor(ordered.name, {
           timeoutMs: settings.buildTimeout,
+          shouldStop: stop,
           progress: ({ minutes, status }) => {
             touch();
             say(`  … собирается ${minutes} мин, состояние: ${status}`);
@@ -185,12 +188,21 @@ function createMigration({ config, keys, state, clouds = {}, backups, monitor, o
         const sshDeadline = now() + settings.sshTimeout;
         while (!(await tcp(server.ip, 22))) {
           if (now() >= sshDeadline) throw new MigrationError(`на новом сервере ${server.ip} не открылся SSH за ${Math.round(settings.sshTimeout / MIN)} мин`);
+          stop();
           await wait(10000);
         }
         return server;
       } catch (err) {
         errors.push(`${NAMES[name]}: ${err.message}`);
         say(`✗ ${NAMES[name]}: ${err.message}`);
+        if (err instanceof CancelledError && ordered) {
+          // собирающийся сервер удалить нельзя — в очередь на удаление: служба удалит после сборки
+          const r = await orders.abandon({ cloud, provider: name, name: ordered.name });
+          say(r.queued ? `  ${ordered.name} (id ${r.id}) — в очереди на удаление` : `  ${ordered.name} ещё не виден у ${NAMES[name]} — уборка удалит его, когда появится`);
+          if (err.mode === 'abort' || name === list.at(-1)) throw new MigrationError(`переезд отменён: ожидание сборки у ${NAMES[name]} прервано по вашей просьбе`);
+          await notify(`⏭ Ожидание сборки у ${NAMES[name]} отменено — заказываю у следующего хостера: ${NAMES[list[list.indexOf(name) + 1]]}.`);
+          continue;
+        }
         if (ordered) {
           const target = (await cloud.servers().catch(() => [])).find((x) => x.name === ordered.name);
           if (target) {

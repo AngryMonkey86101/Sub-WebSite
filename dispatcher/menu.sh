@@ -251,8 +251,17 @@ screen_migrate() {
   if migration_running; then
     printf '%sПереезд уже идёт.%s\n\n' "$Y" "$R"
     cli migrate-status
-    printf '\n  %s1%s — смотреть ход переезда\n  %s0%s — назад\n' "$B" "$R" "$B" "$R"
-    [ "$(ask)" = 1 ] && watch_migration
+    printf '\n  %s1%s — смотреть ход переезда\n' "$B" "$R"
+    printf '  %s2%s — отменить ожидание сборки: этот заказ бросить, заказать у следующего хостера\n' "$B" "$R"
+    printf '  %s3%s — отменить переезд (пока сервер собирается; старый сервер не тронут)\n' "$B" "$R"
+    printf '  %s0%s — назад\n' "$B" "$R"
+    case "$(ask)" in
+      1) watch_migration ;;
+      2) printf '\n'; cli cancel-wait; pause ;;
+      3) printf '\nОтменить переезд? Брошенный заказ встанет в очередь на удаление. 1 — да, 0 — нет\n'
+         [ "$(ask)" = 1 ] && { cli cancel-wait --all; pause; } ;;
+      *) ;;
+    esac
     return
   fi
   cli migrate-status
@@ -342,6 +351,7 @@ screen_providers() {
     printf '  %s2%s — ключ API Aeza\n' "$B" "$R"
     printf '  %s3%s — разведка Aeza (только чтение)\n' "$B" "$R"
     printf '  %s4%s — пробный заказ у хостера (несколько центов)\n' "$B" "$R"
+    printf '  %s5%s — отменить ожидание сборки в пробном заказе\n' "$B" "$R"
     printf '  %s0%s — назад\n' "$B" "$R"
     case "$(ask)" in
       1)
@@ -380,6 +390,11 @@ screen_providers() {
         printf '\nЗаказать сервер по выбранному тарифу, проверить вход и сразу удалить? 1 — да, 0 — нет\n'
         [ "$(ask)" = 1 ] || continue
         background cloud-test.log "cloud-test --yes --provider $p"
+        pause
+        ;;
+      5)
+        printf '\n'
+        cli cancel-wait --all
         pause
         ;;
       0) return ;;

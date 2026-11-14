@@ -139,7 +139,21 @@ function createOrders(dataDir, { now = () => Date.now() } = {}) {
     return { removed, forgotten, waiting };
   }
 
-  return { track, enqueue, dequeue, done, list, queue, sweep };
+  // Бросить заказ, который ещё собирается (отмена ожидания): нашёлся у хостера — в очередь на
+  // удаление по номеру; ещё не виден — запись заказа с вышедшим сроком: уборка удалит его, когда
+  // он появится. Возвращает, что сделано.
+  async function abandon({ cloud, provider, name }) {
+    const found = (await cloud.servers().catch(() => [])).find((s) => s.name === name);
+    if (found) {
+      enqueue({ provider, id: found.id, name });
+      done(name);
+      return { queued: true, id: found.id, status: found.status };
+    }
+    track(name, { until: now(), purpose: 'abandoned', provider });
+    return { queued: false };
+  }
+
+  return { track, enqueue, dequeue, done, list, queue, sweep, abandon };
 }
 
 export { createOrders };

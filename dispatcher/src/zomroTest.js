@@ -1,6 +1,7 @@
 import { createConnection } from 'node:net';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { notReady } from './cloud.js';
+import { stopper, CancelledError } from './cancel.js';
 
 // Пробный заказ у Zomro (команда zomro-test, этап 4): заказать сервер, дождаться IP, войти по
 // паролю root, удалить. Проверяет на живом аккаунте то, что без денег не проверить: подтверждение
@@ -21,7 +22,7 @@ function tcpOpen(host, port, timeoutMs = 5000) {
 }
 
 // orders — учёт заказов (orders.js): если тест прервётся, служба удалит брошенный сервер сама
-async function zomroTest({ cloud, run, notify, orders = null, out = console.log, now = () => Date.now(), wait = sleep, tcp = tcpOpen, buildTimeoutMs = 90 * 60000, sshTimeoutMs = 20 * 60000 }) {
+async function zomroTest({ cloud, run, notify, orders = null, cancel = null, out = console.log, now = () => Date.now(), wait = sleep, tcp = tcpOpen, buildTimeoutMs = 90 * 60000, sshTimeoutMs = 20 * 60000 }) {
   const started = now();
   const minutes = () => `${Math.max(1, Math.round((now() - started) / 60000))} мин`;
   const { amount, currency } = await cloud.balance();
@@ -36,6 +37,7 @@ async function zomroTest({ cloud, run, notify, orders = null, out = console.log,
   try {
     server = await cloud.waitFor(ordered.name, {
       timeoutMs: buildTimeoutMs,
+      shouldStop: stopper(cancel, now()),
       progress: ({ minutes: m, status }) => out(`  … собирается ${m} мин, состояние: ${status}`)
     });
     out(`✓ Сервер активен: id ${server.id}, IP ${server.ip} — через ${minutes()}`);
@@ -58,11 +60,18 @@ async function zomroTest({ cloud, run, notify, orders = null, out = console.log,
   } catch (err) {
     // причину — сразу в вывод: дальше её не заслонит ошибка удаления
     out(`✗ ${err.message} (через ${minutes()} после заказа)`);
+    // отменили ожидание: собирающийся сервер — в очередь на удаление, ждать его здесь не нужно
+    if (err instanceof CancelledError && orders) {
+      const r = await orders.abandon({ cloud, provider: cloud.provider ?? 'zomro', name: ordered.name });
+      out(r.queued ? `  ${ordered.name} (id ${r.id}) — в очереди на удаление: служба удалит его после сборки` : `  ${ordered.name} ещё не виден у хостера — уборка удалит его, когда появится`);
+      server = null;
+      ordered.abandoned = true;
+    }
     throw err;
   } finally {
     // удалить в любом случае: и после успеха, и после ошибки. Пока сервер собирается, Zomro
     // удалять его не даёт — тогда ждать конца сборки и удалить
-    const target = server ?? (await cloud.servers()).find((s) => s.name === ordered.name);
+    const target = ordered.abandoned ? null : server ?? (await cloud.servers()).find((s) => s.name === ordered.name);
     if (target) {
       try {
         await cloud.removeWhenReady(target.id, {
@@ -75,13 +84,13 @@ async function zomroTest({ cloud, run, notify, orders = null, out = console.log,
         out(`✗ Сервер ${target.id} не удалился: ${err.message}`);
         const later = orders && notReady(err);
         await notify(later
-          ? `⚠️ Пробный сервер ${ordered.name} (id ${target.id}) всё ещё собирается, Zomro не даёт его удалить. Диспетчер удалит его сам, как только сборка закончится (проверяет раз в час).`
+          ? `⚠️ Пробный сервер ${ordered.name} (id ${target.id}) всё ещё собирается, Zomro не даёт его удалить. Диспетчер удалит его сам, как только сборка закончится (проверяет раз в 10 минут).`
           : `⚠️ Пробный сервер ${ordered.name} (id ${target.id}) не удалился: ${err.message}. Удалите его в кабинете Zomro — он стоит денег.`);
         throw err;
       }
-    } else {
+    } else if (!ordered.abandoned) {
       out(orders
-        ? `⚠️ Сервер ${ordered.name} так и не появился в списке. Если Zomro соберёт его позже, диспетчер удалит его сам (проверяет раз в час)`
+        ? `⚠️ Сервер ${ordered.name} так и не появился в списке. Если Zomro соберёт его позже, диспетчер удалит его сам (проверяет раз в 10 минут)`
         : `⚠️ Сервер ${ordered.name} не найден в списке — проверьте кабинет Zomro: если он есть, удалите вручную`);
     }
   }

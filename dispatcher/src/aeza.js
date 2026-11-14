@@ -189,11 +189,13 @@ function createAeza({ settings, fetch = globalThis.fetch, now = () => Date.now()
   }
 
   // Готов: активен, есть IPv4, задача сборки закончилась. Затем — пароль root, заданный при заказе.
-  async function waitFor(name, { timeoutMs = settings.buildTimeout ?? 90 * 60000, everyMs = 15000, reportMs = 5 * 60000, progress = null } = {}) {
+  async function waitFor(name, { timeoutMs = settings.buildTimeout ?? 90 * 60000, everyMs = 15000, reportMs = 5 * 60000, progress = null, shouldStop = null } = {}) {
     const started = now();
     const deadline = started + timeoutMs;
     let reported = started;
     for (;;) {
+      // отмена ожидания (cancel.js): бросает CancelledError
+      shouldStop?.();
       const found = (await servers()).find((s) => s.name === name);
       if (found?.ip && found.status === 'active' && !['queued', 'running', 'wait_child'].includes(found.task)) {
         const password = pending.get(name);
