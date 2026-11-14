@@ -69,6 +69,8 @@ case "$*" in
   *" src/cli.js tariff --provider "*) echo "Тариф: из .env ($*)" ;;
   *" src/cli.js tariffs --provider "*) echo "Тарифы ($*)" ;;
   *" src/cli.js migrate-status") echo "Переездов ещё не было" ;;
+  *" src/cli.js portal-version") echo "Версия портала на m2pr7x.duckdns.org: abc1234 Портал: прежняя" ;;
+  *"tail -n 40 -F /data/portal-update.log") echo "✓ Портал обновлён: abc1234 → def5678" ;;
   *"test -f /data/migration.lock") [ -n "\${RUNNING:-}" ] ;;
   *"tail -n 40 -F /data/migrate.log") echo "[09:00 UTC] Заказан family-vpn-20261114-0900" ;;
   "compose --ansi never up -d") ;;
@@ -249,6 +251,22 @@ test('menu.sh: аварийный переезд — выключить, вкл�
   res = t.run('13\n2\n05\n\n0\n0\n');
   assert.match(res.out, /Нужно от 10 до 1440/);
   assert.match(t.env(), /^EMERGENCY_AFTER_MIN=45$/m);
+});
+
+test('menu.sh: обновить портал — версия, подтверждение, в фоне; во время переезда — нельзя', () => {
+  const t = setup('portal-update');
+  let res = t.run('14\n0\n0\n');
+  assert.equal(res.status, 0, res.err);
+  assert.match(res.out, /14 — Обновить портал на сервере VPN/);
+  assert.match(res.out, /Версия портала на m2pr7x\.duckdns\.org: abc1234/);
+  assert.ok(!res.calls.some((c) => /portal-update/.test(c)), 'передумали — ничего не запущено');
+  res = t.run('14\n1\n\n0\n');
+  assert.ok(res.calls.includes('compose --ansi never exec -d dispatcher sh -c node src/cli.js portal-update --yes > /data/portal-update.log 2>&1'), res.calls.join('\n'));
+  assert.match(res.out, /✓ Портал обновлён: abc1234 → def5678/);
+  const started = res.calls.filter((c) => /portal-update --yes/.test(c)).length;
+  res = t.run('14\n\n0\n', { RUNNING: '1' });
+  assert.match(res.out, /Идёт переезд — обновить можно после него/);
+  assert.equal(res.calls.filter((c) => /portal-update --yes/.test(c)).length, started, 'во время переезда не запущено');
 });
 
 test('menu.sh: shellcheck без замечаний', { skip: spawnSync('shellcheck', ['--version']).status !== 0 && 'нет shellcheck' }, () => {

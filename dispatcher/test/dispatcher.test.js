@@ -1,7 +1,7 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, rmSync, readdirSync, readFileSync, statSync } from 'node:fs';
+import { mkdtempSync, rmSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { gzipSync } from 'node:zlib';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -99,6 +99,13 @@ function world({ dataDir }) {
       if (asked === 'freeze') return { code: 0, stdout: net.bundle, stderr: '' };
       if (asked === 'unfreeze') return { code: 0, stdout: Buffer.from(net.unfreezeReply ?? 'active\n'), stderr: '' };
       if (asked === 'status') return { code: 0, stdout: Buffer.from('frozen\n'), stderr: '' };
+      // обновление портала: старый портал не знает команд; сбой сборки — ✗ в stderr
+      if (asked === 'version' || asked === 'update') {
+        if (net.portalOld) return { code: 1, stdout: Buffer.alloc(0), stderr: `✗ Команда не разрешена: ${asked}. Можно: backup, freeze, unfreeze, status, notify` };
+        if (asked === 'version') return { code: 0, stdout: Buffer.from('abc1234 Портал: прежняя\n'), stderr: '' };
+        if (net.updateFails) return { code: 1, stdout: Buffer.alloc(0), stderr: '✗ Новая версия (def5678 Портал: новая) не запустилась — вернул прежнюю (abc1234 Портал: прежняя). Причина: build failed' };
+        return { code: 0, stdout: Buffer.from('✓ Портал обновлён: abc1234 Портал: прежняя → def5678 Портал: новая\n'), stderr: '' };
+      }
       if (asked === 'notify') {
         if (net.ssh === 'down') return { code: 255, stdout: Buffer.alloc(0), stderr: 'ssh: connect to host m2pr7x.duckdns.org port 22: Connection timed out' };
         relayed.push(options.input.toString());
@@ -384,4 +391,35 @@ test('диспетчер: Telegram из РФ недоступен — через
   await d.notify('напрямую');
   assert.equal(w.sent.at(-1).text, '🛰 напрямую');
   assert.equal(w.relayed.length, before);
+});
+
+test('обновление портала: версия, обновление, откат на сервере, старый портал — подсказка, во время переезда — нельзя', { skip: !HAS_TOOLS && 'нет age или ssh-keygen' }, async () => {
+  const dataDir = join(dir, 'portal-update');
+  const w = world({ dataDir });
+  const env = baseEnv({ DATA_DIR: dataDir });
+  const deps = { fetch: w.fetch, run: w.run, lookup: w.lookup };
+  const lines = [];
+  const cli = (...args) => main(args, { env, out: (l) => lines.push(l), deps });
+  assert.equal(await cli('portal-version'), 0);
+  assert.match(lines.at(-1), /Версия портала на m2pr7x\.duckdns\.org: abc1234 Портал: прежняя/);
+  assert.equal(await cli('portal-update'), 2, 'без --yes — только объяснение');
+  assert.ok(!w.calls.some((c) => c.args?.at(-1) === 'update'));
+
+  assert.equal(await cli('portal-update', '--yes'), 0);
+  assert.match(lines.at(-1), /✓ Портал обновлён: abc1234 Портал: прежняя → def5678 Портал: новая/);
+  assert.equal(w.calls.filter((c) => c.command === 'ssh').at(-1).args.at(-1), 'update');
+  assert.match(w.texts().at(-1), /⬆️ Портал обновлён: abc1234/);
+
+  w.net.updateFails = true;
+  assert.equal(await cli('portal-update', '--yes'), 1);
+  assert.match(lines.at(-1), /^✗ Новая версия \(def5678 Портал: новая\) не запустилась — вернул прежнюю/);
+  assert.match(w.texts().at(-1), /⚠️ Обновление портала не удалось: Новая версия/);
+
+  w.net.portalOld = true;
+  assert.equal(await cli('portal-update', '--yes'), 1);
+  assert.match(lines.at(-1), /портал на сервере старый и сам обновляться не умеет\. Один раз обновите его вручную/);
+
+  w.net.portalOld = false;
+  writeFileSync(join(dataDir, 'migration.lock'), '{}');
+  await assert.rejects(cli('portal-update', '--yes'), /Идёт переезд/);
 });
