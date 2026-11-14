@@ -62,13 +62,15 @@ function loadConfig(env = process.env) {
     // сообщение, если свежего бэкапа нет дольше этого, а сервер при этом доступен
     backupAlertAfter: number('BACKUP_ALERT_AFTER_HOURS', 3, { min: 1, max: 168 }) * HOUR,
     // тариф, дата-центр и образ ОС новых серверов — по проверке API (docs/PLAN.md, раздел 15):
-    // 7920 «Blitz Intel | NL-3» — 0,31 EUR в день, 17 — Netherlands-3, образ — Ubuntu 24.04
+    // 7864 «Starter AMD | NL-3 v.3» — 0,36 EUR в день, 17 — Netherlands-3, образ — Ubuntu 24.04.
+    // Не 7920 «Blitz Intel | NL-3» (0,31): на живом аккаунте серверы этого тарифа собирались часами,
+    // один за 12 часов так и не собрался
     zomro: zomroUser
       ? {
           url: env.ZOMRO_API_URL?.trim() || 'https://api.zomro.com/',
           user: zomroUser,
           password: zomroPassword,
-          pricelist: zomroId('ZOMRO_PRICELIST', '7920', /^\d{1,9}$/),
+          pricelist: zomroId('ZOMRO_PRICELIST', '7864', /^\d{1,9}$/),
           datacenter: zomroId('ZOMRO_DATACENTER', '17', /^\d{1,9}$/),
           os: zomroId('ZOMRO_OS', '2140c514-fa2b-4b38-90e4-f9ff394245d1', /^[0-9a-f-]{36}$/),
           // Zomro собирает серверы долго: сколько ждать, пока сервер станет активным и получит IP,

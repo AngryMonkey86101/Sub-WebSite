@@ -102,7 +102,7 @@ cd ~/sub-website/dispatcher && docker compose exec dispatcher node src/cli.js st
 cd ~/sub-website/dispatcher && nano .env
 ```
 
-строки `ZOMRO_USER=` (логин кабинета) и `ZOMRO_PASSWORD=` (пароль), затем `docker compose up -d --build`. Тариф, дата-центр и ОС уже выбраны по проверке API: `7920` «Blitz Intel | NL-3» (0,31 EUR в день с IPv4), Нидерланды, Ubuntu 24.04 — поменять можно строками `ZOMRO_PRICELIST`, `ZOMRO_DATACENTER`, `ZOMRO_OS` (подсказки — в `.env.example`).
+строки `ZOMRO_USER=` (логин кабинета) и `ZOMRO_PASSWORD=` (пароль), затем `docker compose up -d --build`. Тариф, дата-центр и ОС уже выбраны по проверке API: `7864` «Starter AMD | NL-3 v.3» (0,36 EUR в день), Нидерланды, Ubuntu 24.04. Дешевле — `7920` «Blitz Intel | NL-3» (0,31 EUR), но на живом аккаунте его серверы собирались часами, а один за 12 часов так и не собрался — поменять можно строками `ZOMRO_PRICELIST`, `ZOMRO_DATACENTER`, `ZOMRO_OS` (подсказки — в `.env.example`).
 
 **Пробный заказ** — проверка на живом аккаунте того, что без денег не проверить. Zomro собирает сервер долго, поэтому тест запускается в фоне (обрыв SSH-сессии его не прервёт), а вывод смотрится отдельно:
 
