@@ -343,8 +343,12 @@ test('Telegram: клиентское меню — кнопки, экраны, л
   assert.equal(tg.sent.length, sentBefore);
 
   await press(500, 'c:help', 7);
-  const download = tg.edited.at(-1).reply_markup.inline_keyboard.flat().find((b) => b.url);
-  assert.equal(download.url, config.appDownloadUrl);
+  const links = tg.edited.at(-1).reply_markup.inline_keyboard.flat().filter((b) => b.url);
+  assert.deepEqual(links.map((b) => [b.text, b.url]), [
+    ['⬇️ Скачать AmneziaVPN', config.appDownloadUrl],
+    ['🍏 iPhone, App Store РФ — DefaultVPN', 'https://apps.apple.com/app/defaultvpn/id6744725017']
+  ], 'для iPhone с российским Apple ID — DefaultVPN');
+  assert.match(tg.edited.at(-1).text, /На iPhone с российским Apple ID AmneziaVPN в App Store нет: установите DefaultVPN/);
   await press(500, 'c:keys', 7);
   assert.match(tg.edited.at(-1).text, /Доступа пока нет/);
   // неизвестная или устаревшая кнопка — меню

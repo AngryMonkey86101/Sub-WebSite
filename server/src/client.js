@@ -54,13 +54,17 @@ function createClientBot({ config, shop, now = () => Date.now() }) {
     return {
       text: [
         'Как подключиться:',
-        '1. Установите приложение AmneziaVPN — кнопка ниже.',
+        '1. Установите приложение AmneziaVPN — кнопка ниже. На iPhone с российским Apple ID AmneziaVPN в App Store нет: установите DefaultVPN от тех же разработчиков — ключ подходит.',
         '2. Купите доступ или возьмите пробный. Бот пришлёт ссылку на личный кабинет.',
         '3. В кабинете добавьте устройство и вставьте ключ в приложение.',
         '',
         'Если VPN перестал подключаться — выключите и включите его в приложении.'
       ].join('\n'),
-      buttons: [[{ text: '⬇️ Скачать AmneziaVPN', url: config.appDownloadUrl }], BACK]
+      buttons: [
+        [{ text: '⬇️ Скачать AmneziaVPN', url: config.appDownloadUrl }],
+        [{ text: '🍏 iPhone, App Store РФ — DefaultVPN', url: config.iosRuAppUrl }],
+        BACK
+      ]
     };
   }
 

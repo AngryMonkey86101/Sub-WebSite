@@ -274,7 +274,7 @@ function createApp({
       const device = portal.deviceOf(member.id, toId(params[0]));
       const key = portal.deviceKey(device);
       const qrCodes = await portal.qrCodes(key);
-      return page(200, devicePage({ member, device, key, qrCodes, appDownloadUrl: config.appDownloadUrl }));
+      return page(200, devicePage({ member, device, key, qrCodes, appDownloadUrl: config.appDownloadUrl, iosRuAppUrl: config.iosRuAppUrl }));
     }],
 
     ['POST', /^\/devices\/(\d+)\/revoke$/, async ({ member, params }) => {

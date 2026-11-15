@@ -628,3 +628,12 @@ test('ключ называется Nomad VPN: новый — сразу, выд
   db.prepare('UPDATE devices SET key_enc = ? WHERE id = ?').run(encryptSecret(config.keyEncryptionKey, old, `device:${id}`), id);
   assert.equal(decodeVpnKey(portal.deviceKey(portal.deviceOf(member.id, id))).description, 'Nomad VPN');
 });
+
+test('страница ключа iPhone: для российского Apple ID — DefaultVPN; у Android — нет', async () => {
+  const { browser: b } = await joinedMember();
+  const ios = await addDevice(b, 'ios');
+  const android = await addDevice(b, 'android');
+  const iosPage = (await b.get(`/devices/${ios.id}`)).text;
+  assert.match(iosPage, /российский Apple ID[\s\S]*<a href="https:\/\/apps\.apple\.com\/app\/defaultvpn\/id6744725017"[^>]*>DefaultVPN<\/a>/);
+  assert.ok(!(await b.get(`/devices/${android.id}`)).text.includes('DefaultVPN'));
+});
