@@ -1,6 +1,7 @@
 import { PortalError } from './portal.js';
 import { DAY } from './config.js';
 import { formatMsk, formatRub, devicesLabel, plural, DEVICE_OPTIONS } from './shop.js';
+import { appLinks, SYSTEMS } from './apps.js';
 
 // Клиентская часть бота: то, что видят в Telegram все, кроме админа (docs/PLAN.md, раздел 14).
 //
@@ -9,6 +10,7 @@ import { formatMsk, formatRub, devicesLabel, plural, DEVICE_OPTIONS } from './sh
 //
 // Действия кнопок (callback_data без префикса «c:», до 64 байт):
 //   menu, help, keys, trial, relink, relink!          — экраны и простые действия
+//   apps, apps:<система>   (apps:ios, apps:android)    — выбор системы и ссылки на приложение
 //   buy                                                — выбор срока
 //   buy:<срок>             (buy:1m, buy:7d)            — выбор числа устройств
 //   buy:<срок>:<устройств>                             — подтверждение с ценой
@@ -54,13 +56,28 @@ function createClientBot({ config, shop, now = () => Date.now() }) {
     return {
       text: [
         'Как подключиться:',
-        '1. Установите приложение AmneziaVPN — кнопка ниже.',
+        '1. Установите приложение AmneziaVPN — кнопка «Скачать приложение», выберите свою систему. На iPhone с российским Apple ID AmneziaVPN в App Store нет: там будет DefaultVPN от тех же разработчиков — ключ подходит.',
         '2. Купите доступ или возьмите пробный. Бот пришлёт ссылку на личный кабинет.',
         '3. В кабинете добавьте устройство и вставьте ключ в приложение.',
         '',
         'Если VPN перестал подключаться — выключите и включите его в приложении.'
       ].join('\n'),
-      buttons: [[{ text: '⬇️ Скачать AmneziaVPN', url: config.appDownloadUrl }], BACK]
+      buttons: [[{ text: '⬇️ Скачать приложение', action: 'apps' }], BACK]
+    };
+  }
+
+  // Выбор системы → ссылки на приложение для неё
+  function apps(system = null) {
+    const all = appLinks(config);
+    const chosen = all[system];
+    if (!chosen) {
+      const rows = [];
+      for (let i = 0; i < SYSTEMS.length; i += 2) rows.push(SYSTEMS.slice(i, i + 2).map((s) => ({ text: all[s].title, action: `apps:${s}` })));
+      return { text: 'Приложение AmneziaVPN — для какой системы?', buttons: [...rows, [{ text: '← Помощь', action: 'help' }]] };
+    }
+    return {
+      text: `${chosen.title}\n\n${chosen.note}\n\nПотом откройте приложение и добавьте ключ из личного кабинета.`,
+      buttons: [...chosen.links.map((l) => [l]), [{ text: '← Другая система', action: 'apps' }], BACK]
     };
   }
 
@@ -177,6 +194,8 @@ function createClientBot({ config, shop, now = () => Date.now() }) {
     switch (head) {
       case 'help':
         return help();
+      case 'apps':
+        return apps(rest[0] ?? null);
       case 'keys':
         return keys(chat);
       case 'buy':

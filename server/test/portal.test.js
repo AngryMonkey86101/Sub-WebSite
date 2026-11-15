@@ -628,3 +628,14 @@ test('ключ называется Nomad VPN: новый — сразу, выд
   db.prepare('UPDATE devices SET key_enc = ? WHERE id = ?').run(encryptSecret(config.keyEncryptionKey, old, `device:${id}`), id);
   assert.equal(decodeVpnKey(portal.deviceKey(portal.deviceOf(member.id, id))).description, 'Nomad VPN');
 });
+
+test('страница ключа: ссылки на приложение для своей системы; iPhone — и DefaultVPN для российского Apple ID', async () => {
+  const { browser: b } = await joinedMember();
+  const ios = await addDevice(b, 'ios');
+  const android = await addDevice(b, 'android');
+  const iosPage = (await b.get(`/devices/${ios.id}`)).text;
+  assert.match(iosPage, /<a href="https:\/\/apps\.apple\.com\/app\/amneziavpn\/id1600529900"[^>]*>AmneziaVPN — App Store<\/a> · <a href="https:\/\/apps\.apple\.com\/app\/defaultvpn\/id6744725017"[^>]*>Российский Apple ID — DefaultVPN<\/a>/);
+  const androidPage = (await b.get(`/devices/${android.id}`)).text;
+  assert.ok(!androidPage.includes('DefaultVPN'));
+  assert.match(androidPage, /play\.google\.com\/store\/apps\/details\?id=org\.amnezia\.vpn[\s\S]*APK для Android — GitHub/);
+});

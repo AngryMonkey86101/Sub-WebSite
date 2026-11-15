@@ -253,8 +253,12 @@ function cabinetPage({ member, devices, statuses, protocols, traffic = null, now
   });
 }
 
-function instructions(platform, appDownloadUrl) {
-  const install = html`<li>Установите приложение AmneziaVPN: <a href="${appDownloadUrl}" target="_blank" rel="noreferrer noopener">страница загрузки</a>.</li>`;
+// apps — ссылки на приложение для этой платформы (apps.js); нет — общая страница загрузки
+function instructions(platform, appDownloadUrl, apps = null) {
+  const link = (l) => html`<a href="${l.url}" target="_blank" rel="noreferrer noopener">${l.text}</a>`;
+  const install = apps
+    ? html`<li>Установите приложение: ${apps.links.map((l, i) => html`${i ? ' · ' : ''}${link(l)}`)}. ${apps.note}</li>`
+    : html`<li>Установите приложение AmneziaVPN: <a href="${appDownloadUrl}" target="_blank" rel="noreferrer noopener">страница загрузки</a>.</li>`;
   const paste = html`<li>Откройте AmneziaVPN, нажмите «+» (добавить сервер) и вставьте ключ — или отсканируйте QR-код ниже с экрана другого устройства. Если кодов несколько, сканируйте их по очереди.</li>`;
   const connect = html`<li>Нажмите «Подключиться». Если VPN вдруг перестал работать — выключите и включите его: адрес сервера мог смениться.</li>`;
   if (platform === 'androidtv') {
@@ -263,7 +267,7 @@ function instructions(platform, appDownloadUrl) {
   return html`<ol>${install}<li>Нажмите «Скопировать» под ключом.</li>${paste}${connect}</ol>`;
 }
 
-function devicePage({ member, device, key, qrCodes, appDownloadUrl }) {
+function devicePage({ member, device, key, qrCodes, appDownloadUrl, apps = null }) {
   // ключ с меткой админ выдал из админки — туда и возвращаемся
   const fromAdmin = Boolean(device.label) && member.role === 'admin';
   return layout({
@@ -276,7 +280,7 @@ function devicePage({ member, device, key, qrCodes, appDownloadUrl }) {
       <p class="muted">${PROTOCOLS[device.protocol]}. ${device.label
         ? 'Передайте ключ лично: скопируйте его или дайте отсканировать QR-код с экрана. Ключ хранится у вас — его можно показать снова или отозвать.'
         : 'Ключ только для этого устройства — не пересылайте его другим людям.'}</p>
-      ${instructions(device.platform, appDownloadUrl)}
+      ${instructions(device.platform, appDownloadUrl, apps)}
       <h2>Ключ</h2>
       ${copyField('vpn-key', key, 6)}
       ${qrCodes.length

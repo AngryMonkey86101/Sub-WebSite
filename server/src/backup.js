@@ -44,7 +44,8 @@ const ENV_KEYS = [
   'DISPATCHER_SSH_KEY',
   'YOOKASSA_SHOP_ID',
   'YOOKASSA_SECRET_KEY',
-  'APP_DOWNLOAD_URL'
+  'APP_DOWNLOAD_URL',
+  'APP_IOS_RU_URL'
 ];
 
 const pad = (n) => String(n).padStart(2, '0');
@@ -120,7 +121,7 @@ function createBackup({ config, db, amnezia, telegram, notify, env = process.env
       `# Настройки «Nomad VPN» из бэкапа ${stamp(time)} ${clock(time)} UTC.`,
       '# DOCKER_GID и DOCKER_API_VERSION зависят от сервера: на новом определите их заново',
       '# (server/README.md, шаг 4).',
-      ...ENV_KEYS.filter((key) => key !== 'APP_DOWNLOAD_URL' || values[key]).map((key) => `${key}=${values[key]?.trim() ?? ''}`),
+      ...ENV_KEYS.filter((key) => !['APP_DOWNLOAD_URL', 'APP_IOS_RU_URL'].includes(key) || values[key]).map((key) => `${key}=${values[key]?.trim() ?? ''}`),
       'DOCKER_GID=',
       'DOCKER_API_VERSION=',
       ''
