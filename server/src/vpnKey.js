@@ -22,6 +22,19 @@ function encodeVpnKey(config) {
   return PREFIX + Buffer.concat([header, deflateSync(json, { level: 8 })]).toString('base64url');
 }
 
+// Тот же ключ, но с названием сервера name: приложение AmneziaVPN показывает его в списке
+// серверов (поле description; amnezia-api пишет туда свой SERVER_NAME). Ключ, который не
+// разбирается, возвращается как есть — показать его важнее, чем переименовать
+function withName(key, name) {
+  try {
+    const data = decodeVpnKey(key);
+    if (!data || typeof data !== 'object' || data.description === name) return key;
+    return encodeVpnKey({ ...data, description: name });
+  } catch {
+    return key;
+  }
+}
+
 // Адрес сервера, с которым собран ключ: по нему видно, имя это DuckDNS или IP
 const hostOfKey = (key) => decodeVpnKey(key).hostName ?? null;
 
@@ -50,4 +63,4 @@ function clientOfKey(key) {
 }
 const isIpAddress = (host) => IPV4.test(host) || host.includes(':');
 
-export { decodeVpnKey, encodeVpnKey, hostOfKey, isIpAddress, clientOfKey };
+export { decodeVpnKey, encodeVpnKey, hostOfKey, isIpAddress, clientOfKey, withName };

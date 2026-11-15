@@ -366,7 +366,7 @@ function createShop({ db, config, portal, yookassa = null, returnUrl = () => con
     if (member) {
       const paidUntil = addPeriod(Math.max(now(), member.paid_until ?? 0), period);
       q.extend.run(paidUntil, devices, reminderLevel(paidUntil), member.id);
-      return { member: { ...member, paid_until: paidUntil, device_limit: devices }, inviteToken: null, wasPaused: member.status === 'paused' };
+      return { member: { ...member, paid_until: paidUntil, device_limit: devices }, inviteToken: null, wasPaused: member.status === 'paused' && member.pause_reason !== 'traffic' };
     }
     const paidUntil = addPeriod(now(), period);
     const created = portal.createMember({ role: 'client', deviceLimit: devices, telegramChat: String(chat), paidUntil, inTransaction: true });
@@ -446,7 +446,7 @@ function createShop({ db, config, portal, yookassa = null, returnUrl = () => con
     const count = intField(days, { min: 1, max: 365, name: 'Дней' });
     const paidUntil = addPeriod(Math.max(now(), member.paid_until ?? 0), { count, unit: 'day' });
     q.extend.run(paidUntil, member.device_limit, reminderLevel(paidUntil), member.id);
-    const result = { member: { ...member, paid_until: paidUntil }, inviteToken: null, wasPaused: member.status === 'paused' };
+    const result = { member: { ...member, paid_until: paidUntil }, inviteToken: null, wasPaused: member.status === 'paused' && member.pause_reason !== 'traffic' };
     await resumeIfPaused(result);
     event('gift', member.code, `${count} ${plural(count, UNITS.day.words)}`);
     await tell(member.telegram_chat, accessScreen(result, `🎁 Вам добавлено ${count} ${plural(count, UNITS.day.words)}.`));
@@ -503,7 +503,7 @@ function createShop({ db, config, portal, yookassa = null, returnUrl = () => con
       q.setUntil.run(newUntil, order.member_id);
       if (newUntil <= now() && order.member_status !== 'paused') {
         try {
-          await portal.setPaused(order.member_id, true);
+          await portal.setPaused(order.member_id, true, { reason: 'expired' });
           paused = true;
         } catch (err) {
           notify(`⚠️ ${order.code}: срок уменьшен, но ключи не встали на паузу — ${err.message}. Уборка повторит через 10 минут`);
@@ -657,7 +657,7 @@ function createShop({ db, config, portal, yookassa = null, returnUrl = () => con
     const { deleteAfterDays } = settings();
     for (const member of q.expired.all(now())) {
       try {
-        await portal.setPaused(member.id, true);
+        await portal.setPaused(member.id, true, { reason: 'expired' });
       } catch (err) {
         log.error(`Пауза ${member.code} по сроку не удалась:`, err.message);
         continue;

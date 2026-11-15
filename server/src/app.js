@@ -40,8 +40,8 @@ const STATIC = {
 function webManifest(startUrl) {
   return {
     id: '/',
-    name: 'Табор VPN',
-    short_name: 'Табор VPN',
+    name: 'Nomad VPN',
+    short_name: 'Nomad VPN',
     lang: 'ru',
     start_url: startUrl,
     scope: '/',
@@ -142,6 +142,8 @@ function createApp({
   reboot = null,
   // продажа доступа через бота (shop.js); без неё раздела «Продажи» нет
   shop = null,
+  // трафик и лимит на 30 дней (traffic.js); без него — без учёта трафика
+  traffic = null,
   now = () => Date.now()
 }) {
   const limit = createRateLimiter(now);
@@ -219,7 +221,8 @@ function createApp({
       if (!member) return page(200, landingPage());
       const devices = portal.devicesOf(member.id);
       const { statuses } = devices.length ? await serverKeysOrError() : { statuses: null };
-      return page(200, cabinetPage({ member, devices, statuses, protocols: config.protocols, nowMs: now() }));
+      const usage = traffic ? { ...traffic.usageOf(member), devices: traffic.deviceUsage(member.id) } : null;
+      return page(200, cabinetPage({ member, devices, statuses, protocols: config.protocols, traffic: usage, nowMs: now() }));
     }],
 
     // Страница приглашения ничего не меняет: её открывают и предпросмотры мессенджеров.
@@ -298,6 +301,7 @@ function createApp({
         monitorSeenAt: heartbeat.lastSeen(),
         backup: backup?.status() ?? { configured: false },
         rebootAvailable: reboot?.available() ?? false,
+        traffic: traffic ? { members: traffic.usage(), devices: traffic.deviceUsage(), settings: traffic.settings(), period: traffic.current() } : null,
         notice: Object.fromEntries(new URL(req.url, config.publicUrl).searchParams),
         nowMs: now()
       }));
@@ -412,7 +416,27 @@ function createApp({
       }));
     }],
 
-    ['POST', /^\/admin\/members\/(\d+)\/(relink|limit|pause|resume|delete)$/, async ({ member, params, form }) => {
+    // «Выключить всех» и «Включить всех» (админов не касается)
+    ['POST', /^\/admin\/members\/all\/(pause|resume)$/, async ({ member, params }) => {
+      requireAdmin(member);
+      const r = params[0] === 'pause' ? await portal.pauseAll() : await portal.resumeAll();
+      const qs = new URLSearchParams({ bulk: params[0], done: String(r.done.length), skipped: String(r.skipped?.length ?? 0), failed: String(r.failed.length) });
+      return redirect(`/admin?${qs}#members`);
+    }],
+
+    // Общий лимит трафика за период
+    ['POST', /^\/admin\/traffic$/, ({ member, form }) => {
+      requireAdmin(member);
+      if (!traffic) throw new PortalError(404, 'Учёт трафика не включён');
+      try {
+        traffic.saveSettings(form);
+      } catch (err) {
+        throw new PortalError(400, err.message);
+      }
+      return redirect('/admin#traffic');
+    }],
+
+    ['POST', /^\/admin\/members\/(\d+)\/(relink|limit|traffic|pause|resume|delete)$/, async ({ member, params, form }) => {
       const admin = requireAdmin(member);
       const memberId = toId(params[0]);
       switch (params[1]) {
@@ -428,9 +452,21 @@ function createApp({
         case 'limit':
           portal.setDeviceLimit(memberId, form.get('devices'));
           break;
+        case 'traffic':
+          if (!traffic) throw new PortalError(404, 'Учёт трафика не включён');
+          try {
+            traffic.setMemberLimit(memberId, form.get('limit_gb'));
+          } catch (err) {
+            throw new PortalError(400, err.message);
+          }
+          break;
         case 'pause':
+          await portal.setPaused(memberId, true);
+          break;
         case 'resume':
-          await portal.setPaused(memberId, params[1] === 'pause');
+          // выключен за трафик, а админ включает раньше конца периода — до его конца без лимита
+          if (traffic && portal.memberById(memberId)?.pause_reason === 'traffic') traffic.exempt(memberId);
+          await portal.setPaused(memberId, false);
           break;
         case 'delete':
           await portal.deleteMember(memberId);

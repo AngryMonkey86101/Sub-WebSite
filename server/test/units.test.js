@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { Readable } from 'node:stream';
-import { decodeVpnKey, encodeVpnKey, hostOfKey, isIpAddress, clientOfKey } from '../src/vpnKey.js';
+import { decodeVpnKey, encodeVpnKey, hostOfKey, isIpAddress, clientOfKey, withName } from '../src/vpnKey.js';
 import { openDatabase } from '../src/db.js';
 import { encryptSecret, decryptSecret, newMemberCode, CODE } from '../src/crypto.js';
 import { loadConfig, ConfigError } from '../src/config.js';
@@ -264,4 +264,13 @@ test('ключ vpn://: адрес устройства и его открыты�
   assert.deepEqual(clientOfKey(key({ client_ip: '10.8.1.7', client_pub_key: 'QUJD', config: '' })), { address: '10.8.1.7', publicKey: 'QUJD' });
   assert.deepEqual(clientOfKey(key({ config: '[Interface]\nAddress = 10.8.1.8/32\nPrivateKey = x\n' })), { address: '10.8.1.8', publicKey: null }, 'адрес — из текста конфига');
   assert.equal(clientOfKey(encodeVpnKey({ containers: [{ container: 'amnezia-xray', xray: { last_config: '{}' } }] })), null, 'не AmneziaWG');
+});
+
+test('ключ vpn://: название сервера для приложения AmneziaVPN', () => {
+  const key = encodeVpnKey({ description: 'family', hostName: 'k4tq9v.duckdns.org', containers: [{ container: 'amnezia-awg2', awg: { last_config: '{}' } }] });
+  const named = withName(key, 'Nomad VPN');
+  assert.equal(decodeVpnKey(named).description, 'Nomad VPN');
+  assert.deepEqual({ ...decodeVpnKey(named), description: 'family' }, decodeVpnKey(key), 'остальное — как было');
+  assert.equal(withName(named, 'Nomad VPN'), named, 'уже с этим названием — тот же ключ');
+  assert.equal(withName('не ключ', 'Nomad VPN'), 'не ключ', 'неразборчивый — как есть');
 });

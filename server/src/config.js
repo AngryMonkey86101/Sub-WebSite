@@ -6,6 +6,9 @@ const DAY = 24 * HOUR;
 
 // Протоколы amnezia-api, которые портал умеет выдавать. amneziawg — AWG 1.5 (контейнер
 // amnezia-awg), его оставляем только для старых серверов.
+// Название сервиса: на сайте, в боте и в ключах — так сервер называется в приложении AmneziaVPN
+const BRAND = 'Nomad VPN';
+
 const PROTOCOLS = {
   amneziawg3: 'AmneziaWG',
   xray: 'Xray (VLESS + REALITY)',
@@ -97,8 +100,10 @@ const LIMITS = {
   // запроса к amnezia-api): строка удаляется, а клиент на сервере — если успел появиться
   pendingTtl: 10 * MINUTE,
   sweepInterval: 10 * MINUTE,
+  // учёт трафика: показания счётчиков сервера VPN — раз в столько (traffic.js)
+  trafficInterval: 5 * MINUTE,
   cookieMaxAge: 365 * DAY,
   maxBodyBytes: 4 * 1024
 };
 
-export { loadConfig, ConfigError, LIMITS, PROTOCOLS, PLATFORMS, MINUTE, HOUR, DAY };
+export { loadConfig, ConfigError, LIMITS, PROTOCOLS, PLATFORMS, MINUTE, HOUR, DAY, BRAND };
