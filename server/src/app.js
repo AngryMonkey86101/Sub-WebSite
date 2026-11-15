@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { LIMITS, MINUTE, HOUR } from './config.js';
 import { PortalError } from './portal.js';
+import { linksForPlatform } from './apps.js';
 import {
   landingPage,
   invitePage,
@@ -274,7 +275,7 @@ function createApp({
       const device = portal.deviceOf(member.id, toId(params[0]));
       const key = portal.deviceKey(device);
       const qrCodes = await portal.qrCodes(key);
-      return page(200, devicePage({ member, device, key, qrCodes, appDownloadUrl: config.appDownloadUrl, iosRuAppUrl: config.iosRuAppUrl }));
+      return page(200, devicePage({ member, device, key, qrCodes, appDownloadUrl: config.appDownloadUrl, apps: linksForPlatform(config, device.platform) }));
     }],
 
     ['POST', /^\/devices\/(\d+)\/revoke$/, async ({ member, params }) => {

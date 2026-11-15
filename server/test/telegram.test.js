@@ -343,12 +343,38 @@ test('Telegram: клиентское меню — кнопки, экраны, л
   assert.equal(tg.sent.length, sentBefore);
 
   await press(500, 'c:help', 7);
-  const links = tg.edited.at(-1).reply_markup.inline_keyboard.flat().filter((b) => b.url);
-  assert.deepEqual(links.map((b) => [b.text, b.url]), [
-    ['⬇️ Скачать AmneziaVPN', config.appDownloadUrl],
-    ['🍏 iPhone, App Store РФ — DefaultVPN', 'https://apps.apple.com/app/defaultvpn/id6744725017']
-  ], 'для iPhone с российским Apple ID — DefaultVPN');
-  assert.match(tg.edited.at(-1).text, /На iPhone с российским Apple ID AmneziaVPN в App Store нет: установите DefaultVPN/);
+  const buttons = () => tg.edited.at(-1).reply_markup.inline_keyboard.map((row) => row.map((b) => b.url ? `${b.text} → ${b.url}` : `${b.text} [${b.callback_data}]`));
+  assert.deepEqual(buttons(), [['⬇️ Скачать приложение [c:apps]'], ['← Меню [c:menu]']]);
+  assert.match(tg.edited.at(-1).text, /На iPhone с российским Apple ID AmneziaVPN в App Store нет: там будет DefaultVPN/);
+  // выбор системы
+  await press(500, 'c:apps', 7);
+  assert.match(tg.edited.at(-1).text, /для какой системы/);
+  assert.deepEqual(buttons(), [
+    ['🍏 iPhone / iPad [c:apps:ios]', '🤖 Android [c:apps:android]'],
+    ['🪟 Windows [c:apps:windows]', '🍎 macOS [c:apps:macos]'],
+    ['🐧 Linux [c:apps:linux]'],
+    ['← Помощь [c:help]']
+  ]);
+  await press(500, 'c:apps:ios', 7);
+  assert.deepEqual(buttons(), [
+    ['AmneziaVPN — App Store → https://apps.apple.com/app/amneziavpn/id1600529900'],
+    ['Российский Apple ID — DefaultVPN → https://apps.apple.com/app/defaultvpn/id6744725017'],
+    ['← Другая система [c:apps]'],
+    ['← Меню [c:menu]']
+  ]);
+  await press(500, 'c:apps:android', 7);
+  assert.match(tg.edited.at(-1).text, /Если Google Play недоступен, скачайте APK с GitHub/);
+  assert.deepEqual(buttons().slice(0, 2), [
+    ['AmneziaVPN — Google Play → https://play.google.com/store/apps/details?id=org.amnezia.vpn'],
+    ['APK для Android — GitHub → https://github.com/amnezia-vpn/amnezia-client/releases/latest']
+  ]);
+  for (const system of ['windows', 'macos', 'linux']) {
+    await press(500, `c:apps:${system}`, 7);
+    assert.match(buttons()[0][0], /GitHub → https:\/\/github\.com\/amnezia-vpn\/amnezia-client\/releases\/latest$/);
+  }
+  // неизвестная система — снова выбор
+  await press(500, 'c:apps:symbian', 7);
+  assert.match(tg.edited.at(-1).text, /для какой системы/);
   await press(500, 'c:keys', 7);
   assert.match(tg.edited.at(-1).text, /Доступа пока нет/);
   // неизвестная или устаревшая кнопка — меню

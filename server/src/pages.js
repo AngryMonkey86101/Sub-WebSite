@@ -253,9 +253,11 @@ function cabinetPage({ member, devices, statuses, protocols, traffic = null, now
   });
 }
 
-function instructions(platform, appDownloadUrl, iosRuAppUrl) {
-  const install = platform === 'ios' && iosRuAppUrl
-    ? html`<li>Установите приложение AmneziaVPN: <a href="${appDownloadUrl}" target="_blank" rel="noreferrer noopener">страница загрузки</a>. Если у вас российский Apple ID, AmneziaVPN в App Store нет — установите <a href="${iosRuAppUrl}" target="_blank" rel="noreferrer noopener">DefaultVPN</a> от тех же разработчиков: ключ подходит, дальше всё так же.</li>`
+// apps — ссылки на приложение для этой платформы (apps.js); нет — общая страница загрузки
+function instructions(platform, appDownloadUrl, apps = null) {
+  const link = (l) => html`<a href="${l.url}" target="_blank" rel="noreferrer noopener">${l.text}</a>`;
+  const install = apps
+    ? html`<li>Установите приложение: ${apps.links.map((l, i) => html`${i ? ' · ' : ''}${link(l)}`)}. ${apps.note}</li>`
     : html`<li>Установите приложение AmneziaVPN: <a href="${appDownloadUrl}" target="_blank" rel="noreferrer noopener">страница загрузки</a>.</li>`;
   const paste = html`<li>Откройте AmneziaVPN, нажмите «+» (добавить сервер) и вставьте ключ — или отсканируйте QR-код ниже с экрана другого устройства. Если кодов несколько, сканируйте их по очереди.</li>`;
   const connect = html`<li>Нажмите «Подключиться». Если VPN вдруг перестал работать — выключите и включите его: адрес сервера мог смениться.</li>`;
@@ -265,7 +267,7 @@ function instructions(platform, appDownloadUrl, iosRuAppUrl) {
   return html`<ol>${install}<li>Нажмите «Скопировать» под ключом.</li>${paste}${connect}</ol>`;
 }
 
-function devicePage({ member, device, key, qrCodes, appDownloadUrl, iosRuAppUrl = null }) {
+function devicePage({ member, device, key, qrCodes, appDownloadUrl, apps = null }) {
   // ключ с меткой админ выдал из админки — туда и возвращаемся
   const fromAdmin = Boolean(device.label) && member.role === 'admin';
   return layout({
@@ -278,7 +280,7 @@ function devicePage({ member, device, key, qrCodes, appDownloadUrl, iosRuAppUrl 
       <p class="muted">${PROTOCOLS[device.protocol]}. ${device.label
         ? 'Передайте ключ лично: скопируйте его или дайте отсканировать QR-код с экрана. Ключ хранится у вас — его можно показать снова или отозвать.'
         : 'Ключ только для этого устройства — не пересылайте его другим людям.'}</p>
-      ${instructions(device.platform, appDownloadUrl, iosRuAppUrl)}
+      ${instructions(device.platform, appDownloadUrl, apps)}
       <h2>Ключ</h2>
       ${copyField('vpn-key', key, 6)}
       ${qrCodes.length
