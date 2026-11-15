@@ -89,7 +89,21 @@ const ADDED_COLUMNS = [
   ['orders', 'refunded_at', 'INTEGER'],
   ['orders', 'refund_id', 'TEXT'],
   // попытка возврата для ключа идемпотентности: после отказа ЮKassa — следующая
-  ['orders', 'refund_attempt', 'INTEGER NOT NULL DEFAULT 0']
+  ['orders', 'refund_attempt', 'INTEGER NOT NULL DEFAULT 0'],
+  // трафик ключа (traffic.js): последнее показание счётчика сервера VPN (приём + передача, байт),
+  // за какой месяц накоплено (ГГГГ-ММ по Москве) и сколько накоплено за этот месяц
+  ['devices', 'traffic_seen', 'INTEGER'],
+  ['devices', 'traffic_period', 'TEXT'],
+  ['devices', 'traffic_bytes', 'INTEGER NOT NULL DEFAULT 0'],
+  // почему участник на паузе: admin — админ (и по умолчанию у старых записей), expired — конец
+  // срока, traffic — лимит трафика (тогда traffic_paused — за какой месяц, 1-го числа включится)
+  ['members', 'pause_reason', 'TEXT'],
+  ['members', 'traffic_paused', 'TEXT'],
+  // свой лимит трафика участника в ГБ за месяц: NULL — общий из настроек, 0 — без лимита
+  ['members', 'traffic_limit_gb', 'REAL'],
+  // за какой месяц уже предупредили о 80% лимита и за какой месяц админ снял лимит (включил вручную)
+  ['members', 'traffic_warned', 'TEXT'],
+  ['members', 'traffic_exempt', 'TEXT']
 ];
 
 function openDatabase(path) {

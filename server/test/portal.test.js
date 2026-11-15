@@ -8,6 +8,7 @@ import { createAmneziaClient } from '../src/amnezia.js';
 import { createPortal } from '../src/portal.js';
 import { createApp } from '../src/app.js';
 import { startFakeAmnezia, DEVICE_ENDPOINT } from './fakeAmnezia.js';
+import { createTraffic, periodOf, GB } from '../src/traffic.js';
 
 // Портал через настоящий HTTP поверх поддельного amnezia-api. Время подменено.
 
@@ -23,6 +24,7 @@ let portal;
 let server;
 let base;
 let notifications;
+let traffic;
 
 before(async () => {
   fake = await startFakeAmnezia({ apiKey: API_KEY });
@@ -37,7 +39,8 @@ before(async () => {
   notifications = [];
   const amnezia = createAmneziaClient({ baseUrl: config.amneziaApiUrl, apiKey: config.amneziaApiKey });
   portal = createPortal({ db, config, amnezia, notify: (text) => notifications.push(text), now });
-  server = createServer(createApp({ portal, config, now }));
+  traffic = createTraffic({ db, amnezia, portal, notify: (text) => notifications.push(text), now, log: { error() {} } });
+  server = createServer(createApp({ portal, config, traffic, now }));
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
   base = `http://127.0.0.1:${server.address().port}`;
 });
@@ -524,4 +527,86 @@ test('проверка ключей: на паузе, а ключ работае
   const r = await portal.repairKeys();
   assert.deepEqual(r.paused, [{ name: `${member.code}-1` }]);
   assert.equal(fake.byName(`${member.code}-1`)[0].allowed, '0.0.0.0/32');
+});
+
+test('админка: ключи участника — в выпадающем списке, трафик за месяц; общий и свой лимит трафика', async () => {
+  const admin = await joinedMember({ role: 'admin' });
+  const { member, browser: b } = await joinedMember();
+  await addDevice(b);
+  const key = fake.byName(`${member.code}-1`)[0];
+  key.traffic = { received: 0, sent: 0 };
+  await traffic.tick();
+  key.traffic = { received: GB, sent: GB / 2 };
+  await traffic.tick();
+
+  let pageText = (await admin.browser.get('/admin')).text;
+  assert.match(pageText, new RegExp(`<b>${member.code}</b>[\\s\\S]*?трафик за месяц 1,5 ГБ[\\s\\S]*?<details class="keys">\\s*<summary>Ключи \\(1\\)</summary>[\\s\\S]*?за месяц 1,5 ГБ`));
+  assert.match(pageText, /Выключить всех[\s\S]*Включить всех/);
+  assert.match(pageText, /<h2 id="traffic">Трафик<\/h2>[\s\S]*Сейчас: без лимита/);
+
+  assert.equal((await admin.browser.post('/admin/traffic', { limit_gb: '2,5' })).status, 303);
+  assert.equal(traffic.settings().limitGb, 2.5);
+  assert.equal((await admin.browser.post('/admin/traffic', { limit_gb: '-3' })).status, 400);
+  pageText = (await admin.browser.get('/admin')).text;
+  assert.match(pageText, /Сейчас: <b>2,5 ГБ<\/b> в месяц на участника/);
+  assert.match(pageText, new RegExp(`${member.code}</b>[\\s\\S]*?трафик за месяц 1,5 ГБ из 2,5 ГБ`));
+
+  // свой лимит участника; пусто — снова общий
+  assert.equal((await admin.browser.post(`/admin/members/${member.id}/traffic`, { limit_gb: '0' })).status, 303);
+  assert.equal(portal.memberById(member.id).traffic_limit_gb, 0);
+  assert.equal(traffic.usageOf(portal.memberById(member.id)).limit, null, '0 — без лимита');
+  assert.equal((await admin.browser.post(`/admin/members/${member.id}/traffic`, { limit_gb: '' })).status, 303);
+  assert.equal(portal.memberById(member.id).traffic_limit_gb, null);
+  assert.match((await b.get('/')).text, /Трафик за месяц 1,5 ГБ из 2,5 ГБ/, 'участник видит свой трафик');
+
+  // лимит исчерпан — пауза; в кабинете — почему; админ включает — до конца месяца без лимита
+  key.traffic = { received: 2 * GB, sent: GB };
+  assert.deepEqual((await traffic.tick()).paused, [member.code]);
+  assert.equal(key.status, 'disabled');
+  assert.match((await b.get('/')).text, /Трафик за месяц исчерпан/);
+  pageText = (await admin.browser.get('/admin')).text;
+  assert.match(pageText, /на паузе: исчерпан лимит трафика, включится 1-го числа/);
+  assert.equal((await admin.browser.post(`/admin/members/${member.id}/resume`)).status, 303);
+  assert.equal(key.status, 'active');
+  assert.equal(portal.memberById(member.id).traffic_exempt, periodOf(clock));
+  key.traffic = { received: 5 * GB, sent: GB };
+  assert.deepEqual((await traffic.tick()).paused, [], 'до конца месяца лимит не действует');
+  traffic.saveSettings(new URLSearchParams({ limit_gb: '0' }));
+});
+
+test('«Выключить всех» и «Включить всех»: админов не трогают; включаются только выключенные админом', async () => {
+  const admin = await joinedMember({ role: 'admin' });
+  const one = await joinedMember();
+  const two = await joinedMember();
+  await addDevice(one.browser);
+  await addDevice(two.browser);
+  const buyer = await joinedMember();
+  await addDevice(buyer.browser);
+  db.prepare("UPDATE members SET role = 'client', paid_until = ? WHERE id = ?").run(clock + DAY, buyer.member.id);
+  await addDevice(admin.browser);
+
+  notifications.length = 0;
+  let res = await admin.browser.post('/admin/members/all/pause');
+  assert.equal(res.status, 303);
+  assert.match(res.headers.get('location'), /^\/admin\?bulk=pause&done=\d+&skipped=0&failed=0#members$/);
+  for (const m of [one, two, buyer]) assert.equal(portal.memberById(m.member.id).status, 'paused');
+  assert.equal(portal.memberById(admin.member.id).status, 'active', 'админа не выключает');
+  assert.equal(fake.byName(`${one.member.code}-1`)[0].status, 'disabled');
+  assert.equal(fake.byName(`${admin.member.code}-1`)[0].status, 'active');
+  assert.ok(notifications.some((t) => t.startsWith('⏸ Выключены все участники:')), notifications.join('\n'));
+  assert.match((await admin.browser.get(res.headers.get('location'))).text, /Выключено участников: \d+/);
+
+  // у покупателя тем временем кончился срок, у второго — лимит трафика
+  db.prepare("UPDATE members SET paid_until = ?, pause_reason = 'expired' WHERE id = ?").run(clock - DAY, buyer.member.id);
+  db.prepare("UPDATE members SET pause_reason = 'traffic', traffic_paused = ? WHERE id = ?").run(periodOf(clock), two.member.id);
+  notifications.length = 0;
+  res = await admin.browser.post('/admin/members/all/resume');
+  assert.equal(res.status, 303);
+  assert.equal(portal.memberById(one.member.id).status, 'active');
+  assert.equal(fake.byName(`${one.member.code}-1`)[0].status, 'active');
+  assert.equal(portal.memberById(two.member.id).status, 'paused', 'лимит трафика — не включается');
+  assert.equal(portal.memberById(buyer.member.id).status, 'paused', 'срок закончился — не включается');
+  const summary = notifications.find((t) => t.startsWith('▶️ Включены все участники:'));
+  assert.match(summary, new RegExp(`Не включены: .*${two.member.code} \\(лимит трафика\\).*${buyer.member.code} \\(срок закончился\\)|Не включены: .*${buyer.member.code} \\(срок закончился\\).*${two.member.code} \\(лимит трафика\\)`));
+  assert.ok(!notifications.some((t) => t.startsWith(`▶️ ${one.member.code}:`)), 'по одному сообщению на участника — нет, только итог');
 });

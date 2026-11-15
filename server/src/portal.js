@@ -26,6 +26,7 @@ function createPortal({ db, config, amnezia, notify, now = () => Date.now() }) {
     insertMember: db.prepare('INSERT INTO members (code, role, device_limit, status, created_at, telegram_chat, paid_until) VALUES (?, ?, ?, ?, ?, ?, ?)'),
     memberByChat: db.prepare('SELECT * FROM members WHERE telegram_chat = ?'),
     setMemberStatus: db.prepare('UPDATE members SET status = ? WHERE id = ?'),
+    setPauseState: db.prepare('UPDATE members SET status = ?, pause_reason = ?, traffic_paused = ? WHERE id = ?'),
     setDeviceLimit: db.prepare('UPDATE members SET device_limit = ? WHERE id = ?'),
     deleteMember: db.prepare('DELETE FROM members WHERE id = ?'),
 
@@ -266,7 +267,10 @@ function createPortal({ db, config, amnezia, notify, now = () => Date.now() }) {
   // amnezia-api включает ключ по адресу, который запомнил при паузе; после переезда (загрузка
   // бэкапа) он эти адреса теряет, и «возобновить» молча ничего не делает. Поэтому после
   // возобновления портал проверяет ключи сам и, если нужно, возвращает адрес из сохранённого ключа.
-  async function setPaused(memberId, paused) {
+  // reason — почему пауза: admin, expired (конец срока), traffic (лимит трафика; trafficPeriod —
+  // за какой месяц). quiet — без сообщения админу (массовые операции и лимит трафика пишут сами).
+  // repair: false — не проверять ключи после возобновления (массовое включение проверит один раз).
+  async function setPaused(memberId, paused, { reason = 'admin', trafficPeriod = null, quiet = false, repair = true } = {}) {
     const member = requireMember(memberId);
     requireRegular(member);
     if (!paused && member.status !== 'paused') throw new PortalError(400, 'Участник не на паузе');
@@ -280,18 +284,65 @@ function createPortal({ db, config, amnezia, notify, now = () => Date.now() }) {
           throw new PortalError(502, `${UNAVAILABLE} (${err.message})`);
         }
       }
-      q.setMemberStatus.run(paused ? 'paused' : 'active', member.id);
+      q.setPauseState.run(paused ? 'paused' : 'active', paused ? reason : null, paused && reason === 'traffic' ? trafficPeriod : null, member.id);
     });
-    log(paused ? 'member_paused' : 'member_resumed', member.code);
-    notify(paused ? `⏸ ${member.code}: доступ приостановлен` : `▶️ ${member.code}: доступ возобновлён`);
-    if (paused) return;
+    log(paused ? 'member_paused' : 'member_resumed', member.code, paused && reason !== 'admin' ? reason : null);
+    if (!quiet) notify(paused ? `⏸ ${member.code}: доступ приостановлен` : `▶️ ${member.code}: доступ возобновлён`);
+    if (paused || !repair) return;
+    await repairAfterResume(member.code, { memberId: member.id });
+  }
+
+  // После возобновления: включились ли ключи (amnezia-api мог забыть их адреса — repairKeys)
+  async function repairAfterResume(label, options) {
     try {
-      const r = await repairKeys({ memberId: member.id });
+      const r = await repairKeys(options);
       if (r.fixed.length) notify(`🔧 ${r.fixed.map((x) => x.name).join(', ')}: ключи не включились — вернул им адреса из сохранённых ключей, VPN работает`);
       if (r.failed.length) notify(`⚠️ ${r.failed.map((x) => `${x.name} — ${x.reason}`).join('; ')}. Удалите это устройство и выдайте новый ключ`);
     } catch (err) {
-      notify(`⚠️ ${member.code}: не удалось проверить, включились ли ключи (${err.message}). Проверка вручную: docker compose exec portal npm run -s cli -- repair-keys`);
+      notify(`⚠️ ${label}: не удалось проверить, включились ли ключи (${err.message}). Проверка вручную: docker compose exec portal npm run -s cli -- repair-keys`);
     }
+  }
+
+  // «Выключить всех»: все участники с доступом (не админы) — на паузу админа
+  async function pauseAll() {
+    const targets = q.members.all().filter((m) => m.role !== 'admin' && m.status === 'active');
+    const done = [];
+    const failed = [];
+    for (const m of targets) {
+      try {
+        await setPaused(m.id, true, { quiet: true });
+        done.push(m.code);
+      } catch (err) {
+        failed.push(`${m.code} — ${err.message}`);
+      }
+    }
+    log('all_paused', null, String(done.length));
+    notify(`⏸ Выключены все участники: ${done.length}${failed.length ? `. Не вышло: ${failed.join('; ')}` : ''}`);
+    return { done, failed };
+  }
+
+  // «Включить всех»: тех, кого выключил админ. Покупателей с закончившимся сроком и тех, кто
+  // исчерпал лимит трафика, не включает — у них своя причина паузы. Ключи — одной проверкой в конце
+  async function resumeAll() {
+    const time = now();
+    const paused = q.members.all().filter((m) => m.role !== 'admin' && m.status === 'paused');
+    const expired = (m) => m.role === 'client' && m.paid_until && m.paid_until <= time;
+    const targets = paused.filter((m) => (m.pause_reason ?? 'admin') === 'admin' && !expired(m));
+    const skipped = paused.filter((m) => !targets.includes(m)).map((m) => `${m.code} (${m.pause_reason === 'traffic' ? 'лимит трафика' : 'срок закончился'})`);
+    const done = [];
+    const failed = [];
+    for (const m of targets) {
+      try {
+        await setPaused(m.id, false, { quiet: true, repair: false });
+        done.push(m.code);
+      } catch (err) {
+        failed.push(`${m.code} — ${err.message}`);
+      }
+    }
+    log('all_resumed', null, String(done.length));
+    notify(`▶️ Включены все участники: ${done.length}${skipped.length ? `. Не включены: ${skipped.join(', ')}` : ''}${failed.length ? `. Не вышло: ${failed.join('; ')}` : ''}`);
+    if (done.length) await repairAfterResume('Включить всех', {});
+    return { done, skipped, failed };
   }
 
   // Ключи на сервере против базы портала (AmneziaWG). У участника не на паузе ключ с адресом паузы
@@ -450,6 +501,7 @@ function createPortal({ db, config, amnezia, notify, now = () => Date.now() }) {
     memberByToken,
     memberByCode,
     memberByChat,
+    memberById: (id) => q.memberById.get(id) ?? null,
     rotateAccessToken,
     devicesOf,
     addDevice,
@@ -457,6 +509,8 @@ function createPortal({ db, config, amnezia, notify, now = () => Date.now() }) {
     deviceKey,
     revokeDevice,
     setPaused,
+    pauseAll,
+    resumeAll,
     repairKeys,
     deleteMember,
     setDeviceLimit,

@@ -55,13 +55,14 @@ function formatBytes(bytes) {
 
 // Состояние ключа на сервере для человека. Xray рукопожатий не сообщает — только трафик,
 // и то если в amnezia-api включена статистика Xray.
-function deviceStatus(device, peer, nowMs) {
+// monthly — рядом показан трафик за месяц (traffic.js): счётчик сервера (с его запуска) не нужен
+function deviceStatus(device, peer, nowMs, { monthly = false } = {}) {
   if (!peer) return '';
   if (peer.status === 'disabled') return 'приостановлен';
   if (peer.online) return 'в сети';
   if (peer.lastHandshake > 0) return `был в сети ${formatAgo(peer.lastHandshake, nowMs)}`;
   const traffic = peer.traffic.received + peer.traffic.sent;
-  if (traffic > 0) return `трафик ${formatBytes(traffic)}`;
+  if (traffic > 0) return monthly ? 'подключался' : `трафик ${formatBytes(traffic)}`;
   return device.protocol === 'xray' ? '' : 'ещё не подключался';
 }
 
@@ -197,7 +198,7 @@ function deviceFields(protocols) {
           : html`<input type="hidden" name="protocol" value="${protocols[0]}">`}`;
 }
 
-function cabinetPage({ member, devices, statuses, protocols, nowMs }) {
+function cabinetPage({ member, devices, statuses, protocols, traffic = null, nowMs }) {
   const full = member.role !== 'admin' && devices.length >= member.device_limit;
   return layout({
     title: 'Кабинет',
@@ -205,14 +206,20 @@ function cabinetPage({ member, devices, statuses, protocols, nowMs }) {
     section: 'cabinet',
     body: html`
       <h1>Мои устройства</h1>
-      ${member.status === 'paused' ? html`<p class="warning">Доступ приостановлен админом. Ключи сейчас не работают.</p>` : ''}
+      ${member.status !== 'paused'
+        ? ''
+        : member.pause_reason === 'traffic'
+          ? html`<p class="warning">Трафик за месяц исчерпан — ключи не работают до 1-го числа следующего месяца.</p>`
+          : member.pause_reason === 'expired'
+            ? html`<p class="warning">Срок доступа закончился. Ключи сейчас не работают — продлите доступ в боте.</p>`
+            : html`<p class="warning">Доступ приостановлен админом. Ключи сейчас не работают.</p>`}
       ${devices.length
         ? html`<ul class="devices">${devices.map((device) => html`
           <li>
             <div>
               <b>${deviceName(device)}</b>
               <span class="muted">${PROTOCOLS[device.protocol]} · с ${formatDate(device.created_at)}</span>
-              <span class="status">${deviceStatus(device, statuses?.get(device.client_id), nowMs)}</span>
+              <span class="status">${[deviceStatus(device, statuses?.get(device.client_id), nowMs, { monthly: Boolean(traffic) }), traffic ? `за месяц ${formatBytes(traffic.devices.get(device.id) ?? 0)}` : ''].filter(Boolean).join(' · ')}</span>
             </div>
             <div class="actions">
               ${device.key_enc ? html`<a class="button" href="/devices/${device.id}">Показать ключ</a>` : html`<span class="muted">ключ создаётся…</span>`}
@@ -222,7 +229,7 @@ function cabinetPage({ member, devices, statuses, protocols, nowMs }) {
             </div>
           </li>`)}</ul>`
         : html`<p>Устройств пока нет.</p>`}
-      <p class="muted">Устройств: ${deviceCount(member, devices.length)}.</p>
+      <p class="muted">Устройств: ${deviceCount(member, devices.length)}.${traffic ? ` ${trafficText(traffic).replace(/^т/, 'Т')}.` : ''}</p>
 
       ${member.status !== 'active'
         ? ''
@@ -281,6 +288,38 @@ function devicePage({ member, device, key, qrCodes, appDownloadUrl }) {
 
 const STATUS_LABELS = { invited: 'приглашён', active: 'активен', paused: 'на паузе' };
 
+// «трафик за месяц 1.2 ГБ из 50 ГБ»; usage — { used, limit, exempt } (traffic.js)
+function trafficText(usage) {
+  if (!usage) return '';
+  const limit = usage.limit ? ` из ${formatBytes(usage.limit)}` : '';
+  return `трафик за месяц ${formatBytes(usage.used)}${limit}${usage.limit && usage.exempt ? ' (лимит снят до конца месяца)' : ''}`;
+}
+
+// Общий лимит трафика: форма в админке
+function trafficSection(traffic) {
+  if (!traffic) return '';
+  const gb = traffic.settings.limitGb;
+  return html`
+      <h2 id="traffic">Трафик</h2>
+      <p class="muted">Трафик участника — по всем его ключам (и отозванным) за календарный месяц по Москве. Портал снимает показания сервера VPN раз в 5 минут и копит их сам, поэтому перезапуск сервера счёт не сбрасывает. Исчерпал лимит — ключи на паузе до 1-го числа (участник из бота получит сообщение, на 80% — предупреждение). Админов лимит не касается. Свой лимит участника — поле «Лимит ГБ» в его строке выше: пусто — общий, 0 — без лимита.</p>
+      <p>Сейчас: ${gb > 0 ? html`<b>${String(gb).replace('.', ',')} ГБ</b> в месяц на участника` : 'без лимита'}.</p>
+      <form method="post" action="/admin/traffic" class="inline">
+        <label>Лимит, ГБ в месяц <input type="text" inputmode="decimal" name="limit_gb" value="${String(gb)}" size="6" aria-label="Лимит трафика, ГБ в месяц"></label>
+        <button type="submit">Сохранить</button>
+      </form>
+      <p class="muted">0 — без лимита.</p>`;
+}
+
+// Итог «Выключить всех» / «Включить всех»
+function bulkNotice(notice) {
+  if (!notice?.bulk) return '';
+  const done = Number(notice.done) || 0;
+  const skipped = Number(notice.skipped) || 0;
+  const failed = Number(notice.failed) || 0;
+  const what = notice.bulk === 'pause' ? 'Выключено' : 'Включено';
+  return html`<p class="notice">${what} участников: ${done}${skipped ? `, не включены (срок закончился или лимит трафика): ${skipped}` : ''}${failed ? `, не вышло: ${failed} — подробности в Telegram` : ''}.</p>`;
+}
+
 const EVENT_LABELS = {
   member_created: 'новый участник',
   invite_activated: 'приглашение открыто',
@@ -293,6 +332,13 @@ const EVENT_LABELS = {
   member_paused: 'пауза',
   member_resumed: 'возобновлён',
   keys_repaired: 'ключи AmneziaWG исправлены',
+  all_paused: 'выключены все',
+  all_resumed: 'включены все',
+  traffic_paused: 'пауза: лимит трафика',
+  traffic_resumed: 'включён: новый месяц трафика',
+  traffic_warned: 'предупреждён: 80% трафика',
+  traffic_limit: 'лимит трафика участника',
+  traffic_settings: 'общий лимит трафика',
   member_deleted: 'участник удалён',
   limit_changed: 'изменён лимит',
   telegram_linked: 'Telegram подключён',
@@ -320,6 +366,7 @@ const EVENT_LABELS = {
 };
 
 function memberState(member, nowMs = Date.now()) {
+  if (member.status === 'paused' && member.pause_reason === 'traffic') return 'на паузе: исчерпан лимит трафика, включится 1-го числа';
   if (member.role === 'client' && member.paid_until) {
     // пауза при оплаченном сроке — пауза админа, а не конец срока
     const ended = member.paid_until <= nowMs;
@@ -441,7 +488,7 @@ function rebootSection(available) {
         : html`<p class="muted">Не настроена: один раз выполните на сервере под root <b>bash /home/deploy/family-vpn/scripts/install-reboot.sh</b> (README, «Перезагрузка из бота и админки»).</p>`}`;
 }
 
-function adminPage({ admin, members, statuses, foreign, statusError, ipHosts, events, protocols, defaultDeviceLimit, telegram, watchdog, monitorSeenAt, backup, rebootAvailable, notice, nowMs }) {
+function adminPage({ admin, members, statuses, foreign, statusError, ipHosts, events, protocols, defaultDeviceLimit, telegram, watchdog, monitorSeenAt, backup, rebootAvailable, traffic = null, notice, nowMs }) {
   return layout({
     title: 'Админка',
     member: admin,
@@ -471,18 +518,32 @@ function adminPage({ admin, members, statuses, foreign, statusError, ipHosts, ev
         <button type="submit" class="primary">Выдать ключ</button>
       </form>
 
-      <h2>Участники</h2>
+      <h2 id="members">Участники</h2>
       <p class="muted">Кому выдан какой код, портал не знает — это знаете только вы. Протоколы: ${protocols.map((p) => PROTOCOLS[p]).join(', ')}.</p>
-      <ul class="members">${members.map((member) => html`
+      ${bulkNotice(notice)}
+      <div class="actions">
+        <form method="post" action="/admin/members/all/pause" data-confirm="Выключить всех участников? Их ключи встанут на паузу (админов это не касается).">
+          <button type="submit">Выключить всех</button>
+        </form>
+        <form method="post" action="/admin/members/all/resume" data-confirm="Включить всех, кого выключил админ? Покупатели с закончившимся сроком и исчерпавшие лимит трафика останутся выключены.">
+          <button type="submit">Включить всех</button>
+        </form>
+      </div>
+      <ul class="members">${members.map((member) => {
+        const usage = traffic?.members.get(member.id);
+        return html`
         <li>
           <div class="member-head">
             <b>${member.code}</b>${member.role === 'admin' ? ' · админ' : ''}
-            <span class="muted">${memberState(member, nowMs)} · устройств ${deviceCount(member, member.devices.length)}</span>
+            <span class="muted">${memberState(member, nowMs)} · устройств ${deviceCount(member, member.devices.length)}${usage ? ` · ${trafficText(usage)}` : ''}</span>
           </div>
           ${member.devices.length
-            ? html`<ul class="devices compact">${member.devices.map((device) => html`
-            <li>${deviceName(device)} · ${PROTOCOLS[device.protocol]} <span class="status">${deviceStatus(device, statuses?.get(device.client_id), nowMs)}</span></li>`)}</ul>`
-            : ''}
+            ? html`<details class="keys">
+            <summary>Ключи (${member.devices.length})</summary>
+            <ul class="devices compact">${member.devices.map((device) => html`
+              <li>${deviceName(device)} · ${PROTOCOLS[device.protocol]} <span class="status">${[deviceStatus(device, statuses?.get(device.client_id), nowMs, { monthly: Boolean(traffic) }), traffic ? `за месяц ${formatBytes(traffic.devices.get(device.id) ?? 0)}` : ''].filter(Boolean).join(' · ')}</span></li>`)}</ul>
+          </details>`
+            : html`<p class="muted">Ключей нет.</p>`}
           <div class="actions">
             <form method="post" action="/admin/members/${member.id}/relink" data-confirm="Выдать ${member.code} новое приглашение? Прежняя личная ссылка перестанет работать.">
               <button type="submit">Новая ссылка</button>
@@ -494,14 +555,22 @@ function adminPage({ admin, members, statuses, foreign, statusError, ipHosts, ev
               <input type="number" name="devices" min="1" max="20" value="${member.device_limit}" aria-label="Лимит устройств">
               <button type="submit">Лимит</button>
             </form>
+            ${traffic
+              ? html`<form method="post" action="/admin/members/${member.id}/traffic" class="inline">
+              <input type="text" inputmode="decimal" name="limit_gb" size="5" value="${member.traffic_limit_gb ?? ''}" placeholder="общий" aria-label="Лимит трафика, ГБ в месяц (пусто — общий, 0 — без лимита)">
+              <button type="submit">Лимит ГБ</button>
+            </form>`
+              : ''}
             ${member.status === 'paused'
-              ? html`<form method="post" action="/admin/members/${member.id}/resume"><button type="submit">Возобновить</button></form>`
+              ? html`<form method="post" action="/admin/members/${member.id}/resume"${member.pause_reason === 'traffic' ? html` data-confirm="${member.code} исчерпал лимит трафика. Включить? До конца месяца лимит для него не будет действовать."` : ''}><button type="submit">Возобновить</button></form>`
               : html`<form method="post" action="/admin/members/${member.id}/pause"><button type="submit">Пауза</button></form>`}
             <form method="post" action="/admin/members/${member.id}/delete" data-confirm="Удалить ${member.code} и отозвать все его ключи?">
               <button type="submit" class="danger">Удалить</button>
             </form>`}
           </div>
-        </li>`)}</ul>
+        </li>`;
+      })}</ul>
+      ${trafficSection(traffic)}
 
       ${foreign
         ? html`

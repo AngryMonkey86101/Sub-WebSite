@@ -14,6 +14,7 @@ import { createHeartbeat } from './heartbeat.js';
 import { createBackup } from './backup.js';
 import { createReboot } from './reboot.js';
 import { createPortal } from './portal.js';
+import { createTraffic } from './traffic.js';
 import { createApp } from './app.js';
 
 let config;
@@ -50,11 +51,13 @@ const shop = createShop({
   notify: telegram.notify,
   deliver: telegram.deliver
 });
+// трафик участников и лимит в месяц: показания счётчиков сервера VPN — раз в 5 минут
+const traffic = createTraffic({ db, amnezia, portal, notify: telegram.notify, deliver: telegram.deliver });
 telegram.start({
   admin: createBotCommands({ portal, config, watchdog, heartbeat, backup, reboot, shop }),
   client: createClientBot({ config, shop })
 });
-const server = createServer(createApp({ portal, config, telegram, watchdog, heartbeat, backup, reboot, shop }));
+const server = createServer(createApp({ portal, config, telegram, watchdog, heartbeat, backup, reboot, shop, traffic }));
 
 const sweep = async () => {
   heartbeat.check();
@@ -74,6 +77,20 @@ const sweep = async () => {
 };
 sweep();
 const timer = setInterval(sweep, LIMITS.sweepInterval);
+let trafficBusy = false;
+const countTraffic = async () => {
+  if (trafficBusy) return;
+  trafficBusy = true;
+  try {
+    await traffic.tick();
+  } catch (err) {
+    console.error('Ошибка учёта трафика:', err?.message);
+  } finally {
+    trafficBusy = false;
+  }
+};
+countTraffic();
+const trafficTimer = setInterval(countTraffic, LIMITS.trafficInterval);
 // платежи ЮKassa — раз в минуту, на случай если уведомление не дошло
 const payments = setInterval(() => shop.poll().catch((err) => console.error('Ошибка проверки платежей:', err?.message)), MINUTE);
 
@@ -88,6 +105,7 @@ server.listen(config.port, () => {
 const shutdown = async () => {
   clearInterval(timer);
   clearInterval(payments);
+  clearInterval(trafficTimer);
   reboot.stop();
   await Promise.all([telegram.stop(), watchdog.stop()]);
   server.close(() => {

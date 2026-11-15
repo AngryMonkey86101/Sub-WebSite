@@ -97,6 +97,8 @@ const LIMITS = {
   // запроса к amnezia-api): строка удаляется, а клиент на сервере — если успел появиться
   pendingTtl: 10 * MINUTE,
   sweepInterval: 10 * MINUTE,
+  // учёт трафика: показания счётчиков сервера VPN — раз в столько (traffic.js)
+  trafficInterval: 5 * MINUTE,
   cookieMaxAge: 365 * DAY,
   maxBodyBytes: 4 * 1024
 };
