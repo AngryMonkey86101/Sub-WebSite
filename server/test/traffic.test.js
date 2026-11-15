@@ -1,11 +1,13 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { openDatabase } from '../src/db.js';
-import { createTraffic, periodOf, formatGb, parseGb, GB } from '../src/traffic.js';
+import { createTraffic, periodOf, periodEnd, formatGb, parseGb, GB } from '../src/traffic.js';
 
 // Учёт трафика и лимит: счётчики сервера VPN подменены, портал — заглушка, которая ставит паузу в базе
 
-const NOV = Date.UTC(2026, 10, 15, 12, 0); // 15 ноября, 15:00 МСК
+const NOV = Date.UTC(2026, 10, 15, 12, 0); // 15 ноября, 15:00 МСК — начало учёта
+const ANCHOR = Date.UTC(2026, 10, 14, 21, 0); // 15 ноября, 00:00 МСК
+const NEXT = Date.UTC(2026, 11, 14, 21, 10); // 15 декабря, 00:10 МСК — второй период
 
 function setup() {
   const db = openDatabase(':memory:');
@@ -35,9 +37,13 @@ function setup() {
   return { db, traffic, counters, notes, told, pauses, addMember, addDevice, member, limit, at: (t) => { clock = t; } };
 }
 
-test('трафик: месяц по Москве, ГБ, разбор лимита из формы', () => {
-  assert.equal(periodOf(Date.UTC(2026, 10, 30, 21, 30)), '2026-12', '30.11 21:30 UTC — уже 1 декабря по Москве');
-  assert.equal(periodOf(NOV), '2026-11');
+test('трафик: периоды по 30 дней от начала учёта, ГБ, разбор лимита из формы', () => {
+  assert.deepEqual(periodOf(NOV, ANCHOR), { id: '2026-11-15', start: ANCHOR, end: ANCHOR + 30 * 86400000 });
+  assert.equal(periodOf(Date.UTC(2026, 11, 14, 20, 59), ANCHOR).id, '2026-11-15', '14.12 23:59 МСК — ещё первый период');
+  assert.equal(periodOf(NEXT, ANCHOR).id, '2026-12-15');
+  assert.equal(periodOf(Date.UTC(2027, 0, 14, 0, 0), ANCHOR).id, '2027-01-14', 'дальше — каждые 30 дней, не по числам месяца');
+  assert.equal(periodEnd('2026-11-15'), ANCHOR + 30 * 86400000);
+  assert.equal(periodEnd('мусор'), null);
   assert.equal(formatGb(1.5 * GB), '1,5 ГБ');
   assert.equal(formatGb(300 * 1024 ** 2), '300 МБ');
   assert.equal(parseGb('50'), 50);
@@ -49,7 +55,7 @@ test('трафик: месяц по Москве, ГБ, разбор лимит�
   assert.throws(() => parseGb(''), /Укажите лимит/);
 });
 
-test('трафик: приросты счётчиков копятся; обнуление счётчика (перезапуск) не теряет трафик; новый месяц — с нуля', async () => {
+test('трафик: приросты счётчиков копятся; обнуление счётчика (перезапуск) не теряет трафик; новый период — с нуля', async () => {
   const t = setup();
   const a = t.addMember('AAAA');
   t.addDevice(a, 1, 'k1');
@@ -78,15 +84,22 @@ test('трафик: приросты счётчиков копятся; обну
   await t.traffic.tick();
   assert.equal(t.traffic.usageOf(t.member(a)).used, 2 * GB);
 
-  // 1 декабря: счёт с нуля, показания продолжаются
+  // 1 декабря — тот же период (учёт начался 15 ноября)
   t.at(Date.UTC(2026, 11, 1, 9, 0));
+  t.counters.set('k1', 0.6 * GB);
+  await t.traffic.tick();
+  assert.equal(t.traffic.usageOf(t.member(a)).period, '2026-11-15');
+  assert.ok(Math.abs(t.traffic.usageOf(t.member(a)).used - 2.1 * GB) < 1024);
+  // 15 декабря, через 30 дней: счёт с нуля, показания продолжаются
+  t.at(NEXT);
   t.counters.set('k1', 0.75 * GB);
   await t.traffic.tick();
-  assert.equal(t.traffic.usageOf(t.member(a)).used, 0.25 * GB);
-  assert.equal(t.traffic.usageOf(t.member(a)).period, '2026-12');
+  assert.ok(Math.abs(t.traffic.usageOf(t.member(a)).used - 0.15 * GB) < 1024);
+  assert.equal(t.traffic.usageOf(t.member(a)).period, '2026-12-15');
+  assert.equal(t.traffic.settings().startedAt, ANCHOR, 'начало учёта запомнено');
 });
 
-test('лимит: 80% — предупреждение один раз; исчерпан — пауза и сообщения; админ и «без лимита» — не трогаются; 1-го числа — включение', async () => {
+test('лимит: 80% — предупреждение один раз; исчерпан — пауза и сообщения; админ и «без лимита» — не трогаются; новый период — включение', async () => {
   const t = setup();
   t.limit(10);
   const a = t.addMember('AAAA', { chat: '111' });
@@ -104,32 +117,33 @@ test('лимит: 80% — предупреждение один раз; исче
   for (const key of ['ka', 'kb', 'kf', 'kg']) t.counters.set(key, 8.5 * GB);
   await t.traffic.tick();
   assert.equal(t.told.length, 1);
-  assert.match(t.told[0].text, /Израсходовано 8,5 ГБ из 10,0 ГБ трафика за ноябрь/);
+  assert.match(t.told[0].text, /Израсходовано 8,5 ГБ из 10,0 ГБ трафика за 30 дней\. Когда лимит кончится, VPN выключится до 15\.12/);
   await t.traffic.tick();
   assert.equal(t.told.length, 1, 'предупреждение — один раз за месяц');
 
   for (const key of ['ka', 'kb', 'kf', 'kg']) t.counters.set(key, 12 * GB);
   const r = await t.traffic.tick();
   assert.deepEqual(r.paused, ['AAAA'], 'админа, участника без лимита и со своим лимитом 100 ГБ не трогает');
-  assert.deepEqual(t.pauses.at(-1), { id: a, paused: true, reason: 'traffic', trafficPeriod: '2026-11', quiet: true });
+  assert.deepEqual(t.pauses.at(-1), { id: a, paused: true, reason: 'traffic', trafficPeriod: '2026-11-15', quiet: true });
   assert.equal(t.member(a).pause_reason, 'traffic');
-  assert.match(t.notes.at(-1), /📶 AAAA: трафик за ноябрь — 12,0 ГБ из 10,0 ГБ\. Ключи на паузе до 1-го числа/);
-  assert.match(t.told.at(-1).text, /Трафик за ноябрь исчерпан: 12,0 ГБ из 10,0 ГБ/);
+  assert.match(t.notes.at(-1), /📶 AAAA: трафик за 30 дней — 12,0 ГБ из 10,0 ГБ\. Ключи на паузе до 15\.12/);
+  assert.match(t.told.at(-1).text, /Трафик за 30 дней исчерпан: 12,0 ГБ из 10,0 ГБ\. VPN выключен до 15\.12 \(00:00 МСК\)/);
   assert.equal(t.traffic.usage().get(boss).limit, null);
   assert.equal(t.traffic.usage().get(big).limit, 100 * GB);
 
-  // в том же месяце — не включается
-  assert.deepEqual((await t.traffic.tick()).resumed, []);
-  // 1 декабря — включается сам
+  // в том же периоде (1 декабря — ещё он) — не включается
   t.at(Date.UTC(2026, 11, 1, 0, 10));
+  assert.deepEqual((await t.traffic.tick()).resumed, []);
+  // 15 декабря — новый период, включается сам
+  t.at(NEXT);
   const dec = await t.traffic.tick();
   assert.deepEqual(dec.resumed, ['AAAA']);
   assert.equal(t.member(a).status, 'active');
-  assert.match(t.notes.at(-1), /Новый месяц: включены после лимита трафика — AAAA/);
-  assert.match(t.told.at(-1).text, /Новый месяц — трафик снова доступен/);
+  assert.match(t.notes.at(-1), /Новый период трафика: включены после лимита — AAAA/);
+  assert.match(t.told.at(-1).text, /Начался новый период — трафик снова доступен/);
 });
 
-test('лимит: админ включил раньше — до конца месяца без лимита; покупатель с закончившимся сроком 1-го числа не включается', async () => {
+test('лимит: админ включил раньше — до конца периода без лимита; покупатель с закончившимся сроком в новом периоде не включается', async () => {
   const t = setup();
   t.limit(1);
   const a = t.addMember('AAAA');
@@ -143,19 +157,19 @@ test('лимит: админ включил раньше — до конца м�
   t.counters.set('kb', 2 * GB);
   assert.deepEqual((await t.traffic.tick()).paused, ['AAAA', 'BUYR']);
 
-  // админ включает AAAA: лимит снят до конца ноября
+  // админ включает AAAA: лимит снят до конца периода
   t.traffic.exempt(a);
   await t.db.prepare("UPDATE members SET status = 'active', pause_reason = NULL WHERE id = ?").run(a);
   t.counters.set('ka', 5 * GB);
   assert.deepEqual((await t.traffic.tick()).paused, []);
   assert.equal(t.traffic.usageOf(t.member(a)).exempt, true);
 
-  // 1 декабря: срок покупателя кончился 20 ноября — его пауза становится паузой по сроку
-  t.at(Date.UTC(2026, 11, 1, 6, 0));
+  // новый период: срок покупателя кончился 20 ноября — его пауза становится паузой по сроку
+  t.at(NEXT);
   const dec = await t.traffic.tick();
   assert.deepEqual(dec.resumed, []);
   assert.equal(t.member(buyer).status, 'paused');
   assert.equal(t.member(buyer).pause_reason, 'expired');
-  // в декабре лимит для AAAA снова действует
+  // в новом периоде лимит для AAAA снова действует
   assert.equal(t.traffic.usageOf(t.member(a)).exempt, false);
 });

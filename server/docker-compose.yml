@@ -60,7 +60,8 @@ services:
       SERVER_PUBLIC_HOST: ${VPN_HOST:?Укажите VPN_HOST в .env}
       PROTOCOLS_ENABLED: ${PROTOCOLS:-amneziawg3}
       SERVER_ID: ${SERVER_ID:?Укажите SERVER_ID в .env}
-      SERVER_NAME: family
+      # название сервера в ключах (поле description): так он называется в приложении AmneziaVPN
+      SERVER_NAME: "Nomad VPN"
       CORS_ORIGINS: ""
       DOCKER_API_VERSION: ${DOCKER_API_VERSION:?Укажите DOCKER_API_VERSION в .env}
     expose:

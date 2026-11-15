@@ -1,8 +1,8 @@
 import { transaction } from './db.js';
 import { sha256, newToken, newMemberCode, encryptSecret, decryptSecret } from './crypto.js';
-import { hostOfKey, isIpAddress, clientOfKey } from './vpnKey.js';
+import { hostOfKey, isIpAddress, clientOfKey, withName } from './vpnKey.js';
 import { wgAllowed, setPeerAllowed } from './amnezia.js';
-import { LIMITS, PROTOCOLS, PLATFORMS } from './config.js';
+import { LIMITS, PROTOCOLS, PLATFORMS, BRAND } from './config.js';
 
 // Логика портала без HTTP: её используют и сайт, и команды CLI.
 //
@@ -206,7 +206,8 @@ function createPortal({ db, config, amnezia, notify, now = () => Date.now() }) {
     } catch {
       host = null;
     }
-    const sealed = encryptSecret(config.keyEncryptionKey, client.config, aad(device.id));
+    // в приложении AmneziaVPN сервер называется именем сервиса
+    const sealed = encryptSecret(config.keyEncryptionKey, withName(client.config, BRAND), aad(device.id));
     if (q.fillDevice.run(client.id, host, sealed, device.id).changes === 0) {
       // устройство удалили, пока сервер создавал ключ: ключ на сервере не нужен
       await amnezia.deleteClient({ id: client.id, protocol }).catch(() => {});
@@ -228,7 +229,8 @@ function createPortal({ db, config, amnezia, notify, now = () => Date.now() }) {
     return device;
   }
 
-  const deviceKey = (device) => decryptSecret(config.keyEncryptionKey, device.key_enc, aad(device.id));
+  // ключи, выданные до переименования, показываются уже с именем сервиса (ключ тот же)
+  const deviceKey = (device) => withName(decryptSecret(config.keyEncryptionKey, device.key_enc, aad(device.id)), BRAND);
 
   async function removeFromServer(member, device) {
     if (device.client_id) {
@@ -268,7 +270,7 @@ function createPortal({ db, config, amnezia, notify, now = () => Date.now() }) {
   // бэкапа) он эти адреса теряет, и «возобновить» молча ничего не делает. Поэтому после
   // возобновления портал проверяет ключи сам и, если нужно, возвращает адрес из сохранённого ключа.
   // reason — почему пауза: admin, expired (конец срока), traffic (лимит трафика; trafficPeriod —
-  // за какой месяц). quiet — без сообщения админу (массовые операции и лимит трафика пишут сами).
+  // за какой период). quiet — без сообщения админу (массовые операции и лимит трафика пишут сами).
   // repair: false — не проверять ключи после возобновления (массовое включение проверит один раз).
   async function setPaused(memberId, paused, { reason = 'admin', trafficPeriod = null, quiet = false, repair = true } = {}) {
     const member = requireMember(memberId);

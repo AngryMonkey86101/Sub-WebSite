@@ -40,8 +40,8 @@ const STATIC = {
 function webManifest(startUrl) {
   return {
     id: '/',
-    name: 'Табор VPN',
-    short_name: 'Табор VPN',
+    name: 'Nomad VPN',
+    short_name: 'Nomad VPN',
     lang: 'ru',
     start_url: startUrl,
     scope: '/',
@@ -142,7 +142,7 @@ function createApp({
   reboot = null,
   // продажа доступа через бота (shop.js); без неё раздела «Продажи» нет
   shop = null,
-  // трафик и лимит в месяц (traffic.js); без него — без учёта трафика
+  // трафик и лимит на 30 дней (traffic.js); без него — без учёта трафика
   traffic = null,
   now = () => Date.now()
 }) {
@@ -301,7 +301,7 @@ function createApp({
         monitorSeenAt: heartbeat.lastSeen(),
         backup: backup?.status() ?? { configured: false },
         rebootAvailable: reboot?.available() ?? false,
-        traffic: traffic ? { members: traffic.usage(), devices: traffic.deviceUsage(), settings: traffic.settings() } : null,
+        traffic: traffic ? { members: traffic.usage(), devices: traffic.deviceUsage(), settings: traffic.settings(), period: traffic.current() } : null,
         notice: Object.fromEntries(new URL(req.url, config.publicUrl).searchParams),
         nowMs: now()
       }));
@@ -424,7 +424,7 @@ function createApp({
       return redirect(`/admin?${qs}#members`);
     }],
 
-    // Общий лимит трафика в месяц
+    // Общий лимит трафика за период
     ['POST', /^\/admin\/traffic$/, ({ member, form }) => {
       requireAdmin(member);
       if (!traffic) throw new PortalError(404, 'Учёт трафика не включён');
@@ -464,7 +464,7 @@ function createApp({
           await portal.setPaused(memberId, true);
           break;
         case 'resume':
-          // выключен за трафик, а админ включает раньше 1-го числа — до конца месяца без лимита
+          // выключен за трафик, а админ включает раньше конца периода — до его конца без лимита
           if (traffic && portal.memberById(memberId)?.pause_reason === 'traffic') traffic.exempt(memberId);
           await portal.setPaused(memberId, false);
           break;

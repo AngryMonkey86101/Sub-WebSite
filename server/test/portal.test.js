@@ -8,7 +8,9 @@ import { createAmneziaClient } from '../src/amnezia.js';
 import { createPortal } from '../src/portal.js';
 import { createApp } from '../src/app.js';
 import { startFakeAmnezia, DEVICE_ENDPOINT } from './fakeAmnezia.js';
-import { createTraffic, periodOf, GB } from '../src/traffic.js';
+import { createTraffic, GB } from '../src/traffic.js';
+import { decodeVpnKey, encodeVpnKey } from '../src/vpnKey.js';
+import { encryptSecret } from '../src/crypto.js';
 
 // Портал через настоящий HTTP поверх поддельного amnezia-api. Время подменено.
 
@@ -25,10 +27,11 @@ let server;
 let base;
 let notifications;
 let traffic;
+let config;
 
 before(async () => {
   fake = await startFakeAmnezia({ apiKey: API_KEY });
-  const config = loadConfig({
+  config = loadConfig({
     PUBLIC_URL,
     AMNEZIA_API_URL: fake.url,
     AMNEZIA_API_KEY: API_KEY,
@@ -529,7 +532,7 @@ test('проверка ключей: на паузе, а ключ работае
   assert.equal(fake.byName(`${member.code}-1`)[0].allowed, '0.0.0.0/32');
 });
 
-test('админка: ключи участника — в выпадающем списке, трафик за месяц; общий и свой лимит трафика', async () => {
+test('админка: ключи участника — в выпадающем списке, трафик за 30 дней; общий и свой лимит трафика', async () => {
   const admin = await joinedMember({ role: 'admin' });
   const { member, browser: b } = await joinedMember();
   await addDevice(b);
@@ -540,16 +543,16 @@ test('админка: ключи участника — в выпадающем 
   await traffic.tick();
 
   let pageText = (await admin.browser.get('/admin')).text;
-  assert.match(pageText, new RegExp(`<b>${member.code}</b>[\\s\\S]*?трафик за месяц 1,5 ГБ[\\s\\S]*?<details class="keys">\\s*<summary>Ключи \\(1\\)</summary>[\\s\\S]*?за месяц 1,5 ГБ`));
+  assert.match(pageText, new RegExp(`<b>${member.code}</b>[\\s\\S]*?трафик с \\d\\d\\.\\d\\d: 1,5 ГБ[\\s\\S]*?<details class="keys">\\s*<summary>Ключи \\(1\\)</summary>[\\s\\S]*?за 30 дней 1,5 ГБ`));
   assert.match(pageText, /Выключить всех[\s\S]*Включить всех/);
-  assert.match(pageText, /<h2 id="traffic">Трафик<\/h2>[\s\S]*Сейчас: без лимита/);
+  assert.match(pageText, /<h2 id="traffic">Трафик<\/h2>[\s\S]*Текущий период: <b>\d\d\.\d\d — \d\d\.\d\d<\/b>, новый — \d\d\.\d\d в 00:00 МСК[\s\S]*Лимит: без лимита/);
 
   assert.equal((await admin.browser.post('/admin/traffic', { limit_gb: '2,5' })).status, 303);
   assert.equal(traffic.settings().limitGb, 2.5);
   assert.equal((await admin.browser.post('/admin/traffic', { limit_gb: '-3' })).status, 400);
   pageText = (await admin.browser.get('/admin')).text;
-  assert.match(pageText, /Сейчас: <b>2,5 ГБ<\/b> в месяц на участника/);
-  assert.match(pageText, new RegExp(`${member.code}</b>[\\s\\S]*?трафик за месяц 1,5 ГБ из 2,5 ГБ`));
+  assert.match(pageText, /Лимит: <b>2,5 ГБ<\/b> за 30 дней на участника/);
+  assert.match(pageText, new RegExp(`${member.code}</b>[\\s\\S]*?трафик с \\d\\d\\.\\d\\d: 1,5 ГБ из 2,5 ГБ`));
 
   // свой лимит участника; пусто — снова общий
   assert.equal((await admin.browser.post(`/admin/members/${member.id}/traffic`, { limit_gb: '0' })).status, 303);
@@ -557,20 +560,20 @@ test('админка: ключи участника — в выпадающем 
   assert.equal(traffic.usageOf(portal.memberById(member.id)).limit, null, '0 — без лимита');
   assert.equal((await admin.browser.post(`/admin/members/${member.id}/traffic`, { limit_gb: '' })).status, 303);
   assert.equal(portal.memberById(member.id).traffic_limit_gb, null);
-  assert.match((await b.get('/')).text, /Трафик за месяц 1,5 ГБ из 2,5 ГБ/, 'участник видит свой трафик');
+  assert.match((await b.get('/')).text, /Трафик с \d\d\.\d\d: 1,5 ГБ из 2,5 ГБ/, 'участник видит свой трафик');
 
   // лимит исчерпан — пауза; в кабинете — почему; админ включает — до конца месяца без лимита
   key.traffic = { received: 2 * GB, sent: GB };
   assert.deepEqual((await traffic.tick()).paused, [member.code]);
   assert.equal(key.status, 'disabled');
-  assert.match((await b.get('/')).text, /Трафик за месяц исчерпан/);
+  assert.match((await b.get('/')).text, /Трафик за 30 дней исчерпан — ключи не работают до \d\d\.\d\d/);
   pageText = (await admin.browser.get('/admin')).text;
-  assert.match(pageText, /на паузе: исчерпан лимит трафика, включится 1-го числа/);
+  assert.match(pageText, /на паузе: исчерпан лимит трафика, включится \d\d\.\d\d/);
   assert.equal((await admin.browser.post(`/admin/members/${member.id}/resume`)).status, 303);
   assert.equal(key.status, 'active');
-  assert.equal(portal.memberById(member.id).traffic_exempt, periodOf(clock));
+  assert.equal(portal.memberById(member.id).traffic_exempt, traffic.current().id);
   key.traffic = { received: 5 * GB, sent: GB };
-  assert.deepEqual((await traffic.tick()).paused, [], 'до конца месяца лимит не действует');
+  assert.deepEqual((await traffic.tick()).paused, [], 'до конца периода лимит не действует');
   traffic.saveSettings(new URLSearchParams({ limit_gb: '0' }));
 });
 
@@ -598,7 +601,7 @@ test('«Выключить всех» и «Включить всех»: адми
 
   // у покупателя тем временем кончился срок, у второго — лимит трафика
   db.prepare("UPDATE members SET paid_until = ?, pause_reason = 'expired' WHERE id = ?").run(clock - DAY, buyer.member.id);
-  db.prepare("UPDATE members SET pause_reason = 'traffic', traffic_paused = ? WHERE id = ?").run(periodOf(clock), two.member.id);
+  db.prepare("UPDATE members SET pause_reason = 'traffic', traffic_paused = ? WHERE id = ?").run(traffic.current().id, two.member.id);
   notifications.length = 0;
   res = await admin.browser.post('/admin/members/all/resume');
   assert.equal(res.status, 303);
@@ -609,4 +612,19 @@ test('«Выключить всех» и «Включить всех»: адми
   const summary = notifications.find((t) => t.startsWith('▶️ Включены все участники:'));
   assert.match(summary, new RegExp(`Не включены: .*${two.member.code} \\(лимит трафика\\).*${buyer.member.code} \\(срок закончился\\)|Не включены: .*${buyer.member.code} \\(срок закончился\\).*${two.member.code} \\(лимит трафика\\)`));
   assert.ok(!notifications.some((t) => t.startsWith(`▶️ ${one.member.code}:`)), 'по одному сообщению на участника — нет, только итог');
+});
+
+test('ключ называется Nomad VPN: новый — сразу, выданный раньше — при показе', async () => {
+  const { member, browser: b } = await joinedMember();
+  const { id } = await addDevice(b);
+  const device = portal.deviceOf(member.id, id);
+  assert.equal(decodeVpnKey(portal.deviceKey(device)).description, 'Nomad VPN');
+  const page = (await b.get(`/devices/${id}`)).text;
+  const shown = page.match(/vpn:\/\/[A-Za-z0-9_-]+/)[0];
+  assert.equal(decodeVpnKey(shown).description, 'Nomad VPN', 'на странице устройства — тот же ключ с названием');
+
+  // ключ, выданный до переименования (amnezia-api назвал его family)
+  const old = encodeVpnKey({ ...decodeVpnKey(portal.deviceKey(device)), description: 'family' });
+  db.prepare('UPDATE devices SET key_enc = ? WHERE id = ?').run(encryptSecret(config.keyEncryptionKey, old, `device:${id}`), id);
+  assert.equal(decodeVpnKey(portal.deviceKey(portal.deviceOf(member.id, id))).description, 'Nomad VPN');
 });

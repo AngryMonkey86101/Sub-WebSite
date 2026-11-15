@@ -117,7 +117,7 @@ function createBackup({ config, db, amnezia, telegram, notify, env = process.env
   function envFile(time) {
     const values = { ...env, PORTAL_HOST: new URL(config.publicUrl).hostname };
     return [
-      `# Настройки «Табор VPN» из бэкапа ${stamp(time)} ${clock(time)} UTC.`,
+      `# Настройки «Nomad VPN» из бэкапа ${stamp(time)} ${clock(time)} UTC.`,
       '# DOCKER_GID и DOCKER_API_VERSION зависят от сервера: на новом определите их заново',
       '# (server/README.md, шаг 4).',
       ...ENV_KEYS.filter((key) => key !== 'APP_DOWNLOAD_URL' || values[key]).map((key) => `${key}=${values[key]?.trim() ?? ''}`),
@@ -127,7 +127,7 @@ function createBackup({ config, db, amnezia, telegram, notify, env = process.env
     ].join('\n');
   }
 
-  const readme = (time) => `Бэкап «Табор VPN» — ${stamp(time)} ${clock(time)} UTC.
+  const readme = (time) => `Бэкап «Nomad VPN» — ${stamp(time)} ${clock(time)} UTC.
 
 env            настройки (.env). DOCKER_GID и DOCKER_API_VERSION зависят от сервера —
                на новом сервере определите их заново (server/README.md, шаг 4).

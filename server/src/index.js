@@ -51,7 +51,7 @@ const shop = createShop({
   notify: telegram.notify,
   deliver: telegram.deliver
 });
-// трафик участников и лимит в месяц: показания счётчиков сервера VPN — раз в 5 минут
+// трафик участников и лимит на 30 дней: показания счётчиков сервера VPN — раз в 5 минут
 const traffic = createTraffic({ db, amnezia, portal, notify: telegram.notify, deliver: telegram.deliver });
 telegram.start({
   admin: createBotCommands({ portal, config, watchdog, heartbeat, backup, reboot, shop }),
