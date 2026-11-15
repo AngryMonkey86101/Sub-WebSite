@@ -52,6 +52,9 @@ function createPortal({ db, config, amnezia, notify, now = () => Date.now() }) {
     stalePending: db.prepare('SELECT * FROM devices WHERE client_id IS NULL AND revoked_at IS NULL AND created_at <= ?'),
     ipHosts: db.prepare('SELECT DISTINCT host FROM devices WHERE revoked_at IS NULL AND host IS NOT NULL'),
     activeClientIds: db.prepare('SELECT client_id FROM devices WHERE client_id IS NOT NULL AND revoked_at IS NULL'),
+    awgKeys: db.prepare("SELECT * FROM devices WHERE revoked_at IS NULL AND key_enc IS NOT NULL AND protocol = 'amneziawg3'"),
+    deviceByClient: db.prepare(`SELECT m.code, d.number FROM devices d JOIN members m ON m.id = d.member_id
+      WHERE d.client_id = ? AND d.revoked_at IS NULL`),
     pendingNames: db.prepare(`SELECT m.code, d.number FROM devices d JOIN members m ON m.id = d.member_id
       WHERE d.client_id IS NULL AND d.revoked_at IS NULL`),
 
@@ -192,7 +195,7 @@ function createPortal({ db, config, amnezia, notify, now = () => Date.now() }) {
 
     let client;
     try {
-      client = await amnezia.createClient({ name, protocol });
+      client = await serial(() => createKey(name, protocol));
     } catch (err) {
       q.deleteDevice.run(device.id);
       log('device_failed', member.code, err.message);
@@ -219,6 +222,78 @@ function createPortal({ db, config, amnezia, notify, now = () => Date.now() }) {
       notify(`⚠️ ${name}: в ключе адрес «${host}», а не имя DuckDNS. Проверьте VPN_HOST в .env`);
     }
     return q.deviceById.get(device.id);
+  }
+
+  // Адрес ключа AmneziaWG внутри VPN (10.8.1.N) — из ключа vpn://; null — не прочитать
+  function keyAddress(key) {
+    try {
+      return clientOfKey(key)?.address ?? null;
+    } catch {
+      return null;
+    }
+  }
+  const storedAddress = (device) => (device.key_enc && device.protocol === 'amneziawg3' ? keyAddress(deviceKey(device)) : null);
+
+  // amnezia-api даёт новому ключу первый адрес, не занятый работающими ключами. Ключ на паузе
+  // (AllowedIPs 0.0.0.0/32) для него адреса не держит — и новый ключ мог получить адрес ключа на
+  // паузе: после включения у двух ключей один адрес, и VPN работает только у одного. Поэтому адрес
+  // нового ключа сверяется с сохранёнными ключами всех устройств портала. Занятый — этот ключ
+  // придерживается (следующий получит другой адрес), в конце придержанные удаляются.
+  async function createKey(name, protocol) {
+    const held = [];
+    try {
+      let client = await amnezia.createClient({ name, protocol });
+      if (protocol !== 'amneziawg3') return client;
+      const reserved = new Set(q.awgKeys.all().map(storedAddress).filter(Boolean));
+      while (reserved.has(keyAddress(client.config))) {
+        held.push(client);
+        if (held.length > reserved.size) throw new Error('нет свободного адреса для ключа');
+        client = await amnezia.createClient({ name, protocol });
+      }
+      if (held.length) log('key_address_skipped', null, `${name}: ${held.map((h) => keyAddress(h.config)).join(', ')}`);
+      return client;
+    } finally {
+      for (const h of held) {
+        await amnezia.deleteClient({ id: h.id, protocol }).catch((err) => notify(`⚠️ ${name}: не удалось удалить временный ключ — ${err.message}. Удалите его в админке, «Ключи вне портала»`));
+      }
+    }
+  }
+
+  // Работающие ключи AmneziaWG по адресам: «10.8.1.5/32» → [client_id, …]
+  function holdersOf(wgConfig) {
+    const holders = new Map();
+    for (const [id, ips] of wgAllowed(wgConfig)) {
+      for (const ip of ips) {
+        if (ip === '0.0.0.0/32') continue;
+        holders.set(ip, [...(holders.get(ip) ?? []), id]);
+      }
+    }
+    return holders;
+  }
+  const keyName = (clientId) => {
+    const row = q.deviceByClient.get(clientId);
+    return row ? `${row.code}-${row.number}` : 'ключ не из портала';
+  };
+
+  // Перед возобновлением: устройства, чей адрес (из сохранённого ключа) уже у другого работающего
+  // ключа. Их не включать: amnezia-api вернёт ключу запомненный адрес и отберёт его у того, кто
+  // сейчас работает. Нет связи с amnezia-api — проверки нет, ключи включаются как обычно
+  async function busyOnResume(member) {
+    let wgConfig = null;
+    try {
+      wgConfig = (await amnezia.serverBackup())?.amneziaWg3?.wgConfig ?? null;
+    } catch {
+      wgConfig = null;
+    }
+    const busy = new Set();
+    if (!wgConfig) return busy;
+    const holders = holdersOf(wgConfig);
+    for (const device of q.devicesOf.all(member.id)) {
+      const address = storedAddress(device);
+      const others = (holders.get(`${address}/32`) ?? []).filter((id) => id !== device.client_id);
+      if (address && others.length) busy.add(device.id);
+    }
+    return busy;
   }
 
   // Устройство участника с готовым ключом; чужое или отозванное — «не найдено»
@@ -278,8 +353,10 @@ function createPortal({ db, config, amnezia, notify, now = () => Date.now() }) {
     if (!paused && member.status !== 'paused') throw new PortalError(400, 'Участник не на паузе');
     const status = paused ? 'disabled' : 'active';
     await serial(async () => {
+      // занятые адреса — устройство остаётся выключенным, проверка ключей ниже скажет админу
+      const busy = paused ? new Set() : await busyOnResume(member);
       for (const device of q.devicesOf.all(member.id)) {
-        if (!device.client_id) continue;
+        if (!device.client_id || busy.has(device.id)) continue;
         try {
           await amnezia.setStatus({ id: device.client_id, protocol: device.protocol, status });
         } catch (err) {
@@ -358,7 +435,8 @@ function createPortal({ db, config, amnezia, notify, now = () => Date.now() }) {
       const part = backup?.amneziaWg3;
       if (!part?.wgConfig) throw new PortalError(502, 'amnezia-api не отдал ключи AmneziaWG');
       const allowed = wgAllowed(part.wgConfig);
-      const taken = new Set([...allowed.values()].flat().filter((ip) => ip !== '0.0.0.0/32'));
+      const holders = holdersOf(part.wgConfig);
+      const taken = new Set(holders.keys());
       let wgConfig = part.wgConfig;
       const fixed = [];
       const paused = [];
@@ -371,19 +449,22 @@ function createPortal({ db, config, amnezia, notify, now = () => Date.now() }) {
           const name = clientName(member, device.number);
           const current = allowed.get(device.client_id);
           const off = !current.length || (current.length === 1 && current[0] === '0.0.0.0/32');
+          let info = null;
+          try {
+            info = device.key_enc ? clientOfKey(deviceKey(device)) : null;
+          } catch {
+            info = null;
+          }
+          // кто ещё держит адрес этого устройства (выдан ему, пока устройство было на паузе)
+          const rivals = info ? (holders.get(`${info.address}/32`) ?? []).filter((id) => id !== device.client_id) : [];
+          const rivalNames = rivals.map(keyName).join(', ');
           if (shouldWork && off) {
-            let info = null;
-            try {
-              info = device.key_enc ? clientOfKey(deviceKey(device)) : null;
-            } catch {
-              info = null;
-            }
             if (!info) {
               failed.push({ name, reason: 'в сохранённом ключе нет адреса' });
             } else if (info.publicKey && info.publicKey !== device.client_id) {
               failed.push({ name, reason: 'сохранённый ключ не от этого устройства' });
             } else if (taken.has(`${info.address}/32`)) {
-              failed.push({ name, reason: `адрес ${info.address} уже у другого ключа` });
+              failed.push({ name, reason: `адрес ${info.address} уже у ключа ${rivalNames || 'другого устройства'}` });
             } else {
               taken.add(`${info.address}/32`);
               wgConfig = setPeerAllowed(wgConfig, device.client_id, `${info.address}/32`);
@@ -392,6 +473,14 @@ function createPortal({ db, config, amnezia, notify, now = () => Date.now() }) {
           } else if (!shouldWork && !off) {
             wgConfig = setPeerAllowed(wgConfig, device.client_id, '0.0.0.0/32');
             paused.push({ name });
+          } else if (rivals.length) {
+            failed.push({
+              name,
+              reason: off
+                ? `на паузе, а его адрес ${info.address} уже у ключа ${rivalNames} — после включения не заработает`
+                // один адрес у двух работающих ключей: VPN работает только у одного из них
+                : `адрес ${info.address} одновременно у ключа ${rivalNames} — VPN работает только у одного`
+            });
           }
         }
       }

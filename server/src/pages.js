@@ -338,6 +338,7 @@ const EVENT_LABELS = {
   member_paused: 'пауза',
   member_resumed: 'возобновлён',
   keys_repaired: 'ключи AmneziaWG исправлены',
+  key_address_skipped: 'новому ключу дан другой адрес (прежний — у ключа на паузе)',
   all_paused: 'выключены все',
   all_resumed: 'включены все',
   traffic_paused: 'пауза: лимит трафика',
