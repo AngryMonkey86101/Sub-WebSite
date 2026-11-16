@@ -532,6 +532,46 @@ test('проверка ключей: на паузе, а ключ работае
   assert.equal(fake.byName(`${member.code}-1`)[0].allowed, '0.0.0.0/32');
 });
 
+test('адрес ключа на паузе не отдаётся новому ключу; занятый адрес при возобновлении не отбирается', async () => {
+  const admin = await joinedMember({ role: 'admin' });
+  const first = await joinedMember();
+  const second = await joinedMember();
+  await addDevice(first.browser);
+  const a = fake.byName(`${first.member.code}-1`)[0];
+  const address = a.address;
+  assert.equal((await admin.browser.post(`/admin/members/${first.member.id}/pause`)).status, 303);
+  assert.equal(a.allowed, '0.0.0.0/32');
+
+  // amnezia-api отдал бы новому ключу адрес ключа на паузе — портал берёт следующий
+  await addDevice(second.browser);
+  const keys = fake.byName(`${second.member.code}-1`);
+  assert.equal(keys.length, 1, 'временный ключ удалён');
+  const b = keys[0];
+  assert.notEqual(b.address, address);
+
+  // возобновление: адрес вернулся, оба ключа работают
+  assert.equal((await admin.browser.post(`/admin/members/${first.member.id}/resume`)).status, 303);
+  assert.equal(a.allowed, `${address}/32`);
+  assert.equal(b.allowed, `${b.address}/32`);
+
+  // ключ, выданный до исправления: адрес ключа на паузе уже у другого работающего ключа
+  assert.equal((await admin.browser.post(`/admin/members/${first.member.id}/pause`)).status, 303);
+  b.allowed = `${address}/32`;
+  const dry = await portal.repairKeys({ apply: false });
+  assert.ok(dry.failed.some((x) => x.name === `${first.member.code}-1` && x.reason.includes(`на паузе, а его адрес ${address} уже у ключа ${second.member.code}-1`)), JSON.stringify(dry.failed));
+  notifications.length = 0;
+  assert.equal((await admin.browser.post(`/admin/members/${first.member.id}/resume`)).status, 303);
+  assert.equal(a.allowed, '0.0.0.0/32', 'не включён — иначе отобрал бы адрес');
+  assert.equal(b.allowed, `${address}/32`, 'работающий ключ не тронут');
+  assert.ok(notifications.some((t) => t.includes(`${first.member.code}-1 — адрес ${address} уже у ключа ${second.member.code}-1`)), notifications.join('\n'));
+
+  // оба работают с одним адресом — проверка ключей говорит об этом
+  a.allowed = `${address}/32`;
+  const both = await portal.repairKeys({ apply: false });
+  assert.ok(both.failed.some((x) => x.reason.includes(`одновременно у ключа ${second.member.code}-1`)), JSON.stringify(both.failed));
+  b.allowed = `${b.address}/32`;
+});
+
 test('админка: ключи участника — в выпадающем списке, трафик за 30 дней; общий и свой лимит трафика', async () => {
   const admin = await joinedMember({ role: 'admin' });
   const { member, browser: b } = await joinedMember();

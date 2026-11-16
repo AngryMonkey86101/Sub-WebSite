@@ -27,8 +27,7 @@ async function startFakeAmnezia({ apiKey, host = 'k4tq9v.duckdns.org' }) {
     host,
     clients: new Map(),
     failNext: 0,
-    requests: [],
-    nextAddress: 2
+    requests: []
   };
   // Как настоящий amnezia-api 2.0.0: ключ на паузе — AllowedIPs 0.0.0.0/32, прежний адрес
   // запоминается (remembered) и при возобновлении возвращается. Загрузка бэкапа адреса забывает:
@@ -122,12 +121,16 @@ async function startFakeAmnezia({ apiKey, host = 'k4tq9v.duckdns.org' }) {
     if (req.method === 'POST') {
       const protocol = body.protocol ?? 'amneziawg3';
       if (!body.clientName) return send(400, { message: 'Некорректный запрос' });
-      for (const client of state.clients.values()) {
-        if (client.name === body.clientName && client.protocol === protocol) return send(409, { message: 'Конфликт' });
-      }
+      // как настоящий: одинаковые имена не проверяются
       const privateKey = randomBytes(32).toString('base64');
       const id = protocol === 'xray' ? randomUUID() : randomBytes(32).toString('base64');
-      const address = `10.8.1.${state.nextAddress++}`;
+      // как настоящий amnezia-api: первый адрес, которого нет в AllowedIPs (адреса ключей на паузе
+      // — 0.0.0.0/32 — свободны); .1 — у сервера
+      const used = new Set([...state.clients.values()].flatMap((c) => String(c.allowed ?? '').split(','))
+        .map((ip) => ip.trim().match(/^\d+\.\d+\.\d+\.(\d+)\/32$/)?.[1]).filter(Boolean).map(Number));
+      let host = 2;
+      while (used.has(host)) host += 1;
+      const address = `10.8.1.${host}`;
       state.clients.set(id, {
         id,
         name: body.clientName,
