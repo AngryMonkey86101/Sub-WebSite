@@ -68,7 +68,8 @@ function deviceStatus(device, peer, nowMs, { monthly = false } = {}) {
 }
 
 // section — раздел для навигации админа: 'cabinet', 'admin' или 'shop'
-function layout({ title, member, body, section }) {
+// miniApp — страница внутри Telegram: тема Telegram и сигнал «готово» (static/tg.js)
+function layout({ title, member, body, section, miniApp = member?.sessionVia === 'tg' }) {
   const current = (name) => (section === name ? 'page' : 'false');
   return html`<!doctype html>
 <html lang="ru">
@@ -84,6 +85,7 @@ function layout({ title, member, body, section }) {
 ${member?.token ? html`<link rel="manifest" href="/manifest.webmanifest?t=${member.token}">` : ''}
 <link rel="stylesheet" href="/static/style.css">
 <script src="/static/app.js" defer></script>
+${miniApp ? html`<script src="/static/tg.js" defer></script>` : ''}
 </head>
 <body>
 <header>
@@ -243,7 +245,7 @@ function cabinetPage({ member, devices, statuses, protocols, traffic = null, now
         <button type="submit" class="primary">Получить ключ</button>
       </form>`}
 
-      ${homeScreenSection()}
+      ${member.token ? homeScreenSection() : ''}
 
       <h2>Личная ссылка</h2>
       <p class="muted">Если кто-то мог увидеть вашу личную ссылку, выпустите новую — старая перестанет работать.</p>
@@ -792,6 +794,38 @@ function shopPage({ admin, shop, notice, nowMs }) {
   });
 }
 
+// Вход в мини-приложение: static/tg.js берёт данные запуска из адреса и отправляет форму.
+// Без скрипта или вне Telegram страница объясняет, откуда её открывать.
+function miniAppPage() {
+  return layout({
+    title: 'Кабинет',
+    miniApp: true,
+    body: html`
+      <h1>Открываем кабинет…</h1>
+      <form method="post" action="/tg" data-tg-login hidden>
+        <input type="hidden" name="init_data">
+        <button type="submit" class="primary">Открыть кабинет</button>
+      </form>
+      <p class="muted" data-tg-outside>Эта страница открывается из бота Nomad VPN: кнопка «📱 Открыть кабинет». В браузере кабинет открывается по личной ссылке.</p>`
+  });
+}
+
+// Открыли мини-приложение, а доступа у этого чата нет
+function miniAppNoAccessPage({ botUrl, isAdmin }) {
+  return layout({
+    title: 'Нет доступа',
+    miniApp: true,
+    body: isAdmin
+      ? html`
+      <h1>Здесь кабинет покупателя</h1>
+      <p>Админка и ваши устройства открываются по вашей личной ссылке в браузере.</p>`
+      : html`
+      <h1>Доступа пока нет</h1>
+      <p>Купите доступ или возьмите пробный в боте — потом кабинет откроется здесь же.</p>
+      ${botUrl ? html`<p><a class="button" href="${botUrl}">Вернуться в бота</a></p>` : ''}`
+  });
+}
+
 function errorPage({ status, message, member }) {
   return layout({
     title: 'Ошибка',
@@ -812,6 +846,8 @@ export {
   invitePage,
   personalLinkPage,
   cabinetPage,
+  miniAppPage,
+  miniAppNoAccessPage,
   devicePage,
   adminPage,
   inviteCreatedPage,

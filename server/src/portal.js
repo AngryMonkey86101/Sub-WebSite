@@ -37,6 +37,8 @@ function createPortal({ db, config, amnezia, notify, now = () => Date.now() }) {
     deleteExpiredInvites: db.prepare('DELETE FROM invites WHERE expires_at <= ?'),
 
     insertToken: db.prepare('INSERT INTO access_tokens (token_hash, member_id, created_at) VALUES (?, ?, ?)'),
+    insertTokenVia: db.prepare('INSERT INTO access_tokens (token_hash, member_id, created_at, via) VALUES (?, ?, ?, ?)'),
+    deleteTokensVia: db.prepare('DELETE FROM access_tokens WHERE member_id = ? AND via = ?'),
     tokenByHash: db.prepare('SELECT * FROM access_tokens WHERE token_hash = ?'),
     countTokensOf: db.prepare('SELECT COUNT(*) AS n FROM access_tokens WHERE member_id = ?'),
     deleteTokensOf: db.prepare('DELETE FROM access_tokens WHERE member_id = ?'),
@@ -147,7 +149,28 @@ function createPortal({ db, config, amnezia, notify, now = () => Date.now() }) {
   function memberByToken(token) {
     if (typeof token !== 'string' || !token || token.length > 100) return null;
     const row = q.tokenByHash.get(sha256(token));
-    return row ? q.memberById.get(row.member_id) : null;
+    const member = row ? q.memberById.get(row.member_id) : null;
+    // sessionVia: 'tg' — вход из мини-приложения Telegram, null — по личной ссылке
+    return member ? { ...member, sessionVia: row.via ?? null } : null;
+  }
+
+  // Вход из мини-приложения Telegram: чат уже проверен по подписи (miniApp.js). Покупатель
+  // получает свой вход «tg» рядом с личной ссылкой: ссылка в браузере продолжает работать,
+  // прежний вход «tg» заменяется. Приглашение, которое ещё не открывали, считается принятым.
+  // Админ так не входит: у него нет чата покупателя, админка — по личной ссылке.
+  function telegramLogin(chat) {
+    return transaction(db, () => {
+      const member = memberByChat(chat);
+      if (!member || member.role === 'admin') return null;
+      if (member.status === 'invited') {
+        q.setMemberStatus.run('active', member.id);
+        log('invite_activated', member.code, 'мини-приложение Telegram');
+      }
+      q.deleteTokensVia.run(member.id, 'tg');
+      const accessToken = newToken();
+      q.insertTokenVia.run(sha256(accessToken), member.id, now(), 'tg');
+      return { member: q.memberById.get(member.id), accessToken };
+    });
   }
 
   // Новая личная ссылка по просьбе самого участника (старую кто-то мог увидеть)
@@ -590,6 +613,7 @@ function createPortal({ db, config, amnezia, notify, now = () => Date.now() }) {
     peekInvite,
     activateInvite,
     memberByToken,
+    telegramLogin,
     memberByCode,
     memberByChat,
     memberById: (id) => q.memberById.get(id) ?? null,

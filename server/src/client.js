@@ -3,10 +3,12 @@ import { DAY } from './config.js';
 import { formatMsk, formatRub, devicesLabel, plural, periodLabel, parsePeriodKey, DEVICE_OPTIONS } from './shop.js';
 import { appLinks, SYSTEMS } from './apps.js';
 import { esc, b, i, code, quote } from './tgHtml.js';
+import { miniAppUrl } from './miniApp.js';
 
 // Клиентская часть бота: то, что видят в Telegram все, кроме админа (docs/PLAN.md, раздел 14).
 //
-// Ответ — «экран»: { text, buttons }. text — HTML (tgHtml.js): всё, что задаёт админ
+// Ответ — «экран»: { text, buttons }. Кнопка { text, webApp } открывает кабинет мини-приложением
+// Telegram (miniApp.js). text — HTML (tgHtml.js): всё, что задаёт админ
 // (реквизиты, реклама) и тексты ошибок, — только через esc(). buttons — ряды кнопок: { text, action } — кнопка бота,
 // { text, url } — ссылка. Кнопки переключают экраны, правя то же сообщение (telegram.js).
 //
@@ -31,6 +33,10 @@ const LIST = [
 const BACK = [{ text: '← Меню', action: 'menu' }];
 
 function createClientBot({ config, shop, now = () => Date.now() }) {
+  // Кабинет внутри Telegram — только тем, у кого есть доступ (и если портал на HTTPS)
+  const cabinetUrl = miniAppUrl(config);
+  const cabinetButton = (member) => (member && cabinetUrl ? [[{ text: '📱 Открыть кабинет', webApp: cabinetUrl }]] : []);
+
   // Срок доступа одной строкой — в меню и в «Мой доступ»
   function describeAccess(member) {
     const active = member.paid_until > now() && member.status !== 'paused';
@@ -46,7 +52,7 @@ function createClientBot({ config, shop, now = () => Date.now() }) {
   function menu(chat) {
     const member = shop.memberOf(chat);
     const open = shop.isOpen();
-    const rows = [];
+    const rows = [...cabinetButton(member)];
     if (open) rows.push([{ text: member ? '🛒 Продлить' : '🛒 Купить', action: 'buy' }]);
     if (shop.trialAvailable(chat)) {
       const { trial } = shop.settings();
@@ -76,7 +82,7 @@ function createClientBot({ config, shop, now = () => Date.now() }) {
         '',
         `${b('1.')} Установите приложение AmneziaVPN — кнопка «Скачать приложение», выберите свою систему.`,
         quote('На iPhone с российским Apple ID AmneziaVPN в App Store нет: там будет DefaultVPN от тех же разработчиков — ключ подходит.'),
-        `${b('2.')} Купите доступ или возьмите пробный. Бот пришлёт ссылку на личный кабинет.`,
+        `${b('2.')} Купите доступ или возьмите пробный. ${cabinetUrl ? 'Личный кабинет откроется прямо в Telegram — кнопка «Открыть кабинет».' : 'Бот пришлёт ссылку на личный кабинет.'}`,
         `${b('3.')} В кабинете добавьте устройство и вставьте ключ в приложение.`,
         '',
         `💡 ${i('Если VPN перестал подключаться — выключите и включите его в приложении.')}`
@@ -109,8 +115,11 @@ function createClientBot({ config, shop, now = () => Date.now() }) {
       lines.push(`🔑 ${b('Доступа пока нет.')} Когда купите доступ, бот пришлёт ссылку на личный кабинет: в нём вы сами добавляете устройства и забираете ключи.`);
     } else {
       lines.push(describeAccess(member));
-      lines.push('', 'Ключи — в личном кабинете по вашей личной ссылке. Потеряли ссылку — кнопка «Новая ссылка на кабинет».');
-      rows.push([{ text: '🔗 Новая ссылка на кабинет', action: 'relink' }]);
+      lines.push('', cabinetUrl
+        ? 'Ключи — в личном кабинете: кнопка «Открыть кабинет» открывает его прямо в Telegram. Для браузера — личная ссылка; потеряли её — кнопка «Новая ссылка для браузера».'
+        : 'Ключи — в личном кабинете по вашей личной ссылке. Потеряли ссылку — кнопка «Новая ссылка на кабинет».');
+      rows.push(...cabinetButton(member));
+      rows.push([{ text: cabinetUrl ? '🔗 Новая ссылка для браузера' : '🔗 Новая ссылка на кабинет', action: 'relink' }]);
     }
     if (pending) {
       lines.push('', quote(`🧾 Ждёт оплаты ${b(`заказ №${pending.id}`)}: ${esc(shop.describeOrder(pending))}.`));

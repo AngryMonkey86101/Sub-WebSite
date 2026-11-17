@@ -3,6 +3,7 @@ import { transaction } from './db.js';
 import { PortalError } from './portal.js';
 import { HOUR, DAY } from './config.js';
 import { esc, b, code } from './tgHtml.js';
+import { miniAppUrl } from './miniApp.js';
 
 // Продажа доступа через бота (docs/PLAN.md, раздел 14): тарифы, заказы, пробный период, сроки.
 //
@@ -375,15 +376,20 @@ function createShop({ db, config, portal, yookassa = null, returnUrl = () => con
     return { ...created, wasPaused: false };
   }
 
-  // Экран покупателю, когда доступ выдан или продлён
+  // Экран покупателю, когда доступ выдан или продлён. Кабинет открывается прямо в Telegram
+  // (мини-приложение, miniApp.js); одноразовая ссылка — для браузера.
   function accessScreen({ member, inviteToken }, headline) {
     const lines = [b(headline), `🔑 Доступ до ${b(formatMsk(member.paid_until))}, ${devicesLabel(member.device_limit)}.`];
+    const cabinet = miniAppUrl(config) ? [[{ text: '📱 Открыть кабинет', webApp: miniAppUrl(config) }]] : [];
     if (inviteToken) {
-      lines.push('', 'Ваш личный кабинет — кнопка ниже. Ссылка одноразовая и действует 3 дня: откройте её в браузере, портал выдаст постоянную личную ссылку. В кабинете добавьте устройство и вставьте ключ в приложение AmneziaVPN.');
-      return { text: lines.join('\n'), buttons: [[{ text: '🔑 Открыть кабинет', url: inviteUrl(inviteToken) }], [{ text: '❓ Как подключиться', action: 'help' }]] };
+      lines.push('', cabinet.length
+        ? 'Ваш личный кабинет — кнопка «Открыть кабинет», он откроется прямо в Telegram. В кабинете добавьте устройство и вставьте ключ в приложение AmneziaVPN. Нужен кабинет в браузере — вторая кнопка: ссылка одноразовая и действует 3 дня, портал выдаст постоянную личную ссылку.'
+        : 'Ваш личный кабинет — кнопка ниже. Ссылка одноразовая и действует 3 дня: откройте её в браузере, портал выдаст постоянную личную ссылку. В кабинете добавьте устройство и вставьте ключ в приложение AmneziaVPN.');
+      const browser = { text: cabinet.length ? '🌐 Кабинет в браузере' : '🔑 Открыть кабинет', url: inviteUrl(inviteToken) };
+      return { text: lines.join('\n'), buttons: [...cabinet, [browser], [{ text: '❓ Как подключиться', action: 'help' }]] };
     }
     lines.push('', 'Ключи на ваших устройствах прежние.');
-    return { text: lines.join('\n'), buttons: [[{ text: '🔑 Мои ключи', action: 'keys' }]] };
+    return { text: lines.join('\n'), buttons: [...cabinet, [{ text: '🔑 Мои ключи', action: 'keys' }]] };
   }
 
   async function resumeIfPaused(result) {
