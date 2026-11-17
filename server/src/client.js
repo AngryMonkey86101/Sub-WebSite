@@ -1,6 +1,5 @@
 import { PortalError } from './portal.js';
-import { DAY } from './config.js';
-import { formatMsk, formatRub, devicesLabel, plural, periodLabel, parsePeriodKey, DEVICE_OPTIONS } from './shop.js';
+import { formatMsk, formatRub, devicesLabel, plural, periodLabel, parsePeriodKey, termEnd, slotName, DEVICE_OPTIONS } from './shop.js';
 import { appLinks, SYSTEMS } from './apps.js';
 import { esc, b, i, code, quote } from './tgHtml.js';
 import { miniAppUrl } from './miniApp.js';
@@ -15,10 +14,14 @@ import { miniAppUrl } from './miniApp.js';
 // Действия кнопок (callback_data без префикса «c:», до 64 байт):
 //   menu, help, keys, trial, relink, relink!, invite  — экраны и простые действия
 //   apps, apps:<система>   (apps:ios, apps:android)    — выбор системы и ссылки на приложение
-//   buy                                                — выбор срока
+//   buy                                                — у кого есть места: что продлить; иначе выбор срока
+//   new                                                — новые устройства: выбор срока
 //   buy:<срок>             (buy:1m, buy:7d)            — выбор числа устройств
 //   buy:<срок>:<устройств>                             — подтверждение с ценой
-//   order:<срок>:<устройств>:<цена>                    — оформить заказ; цена (со скидкой) сверяется с текущей
+//   order:<срок>:<устройств>:<цена>                    — оформить заказ; цена сверяется с текущей
+//   ren:<место>            (ren:12, ren:all)           — продление места или всех мест: выбор срока
+//   ren:<место>:<срок>                                 — подтверждение продления с ценой
+//   rorder:<место>:<срок>:<цена>                       — оформить продление
 //
 // /start ref_<код> — переход по ссылке приглашения (реферальная программа, shop.js).
 //   cancel:<номер заказа>
@@ -46,12 +49,13 @@ function createClientBot({ config, shop, botUsername = () => null, now = () => D
   const cabinetUrl = miniAppUrl(config);
   const cabinetButton = (member) => (member && cabinetUrl ? [[{ text: '📱 Открыть кабинет', webApp: cabinetUrl }]] : []);
 
-  // Срок доступа одной строкой — в меню и в «Мой доступ»
+  // Сроки мест — в меню и в «Мой доступ»: у каждого ключа свой
   function describeAccess(member) {
-    const active = member.paid_until > now() && member.status !== 'paused';
-    return active
-      ? `🔑 Доступ до ${b(formatMsk(member.paid_until))}, ${devicesLabel(member.device_limit)}.`
-      : `⏳ ${b(`Срок доступа закончился ${formatMsk(member.paid_until)}`)}, ключи на паузе. После продления заработают снова. Если не продлить до ${formatMsk(member.paid_until + shop.settings().deleteAfterDays * DAY)}, ключи будут удалены.`;
+    const lines = shop.slotLines(member);
+    if (!lines.length) return `⏳ ${b('Оплаченных устройств нет.')}`;
+    const paused = { traffic: 'Трафик за период исчерпан — ключи включатся с новым периодом.', expired: 'Срок закончился, ключи на паузе — после продления заработают снова.' };
+    if (member.status === 'paused') lines.push(i(paused[member.pause_reason] ?? 'Доступ приостановлен админом.'));
+    return lines.join('\n');
   }
 
   // Цена: со скидкой — прежняя зачёркнута
@@ -59,7 +63,7 @@ function createClientBot({ config, shop, botUsername = () => null, now = () => D
 
   // Карточка заказа: номер копируется нажатием, сумма выделена
   const orderCard = (order) =>
-    `🧾 ${b(`Заказ №${order.id}`)}\n${esc(periodLabel(parsePeriodKey(order.period)))}, ${devicesLabel(order.devices)} — ${priceHtml(order.amount, order.full_amount)}${order.discount_percent ? ` (скидка ${order.discount_percent}%)` : ''}`;
+    `🧾 ${b(`Заказ №${order.id}`)}\n${esc(periodLabel(parsePeriodKey(order.period)))}, ${devicesLabel(order.devices)}${order.renew ? ' (продление)' : ''} — ${priceHtml(order.amount, order.full_amount)}${order.discount_percent ? ` (скидка ${order.discount_percent}%)` : ''}`;
 
   // Скидка чата одной строкой — в меню и при выборе срока
   function discountLine(chat) {
@@ -155,20 +159,83 @@ function createClientBot({ config, shop, botUsername = () => null, now = () => D
     return { text: lines.join('\n'), buttons: rows };
   }
 
+  const closed = () => ({ text: i('Продажа сейчас закрыта. Загляните позже.'), buttons: [BACK] });
+  const short = (ms) => formatMsk(ms).slice(0, 5);
+
+  // «Продлить»: у покупателя с местами — что продлить: один ключ, все сразу или новые устройства
+  function chooseRenew(chat) {
+    if (!shop.isOpen()) return closed();
+    const member = shop.memberOf(chat);
+    const slots = shop.slotsOf(member);
+    if (!slots.length) return choosePeriod(chat);
+    const periods = shop.catalog();
+    const rows = slots.map((slot) => [{ text: `${slot.number ? `🔑 №${slot.number}` : '🆓 Место'} · ${slot.until > now() ? `до ${short(slot.until)}` : 'закончился'}`, action: `ren:${slot.id}` }]);
+    if (slots.length > 1 && periods.some((p) => p.prices[slots.length - 1] !== null && p.prices[slots.length - 1] !== undefined)) {
+      rows.push([{ text: `Все сразу (${slots.length})`, action: 'ren:all' }]);
+    }
+    rows.push([{ text: '➕ Добавить устройства', action: 'new' }], BACK);
+    const discount = discountLine(chat);
+    return {
+      text: [`🛒 ${b('Что продлить?')} У каждого ключа свой срок, новый прибавится к текущему.`, '', ...shop.slotLines(member), ...(discount ? ['', `${discount} Цены — без скидки, она применится при оформлении.`] : [])].join('\n'),
+      buttons: rows
+    };
+  }
+
   function choosePeriod(chat) {
-    if (!shop.isOpen()) return { text: i('Продажа сейчас закрыта. Загляните позже.'), buttons: [BACK] };
+    if (!shop.isOpen()) return closed();
     const member = shop.memberOf(chat);
     const periods = shop.catalog();
     const discount = discountLine(chat);
     const question = member
-      ? `🛒 ${b('На какой срок продлить?')} Срок прибавится к текущему${member.paid_until > now() ? ` (до ${formatMsk(member.paid_until)})` : ''}.`
+      ? `🛒 ${b('Новые устройства: на какой срок?')} Срок новых устройств — свой, от сегодняшнего дня.`
       : `🛒 ${b('На какой срок?')}`;
     return {
       text: discount ? `${question}\n\n${discount} Цены ниже — без скидки, она применится при оформлении.` : question,
       buttons: [
         ...periods.map((p) => [{ text: `${p.label} — от ${formatRub(Math.min(...p.prices.filter((x) => x !== null)))}`, action: `buy:${p.key}` }]),
-        BACK
+        member ? [{ text: '← Назад', action: 'buy' }] : BACK
       ]
+    };
+  }
+
+  // Места, которые продлевает кнопка: ren:all — все, ren:12 — одно; чужое или удалённое — null
+  function renewSlots(chat, target) {
+    const slots = shop.slotsOf(shop.memberOf(chat));
+    if (target === 'all') return slots.length ? slots : null;
+    if (!/^\d{1,9}$/.test(target ?? '')) return null;
+    const slot = slots.find((x) => x.id === Number(target));
+    return slot ? [slot] : null;
+  }
+  const renewTitle = (slots) => (slots.length === 1 ? slotName(slots[0]) : `все ключи (${slots.length})`);
+
+  function renewPeriod(chat, target) {
+    if (!shop.isOpen()) return closed();
+    const slots = renewSlots(chat, target);
+    if (!slots) return chooseRenew(chat);
+    const periods = shop.catalog().filter((p) => p.prices[slots.length - 1] !== null && p.prices[slots.length - 1] !== undefined);
+    return {
+      text: `🛒 ${b(`Продлить: ${renewTitle(slots)}.`)} На какой срок?`,
+      buttons: [
+        ...periods.map((p) => [{ text: `${p.label} — ${formatRub(p.prices[slots.length - 1])}`, action: `ren:${target}:${p.key}` }]),
+        [{ text: '← Назад', action: 'buy' }]
+      ]
+    };
+  }
+
+  function renewConfirm(chat, target, key) {
+    const slots = shop.isOpen() ? renewSlots(chat, target) : null;
+    if (!slots) return chooseRenew(chat);
+    const found = shop.offer(chat, key, slots.length);
+    if (!found) return renewPeriod(chat, target);
+    const lines = [
+      b('🛒 Продление:'),
+      `${esc(renewTitle(slots))}, ${esc(found.period.label)} — ${priceHtml(found.amount, found.price)}`,
+      ...slots.map((slot) => `${slotName(slot)}: новый срок — до ${b(formatMsk(termEnd(slot.until, found.period, now())))}`)
+    ];
+    if (found.discount) lines.push(`🎁 Скидка ${found.discount.percent}% ${found.discount.kind === 'referrer' ? 'за приглашённого друга' : 'по приглашению друга'}.`);
+    return {
+      text: lines.join('\n'),
+      buttons: [[{ text: '✅ Оформить заказ', action: `rorder:${target}:${key}:${found.amount}` }], [{ text: '← Изменить', action: `ren:${target}` }]]
     };
   }
 
@@ -198,14 +265,17 @@ function createClientBot({ config, shop, botUsername = () => null, now = () => D
     };
   }
 
-  async function order(chat, key, devices, price) {
-    const found = shop.isOpen() ? shop.offer(chat, key, devices) : null;
+  async function order(chat, key, devices, price, target = null) {
+    const slots = target === null ? null : renewSlots(chat, target);
+    if (target !== null && !slots) return chooseRenew(chat);
+    const found = shop.isOpen() ? shop.offer(chat, key, slots ? slots.length : devices) : null;
     // цену или скидку поменяли, пока покупатель смотрел старый экран
     if (!found || found.amount !== price) {
-      const screen = confirm(chat, key, devices);
+      const screen = slots ? renewConfirm(chat, target, key) : confirm(chat, key, devices);
       return { ...screen, text: `⚠️ ${b('Цена изменилась.')}\n\n${screen.text}` };
     }
-    const { order: created, payInfo, paymentUrl } = await shop.createOrder(chat, key, devices);
+    const renew = slots ? (target === 'all' ? 'all' : slots[0].id) : null;
+    const { order: created, payInfo, paymentUrl } = await shop.createOrder(chat, key, devices, { renew });
     if (paymentUrl) {
       return {
         text: [
@@ -276,11 +346,18 @@ function createClientBot({ config, shop, botUsername = () => null, now = () => D
       case 'keys':
         return keys(chat);
       case 'buy':
-        if (rest.length === 0) return choosePeriod(chat);
+        if (rest.length === 0) return chooseRenew(chat);
         if (rest.length === 1) return chooseDevices(chat, rest[0]);
         return confirm(chat, rest[0], Number(rest[1]));
+      case 'new':
+        return choosePeriod(chat);
       case 'order':
         return order(chat, rest[0], Number(rest[1]), Number(rest[2]));
+      case 'ren':
+        if (rest.length === 1) return renewPeriod(chat, rest[0]);
+        return renewConfirm(chat, rest[0], rest[1]);
+      case 'rorder':
+        return order(chat, rest[1], null, Number(rest[2]), rest[0] ?? '');
       case 'cancel':
         if (!/^\d{1,9}$/.test(rest[0] ?? '')) return keys(chat);
         shop.cancelOrder(Number(rest[0]), { chat, by: 'покупатель' });

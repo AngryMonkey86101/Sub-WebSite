@@ -6,7 +6,10 @@ import { openDatabase } from '../src/db.js';
 import { loadConfig, DAY, HOUR } from '../src/config.js';
 import { createAmneziaClient } from '../src/amnezia.js';
 import { createPortal, PortalError } from '../src/portal.js';
-import { createShop, addPeriod, formatMsk, plural } from '../src/shop.js';
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { createShop, addPeriod, termEnd, formatMsk, plural } from '../src/shop.js';
 import { createClientBot } from '../src/client.js';
 import { createBotCommands } from '../src/bot.js';
 import { createApp } from '../src/app.js';
@@ -179,44 +182,66 @@ test('продажи: заказ кнопками бота, оплата вру�
   const client = portal.memberByChat('500');
   assert.equal(client.role, 'client');
   assert.equal(client.device_limit, 1);
-  assert.equal(client.paid_until, addPeriod(now(), { count: 1, unit: 'month' }));
+  // 1 месяц с 06.11 (12:00 МСК) — до 00:00 МСК 07.12
+  assert.equal(client.paid_until, Date.UTC(2026, 11, 6, 21));
   const welcome = delivered.at(-1);
   assert.equal(welcome.chat, '500');
-  assert.match(welcome.text, /Оплата получена, спасибо[\s\S]*Доступ до 06\.12\.2026 12:00 МСК, 1 устройство/);
+  assert.match(welcome.text, /Оплата получена, спасибо[\s\S]*Свободное место — до 07\.12\.2026 00:00 МСК/);
   const invite = buttons(welcome).find((b) => b.url).url.match(/\/i\/([A-Za-z0-9_-]{43})$/)[1];
   assert.equal(portal.peekInvite(invite).code, client.code);
   // в закрытом заказе чата больше нет
   assert.equal(db.prepare('SELECT chat FROM orders WHERE id = ?').get(id2).chat, null);
 
-  // кабинет работает как у семьи: устройство в пределах купленного
+  // кабинет: ключ занимает оплаченное место, больше мест нет
   const { member } = portal.activateInvite(invite);
   await portal.addDevice(member.id, { platform: 'ios', protocol: 'amneziawg3' });
-  await assert.rejects(portal.addDevice(member.id, { platform: 'android', protocol: 'amneziawg3' }), /Лимит устройств: 1/);
+  await assert.rejects(portal.addDevice(member.id, { platform: 'android', protocol: 'amneziawg3' }), /Свободных оплаченных мест нет/);
+  const [first] = portal.slotsOf(member.id);
 
-  // продление: срок прибавляется к текущему, число устройств — из нового заказа
+  // ещё устройство: новое место со своим сроком, у первого ключа срок прежний
   advance(10 * DAY);
-  assert.match((await tap('500', 'buy')).text, /прибавится к текущему \(до 06\.12\.2026/);
-  const renew = await tap('500', 'order:3m:2:1500');
-  const id3 = Number(renew.text.match(/Заказ №(\d+)/)[1]);
-  assert.match(notes.at(-1), new RegExp(`продление ${client.code}`));
+  const renewMenu = await tap('500', 'buy');
+  assert.match(renewMenu.text, /Что продлить\?[\s\S]*Ключ №1 · iPhone \/ iPad — до 07\.12\.2026 00:00 МСК/);
+  assert.deepEqual(actionsOf(renewMenu), [`ren:${first.id}`, 'new', 'menu'], 'одно место — без «Все сразу»');
+  assert.match((await tap('500', 'new')).text, /Новые устройства: на какой срок/);
+  const more = await tap('500', 'order:3m:1:800');
+  const id3 = Number(more.text.match(/Заказ №(\d+)/)[1]);
+  assert.match(notes.at(-1), new RegExp(`ещё устройства ${client.code}`));
   await shop.grantOrder(id3);
-  const renewed = portal.memberByChat('500');
-  assert.equal(renewed.id, client.id, 'тот же участник');
-  assert.equal(renewed.device_limit, 2);
-  assert.equal(renewed.paid_until, addPeriod(client.paid_until, { count: 3, unit: 'month' }));
-  assert.match(delivered.at(-1).text, /доступ продлён[\s\S]*Ключи на ваших устройствах прежние/);
+  assert.equal(portal.memberByChat('500').id, client.id, 'тот же участник');
+  assert.match(delivered.at(-1).text, /устройства добавлены[\s\S]*Ключ №1 · iPhone \/ iPad — до 07\.12\.2026 00:00 МСК\n🆓 Свободное место — до 17\.02\.2027 00:00 МСК[\s\S]*Добавьте устройство в кабинете/);
   await portal.addDevice(member.id, { platform: 'android', protocol: 'amneziawg3' });
+  assert.equal(portal.memberByChat('500').device_limit, 2);
+
+  // продление одного ключа: срок прибавляется к его концу, цена — за 1 устройство
+  const periodsFor = await tap('500', `ren:${first.id}`);
+  assert.deepEqual(actionsOf(periodsFor), [`ren:${first.id}:1m`, `ren:${first.id}:3m`, 'buy']);
+  const renewConfirm = await tap('500', `ren:${first.id}:1m`);
+  assert.match(renewConfirm.text, /Ключ №1 · iPhone \/ iPad, 1 месяц — 300 ₽[\s\S]*новый срок — до 07\.01\.2027 00:00 МСК/);
+  assert.equal(actionsOf(renewConfirm)[0], `rorder:${first.id}:1m:300`);
+  assert.match((await tap('500', 'ren:999:1m')).text, /Что продлить/, 'чужое место — снова выбор');
+  const one = await tap('500', `rorder:${first.id}:1m:300`);
+  const id4 = Number(one.text.match(/Заказ №(\d+)/)[1]);
+  assert.match(one.text, /1 месяц, 1 устройство \(продление\) — 300 ₽/);
+  await shop.grantOrder(id4);
+  assert.match(delivered.at(-1).text, /доступ продлён[\s\S]*Ключ №1 · iPhone \/ iPad — до 07\.01\.2027 00:00 МСК\n🔑 Ключ №2 · Android — до 17\.02\.2027 00:00 МСК/);
+
+  // все сразу: цена за 2 устройства, каждому — к его сроку
+  assert.ok(actionsOf(await tap('500', 'buy')).includes('ren:all'));
+  const all = await tap('500', 'rorder:all:1m:500');
+  await shop.grantOrder(Number(all.text.match(/Заказ №(\d+)/)[1]));
+  const keys = await tap('500', 'keys');
+  assert.match(keys.text, /Ключ №1 · iPhone \/ iPad — до 07\.02\.2027 00:00 МСК\n🔑 Ключ №2 · Android — до 17\.03\.2027 00:00 МСК/);
 
   // «Мой доступ» и новая ссылка на кабинет
-  const keys = await tap('500', 'keys');
-  assert.match(keys.text, /Доступ до 06\.03\.2027 12:00 МСК, 2 устройства/);
   assert.match((await tap('500', 'relink')).text, /Прежняя личная ссылка перестанет работать/);
   const relinked = await tap('500', 'relink!');
   assert.ok(buttons(relinked).find((b) => b.url).url.startsWith(`${PUBLIC_URL}/i/`));
   assert.equal(portal.memberByToken(portal.activateInvite(buttons(relinked).find((b) => b.url).url.split('/i/')[1]).accessToken).code, client.code);
 
-  assert.match(await admin.run('/shop', []), /Продажа открыта\nМеста: занято 2 из 100, свободно 98\nПокупателей: 1, ждут оплаты: 0\nЗа 30 дней: 2 оплат на 1 800 ₽/);
-  assert.match(await admin.run('/members', []), new RegExp(`${client.code} · покупатель до 06\\.03\\.2027 12:00 МСК`));
+  assert.match(await admin.run('/shop', []), /Продажа открыта\nМеста: занято 2 из 100, свободно 98\nПокупателей: 1, ждут оплаты: 0\nЗа 30 дней: 4 оплат на 1 900 ₽/);
+  assert.match(await admin.run('/members', []), new RegExp(`${client.code} · покупатель: №1 до 07\\.02\\.2027 00:00 МСК · №2 до 17\\.03\\.2027 00:00 МСК · устройств 2/2`), 'у каждого ключа свой срок');
+  assert.ok(now() > 0);
   db.close();
 });
 
@@ -264,9 +289,12 @@ test('продажи: места на сервере — проданные ус
   assert.deepEqual(shop.seats(), { total: 3, used: 2, free: 1 });
   assert.match((await tap('802', 'order:1m:2:500')).text, /Свободных мест на сервере сейчас нет/);
   assert.match((await tap('802', 'trial')).text, /Свободных мест/);
-  assert.match((await tap('802', 'order:1m:1:300')).text, /Заказ №/);
-  // продление своих мест не требует: 2 → 3 устройства при одном свободном месте
-  assert.match((await tap('801', 'order:1m:3:650')).text, /Заказ №/);
+  const third = await tap('802', 'order:1m:1:300');
+  await shop.grantOrder(Number(third.text.match(/№(\d+)/)[1]));
+  assert.deepEqual(shop.seats(), { total: 3, used: 3, free: 0 });
+  // продление действующих мест новых мест не требует, а ещё одно устройство — требует
+  assert.match((await tap('801', 'rorder:all:1m:500')).text, /Заказ №/);
+  assert.match((await tap('801', 'order:1m:1:300')).text, /Свободных мест на сервере сейчас нет/);
   // после конца срока места освобождаются
   advance(32 * DAY);
   await shop.sweep();
@@ -274,50 +302,67 @@ test('продажи: места на сервере — проданные ус
   db.close();
 });
 
-test('продажи: конец срока — пауза ключей, продление включает их снова; подарок дней', async () => {
-  const { db, portal, shop, admin, delivered, notes, prices, configure, tap, now, advance } = setup();
-  prices([[7, 'day', 100, null, null, null]]);
+test('продажи: у каждого ключа свой срок — пауза только его, продление включает; подарок дней', async () => {
+  const { db, portal, shop, admin, delivered, prices, configure, tap, now, advance } = setup();
+  prices([[7, 'day', 100, 180, null, null]]);
   configure();
   shop.setOpen(true);
-  const ordered = await tap('900', 'order:7d:1:100');
-  await shop.grantOrder(Number(ordered.text.match(/№(\d+)/)[1]));
+  const grant = async (action) => shop.grantOrder(Number((await tap('900', action)).text.match(/№(\d+)/)[1]));
+  await grant('order:7d:1:100');
   const invite = delivered.at(-1).buttons.flat().find((b) => b.url).url.split('/i/')[1];
   const { member } = portal.activateInvite(invite);
-  const device = await portal.addDevice(member.id, { platform: 'ios', protocol: 'amneziawg3' });
-  const peer = () => fake.state.clients.get(device.client_id);
+  const first = await portal.addDevice(member.id, { platform: 'ios', protocol: 'amneziawg3' });
+  // через 2 дня — второе устройство, со своим сроком
+  advance(2 * DAY);
+  await grant('order:7d:1:100');
+  const second = await portal.addDevice(member.id, { platform: 'android', protocol: 'amneziawg3' });
+  const peer = (device) => fake.state.clients.get(device.client_id);
+  const [slot1, slot2] = portal.slotsOf(member.id);
+  // 7 дней с 06.11 — до 00:00 МСК 14.11, с 08.11 — до 00:00 МСК 16.11
+  assert.equal(slot1.until, Date.UTC(2026, 10, 13, 21));
+  assert.equal(slot2.until, Date.UTC(2026, 10, 15, 21));
 
-  advance(7 * DAY - HOUR);
+  advance(slot1.until - now() - HOUR);
   await shop.sweep();
-  assert.equal(portal.memberByChat('900').status, 'active', 'срок ещё не кончился');
+  assert.equal(peer(first).status, 'active', 'срок ещё не кончился');
   advance(2 * HOUR);
   await shop.sweep();
-  assert.equal(portal.memberByChat('900').status, 'paused');
-  assert.match(delivered.at(-1).text, /Срок доступа закончился, ключи на паузе/);
+  assert.equal(peer(first).status, 'disabled', 'кончился срок первого ключа');
+  assert.equal(peer(second).status, 'active', 'второй работает');
+  assert.equal(portal.memberByChat('900').status, 'active', 'участник не на паузе');
+  assert.match(delivered.at(-1).text, /Срок закончился, ключ на паузе\nКлюч №1 · iPhone \/ iPad — удалится 28\.11\.2026 00:00 МСК, если не продлить/);
   assert.equal(delivered.at(-1).chat, '900');
-  assert.ok(notes.some((n) => /доступ приостановлен/.test(n)));
-  assert.match((await tap('900', 'keys')).text, /Срок доступа закончился/);
-  await assert.rejects(portal.addDevice(member.id, { platform: 'android', protocol: 'amneziawg3' }), /Доступ приостановлен/);
-  assert.equal(peer().status, 'disabled');
+  assert.match((await tap('900', 'keys')).text, /⏳ Ключ №1 · iPhone \/ iPad — срок закончился 14\.11\.2026 00:00 МСК, ключ на паузе[\s\S]*🔑 Ключ №2 · Android — до 16\.11\.2026 00:00 МСК/);
+  await assert.rejects(portal.addDevice(member.id, { platform: 'linux', protocol: 'amneziawg3' }), /Свободных оплаченных мест нет/);
+  // после переезда amnezia-api мог «забыть» паузу — проверка ключей не включает ключ без срока
+  assert.deepEqual((await portal.repairKeys({ apply: false })).fixed, []);
 
-  // повторная уборка не трогает уже приостановленных
+  // повторная уборка не трогает уже выключенный ключ
   const count = delivered.length;
   await shop.sweep();
   assert.equal(delivered.length, count);
 
-  // продление после конца срока — от сегодняшнего дня, ключи включаются
-  const renew = await tap('900', 'order:7d:1:100');
-  await shop.grantOrder(Number(renew.text.match(/№(\d+)/)[1]));
-  const renewed = portal.memberByChat('900');
-  assert.equal(renewed.status, 'active');
-  assert.equal(renewed.paid_until, now() + 7 * DAY);
-  assert.equal(peer().status, 'active');
+  // продление после конца срока — от сегодняшнего дня, ключ включается
+  await grant(`rorder:${slot1.id}:7d:100`);
+  assert.equal(portal.slotsOf(member.id).find((x) => x.id === slot1.id).until, Date.UTC(2026, 10, 21, 21), '14.11 + 7 дней — до 00:00 22.11');
+  assert.equal(peer(first).status, 'active');
 
-  // подарок от админа
+  // кончился срок второго; пауза и «Возобновить» админа его не включают
+  advance(slot2.until - now() + HOUR);
+  await shop.sweep();
+  assert.equal(peer(second).status, 'disabled');
+  await portal.setPaused(member.id, true);
+  await portal.setPaused(member.id, false);
+  assert.equal(peer(first).status, 'active');
+  assert.equal(peer(second).status, 'disabled', 'ключ без срока остаётся выключенным');
+
+  // подарок от админа — ко всем ключам: действующему — к концу, закончившемуся — от сегодня
   assert.match(await admin.run('/gift', []), /Укажите код покупателя/);
   assert.match(await admin.run('/gift', ['ZZZZ', '3']), /Покупатель ZZZZ не найден/);
-  assert.match(await admin.run('/gift', [renewed.code, 'abc']), /Дней: целое число/);
-  assert.match(await admin.run('/gift', [renewed.code.toLowerCase(), '3']), new RegExp(`🎁 ${renewed.code}: доступ до ${formatMsk(now() + 10 * DAY).replace(/\./g, '\\.')}`));
-  assert.match(delivered.at(-1).text, /Вам добавлено 3 дня/);
+  assert.match(await admin.run('/gift', [member.code, 'abc']), /Дней: целое число/);
+  assert.match(await admin.run('/gift', [member.code.toLowerCase(), '3']), new RegExp(`🎁 ${member.code}: дни добавлены\\n🔑 Ключ №1 · iPhone / iPad — до 25\\.11\\.2026 00:00 МСК\\n🔑 Ключ №2 · Android — до 20\\.11\\.2026 00:00 МСК`));
+  assert.match(delivered.at(-1).text, /Вам добавлено 3 дня[\s\S]*Ключ №1 · iPhone \/ iPad — до 25\.11\.2026 00:00 МСК[\s\S]*Ключ №2 · Android — до 20\.11\.2026 00:00 МСК/);
+  assert.equal(peer(second).status, 'active');
   db.close();
 });
 
@@ -344,23 +389,23 @@ test('продажи: напоминания за 3 дня и за 1 день, �
   await shop.sweep();
   const reminders = sentTo('1100', /заканчивается/);
   assert.equal(reminders.length, 1);
-  assert.match(reminders[0].text, /Доступ заканчивается через 3 дня — 06\.12\.2026 12:00 МСК[\s\S]*прибавится к текущему/);
+  assert.match(reminders[0].text, /Срок заканчивается через 3 дня\nКлюч №1 · iPhone \/ iPad — до 07\.12\.2026 00:00 МСК[\s\S]*прибавится к текущему/);
   assert.deepEqual(reminders[0].buttons.flat().map((b) => b.action), ['buy']);
   // за 1 день — второе
   advance(2 * DAY);
   await shop.sweep();
   await shop.sweep();
   assert.equal(sentTo('1100', /заканчивается/).length, 2);
-  assert.match(sentTo('1100', /заканчивается/)[1].text, /Доступ заканчивается завтра — 06\.12\.2026 12:00 МСК/);
+  assert.match(sentTo('1100', /заканчивается/)[1].text, /Срок заканчивается завтра\nКлюч №1 · iPhone \/ iPad — до 07\.12\.2026 00:00 МСК/);
 
-  // срок кончился — пауза с датой удаления
+  // срок кончился — ключ на паузе, с датой удаления
   advance(DAY);
   await shop.sweep();
-  assert.equal(portal.memberByChat('1100').status, 'paused');
-  assert.match(delivered.at(-1).text, /ключи на паузе[\s\S]*Если не продлить до 20\.12\.2026 12:00 МСК, ключи будут удалены/);
-  assert.match((await tap('1100', 'keys')).text, /Срок доступа закончился 06\.12\.2026 12:00 МСК[\s\S]*Если не продлить до 20\.12\.2026 12:00 МСК, ключи будут удалены/);
+  assert.equal(fake.state.clients.get(device.client_id).status, 'disabled');
+  assert.match(delivered.at(-1).text, /ключ на паузе\nКлюч №1 · iPhone \/ iPad — удалится 21\.12\.2026 00:00 МСК, если не продлить/);
+  assert.match((await tap('1100', 'keys')).text, /срок закончился 07\.12\.2026 00:00 МСК, ключ на паузе\. Удалится 21\.12\.2026 00:00 МСК/);
 
-  // через 14 дней без продления — ключи и участник удалены, место свободно, покупатель знает
+  // через 14 дней без продления — ключ и участник удалены, место свободно, покупатель знает
   advance(14 * DAY - 2 * HOUR);
   await shop.sweep();
   assert.ok(portal.memberByChat('1100'), 'ещё не пора');
@@ -378,16 +423,17 @@ test('продажи: напоминания за 3 дня и за 1 день, �
   // короткий срок: напоминания, которые пришли бы сразу после покупки, не шлются
   const before = delivered.length;
   await shop.sweep();
-  assert.equal(delivered.length, before, '7 дней: «за 3 дня» — только на 4-й день');
-  advance(4 * DAY + HOUR);
+  assert.equal(delivered.length, before, '7 дней: «за 3 дня» — только на 5-й день');
+  advance(5 * DAY);
   await shop.sweep();
-  assert.match(delivered.at(-1).text, /через 3 дня/);
+  assert.match(delivered.at(-1).text, /Срок заканчивается через 3 дня\nСвободное место — до 29\.12\.2026 00:00 МСК/);
   // продление после напоминания — для нового срока напоминания заново
-  await grant('1100', 'order:1m:1:300');
-  // новый срок: 27.12 + 1 месяц = 27.01, до него — 4 дня без часа; через сутки — меньше 3 дней
+  const [slot] = portal.slotsOf(portal.memberByChat('1100').id);
+  await grant('1100', `rorder:${slot.id}:1m:300`);
+  // новый срок: до 00:00 29.01 (29.12 + 1 месяц); через 31 день до него меньше 3 дней
   advance(31 * DAY);
   await shop.sweep();
-  assert.match(delivered.at(-1).text, /через 3 дня/);
+  assert.match(delivered.at(-1).text, /через 3 дня\nСвободное место — до 29\.01\.2027 00:00 МСК/);
   // подарок отодвигает срок — и напоминания тоже
   const code = portal.memberByChat('1100').code;
   await admin.run('/gift', [code, '10']);
@@ -395,8 +441,9 @@ test('продажи: напоминания за 3 дня и за 1 день, �
   await shop.sweep();
   assert.equal(delivered.length, count, 'до нового конца срока 12 дней — напоминать рано');
 
-  // пробный день: ни «за 3 дня», ни «за 1 день» — только конец срока
+  // пробный день: ровно сутки, ни «за 3 дня», ни «за 1 день» — только конец срока
   await tap('1200', 'trial');
+  assert.equal(portal.memberByChat('1200').paid_until, now() + DAY);
   const trialStart = delivered.length;
   await shop.sweep();
   advance(12 * HOUR);
@@ -405,7 +452,7 @@ test('продажи: напоминания за 3 дня и за 1 день, �
   advance(13 * HOUR);
   await shop.sweep();
   assert.ok(delivered.slice(trialStart).every((d) => !/заканчивается/.test(d.text)));
-  assert.match(delivered.at(-1).text, /ключи на паузе/);
+  assert.match(delivered.at(-1).text, /Срок закончился\nСвободное место — удалится/);
   db.close();
 });
 
@@ -421,7 +468,10 @@ test('продажи: срок удаления ключей — из админ
   await shop.grantOrder(Number((await tap('1300', 'order:7d:1:100')).text.match(/№(\d+)/)[1]));
   advance(7 * DAY + HOUR);
   await shop.sweep();
-  assert.match(delivered.at(-1).text, /Если не продлить до/);
+  assert.match(delivered.at(-1).text, /заканчивается завтра/, '7 дней с 06.11 — до 00:00 14.11');
+  advance(DAY);
+  await shop.sweep();
+  assert.match(delivered.at(-1).text, /Срок закончился\nСвободное место — удалится 17\.11\.2026 00:00 МСК, если не продлить/);
   advance(3 * DAY);
   await shop.sweep();
   assert.equal(portal.memberByChat('1300'), null);
@@ -455,6 +505,65 @@ test('продажи: календарный месяц и склонения', 
   const words = ['месяц', 'месяца', 'месяцев'];
   assert.deepEqual([1, 2, 5, 11, 12, 21, 22, 25, 111].map((n) => plural(n, words)), ['месяц', 'месяца', 'месяцев', 'месяцев', 'месяцев', 'месяц', 'месяца', 'месяцев', 'месяцев']);
   assert.equal(formatMsk(Date.UTC(2026, 11, 31, 22, 5)), '01.01.2027 01:05 МСК');
+});
+
+test('продажи: конец срока — день оплаты по Москве + срок, до 00:00 следующего дня', () => {
+  const msk = (y, m, d, h = 0, min = 0) => Date.UTC(y, m - 1, d, h - 3, min);
+  const month = { count: 1, unit: 'month' };
+  // пример из задачи: 1 месяц с 17 ноября — до 00:00 18 декабря, в любое время дня
+  assert.equal(termEnd(0, month, msk(2026, 11, 17, 0, 5)), msk(2026, 12, 18));
+  assert.equal(termEnd(0, month, msk(2026, 11, 17, 23, 59)), msk(2026, 12, 18));
+  assert.equal(formatMsk(termEnd(0, month, msk(2026, 11, 17, 15))), '18.12.2026 00:00 МСК');
+  // день по Москве, а не по UTC: 17.11 01:00 МСК — это ещё 16.11 по UTC
+  assert.equal(termEnd(0, month, msk(2026, 11, 17, 1)), msk(2026, 12, 18));
+  assert.equal(termEnd(0, { count: 3, unit: 'month' }, msk(2026, 11, 17, 12)), msk(2027, 2, 18));
+  assert.equal(termEnd(0, { count: 7, unit: 'day' }, msk(2026, 11, 17, 12)), msk(2026, 11, 25));
+  // конец месяца: 31 января + 1 месяц = 28 февраля, до 00:00 1 марта
+  assert.equal(termEnd(0, month, msk(2027, 1, 31, 12)), msk(2027, 3, 1));
+  // действующее место продлевается от своего конца, закончившееся — от дня оплаты
+  assert.equal(termEnd(msk(2026, 12, 18), month, msk(2026, 12, 10, 12)), msk(2027, 1, 18));
+  assert.equal(termEnd(msk(2026, 12, 18), month, msk(2026, 12, 20, 12)), msk(2027, 1, 21));
+});
+
+test('переход на места: у каждого покупателя места с прежним сроком, ключи — по номерам', () => {
+  const path = join(mkdtempSync(join(tmpdir(), 'slots-')), 'portal.db');
+  const old = openDatabase(path);
+  // база до мест: таблицы slots ещё нет
+  old.exec('DROP TABLE slots');
+  const time = Date.now();
+  const member = (code, role, limit, status, paidUntil, reason = null) =>
+    Number(old.prepare('INSERT INTO members (code, role, device_limit, status, created_at, paid_until, reminder_sent, pause_reason) VALUES (?, ?, ?, ?, 0, ?, 3, ?)').run(code, role, limit, status, paidUntil, reason).lastInsertRowid);
+  const device = (memberId, number, revoked = null) => old.prepare("INSERT INTO devices (member_id, number, platform, protocol, created_at, revoked_at) VALUES (?, ?, 'ios', 'amneziawg3', 0, ?)").run(memberId, number, revoked);
+  const active = member('AAAA', 'client', 3, 'active', time + 5 * DAY);
+  device(active, 1);
+  device(active, 2, 1);
+  device(active, 3);
+  const expired = member('BBBB', 'client', 1, 'paused', time - DAY, 'expired');
+  device(expired, 1);
+  const crowded = member('CCCC', 'client', 1, 'active', time + DAY);
+  device(crowded, 1);
+  device(crowded, 2);
+  const family = member('DDDD', 'member', 4, 'active', null);
+  device(family, 1);
+  old.close();
+
+  const db = openDatabase(path);
+  const slots = (id) => db.prepare('SELECT s.until, s.reminder_sent, s.ended, d.number FROM slots s LEFT JOIN devices d ON d.id = s.device_id WHERE s.member_id = ? ORDER BY s.id').all(id).map((x) => ({ ...x }));
+  assert.deepEqual(slots(active), [
+    { until: time + 5 * DAY, reminder_sent: 3, ended: 0, number: 1 },
+    { until: time + 5 * DAY, reminder_sent: 3, ended: 0, number: 3 },
+    { until: time + 5 * DAY, reminder_sent: 3, ended: 0, number: null }
+  ], 'отозванный ключ места не занимает, третье место свободно');
+  assert.deepEqual(slots(expired), [{ until: time - DAY, reminder_sent: 3, ended: 1, number: 1 }]);
+  const unpaused = db.prepare('SELECT status, pause_reason FROM members WHERE id = ?').get(expired);
+  assert.deepEqual({ ...unpaused }, { status: 'active', pause_reason: null }, 'пауза «конец срока» — теперь пауза ключа');
+  assert.equal(slots(crowded).length, 2, 'ключей больше лимита — мест по числу ключей');
+  assert.equal(slots(family).length, 0, 'у семьи срока нет');
+  db.close();
+  // второй запуск ничего не добавляет
+  const again = openDatabase(path);
+  assert.equal(again.prepare('SELECT COUNT(*) AS n FROM slots').get().n, 6);
+  again.close();
 });
 
 test('админка: раздел «Продажи» — тарифы, настройки, подтверждение заказа', async () => {
@@ -524,8 +633,23 @@ test('админка: раздел «Продажи» — тарифы, наст
     assert.match(after, /подтверждён вручную/);
     assert.equal((await post(`/admin/orders/${id}/grant`)).status, 404);
 
-    // участник-покупатель в общей админке — со сроком
-    assert.match(await (await get('/admin')).text(), /покупатель до \d\d\.\d\d\.\d{4} \d\d:\d\d МСК, кабинет не открыт/);
+    assert.match(after, /место до 07\.12\.2026 00:00 МСК · место до 07\.12\.2026 00:00 МСК/);
+
+    // участник-покупатель в общей админке — со сроком, без поля «Лимит»: устройств столько, сколько мест
+    const adminPage = await (await get('/admin')).text();
+    assert.match(adminPage, /покупатель: место до 07\.12\.2026 00:00 МСК · место до 07\.12\.2026 00:00 МСК, кабинет не открыт/);
+    const buyer = portal.memberByChat('1200');
+    assert.ok(!adminPage.includes(`/admin/members/${buyer.id}/limit`));
+
+    // кабинет покупателя: свободные места и срок у каждого ключа
+    const invite = delivered.at(-1).buttons.flat().find((b) => b.url).url.split('/i/')[1];
+    const buyerCookie = `__Host-sid=${portal.activateInvite(invite).accessToken}`;
+    assert.match(await (await get('/', buyerCookie)).text(), /У каждого ключа свой срок, продлить — в боте\. Свободных оплаченных мест: 2 \(до 07\.12\.2026 00:00 МСК, до 07\.12\.2026 00:00 МСК\)/);
+    await portal.addDevice(buyer.id, { platform: 'ios', protocol: 'amneziawg3' });
+    await portal.addDevice(buyer.id, { platform: 'android', protocol: 'amneziawg3' });
+    const cabinet = await (await get('/', buyerCookie)).text();
+    assert.match(cabinet, /оплачен до 07\.12\.2026 00:00 МСК/);
+    assert.match(cabinet, /Свободных оплаченных мест нет\. Отзовите ненужное устройство или купите ещё одно в боте/);
 
     assert.equal((await post('/admin/shop/close')).status, 303);
     assert.equal(shop.isOpen(), false);
@@ -605,11 +729,11 @@ test('бот: экраны и ответы админу — карточки HTM
   const granted = await rawAdmin.run('/grant', [String(id)]);
   valid(granted, '/grant');
   assert.match(granted, /доступ <code>\w{4}<\/code> до <b>/);
-  assert.match(delivered.at(-1).html, /<b>✅ Оплата получена, спасибо!<\/b>\n🔑 Доступ до <b>/);
+  assert.match(delivered.at(-1).html, /<b>✅ Оплата получена, спасибо!<\/b>\n🆓 Свободные места: 2 — до <b>07\.12\.2026 00:00 МСК<\/b>/);
   valid(delivered.at(-1).html, 'доступ выдан');
   const members = await rawAdmin.run('/members', []);
   valid(members, '/members');
-  assert.match(members, /<b>👥 Участники: 1<\/b>\n<code>\w{4}<\/code> · покупатель до/);
+  assert.match(members, /<b>👥 Участники: 1<\/b>\n<code>\w{4}<\/code> · покупатель: место до 07\.12\.2026 00:00 МСК/);
   for (const [command, args] of [['/help', []], ['/shop', []], ['/sales', []], ['/gift', ['<b>', '3']], ['/relink', ['<x>']], ['/refund', [String(id)]], ['/cancel', ['1']]]) {
     valid(await rawAdmin.run(command, args), command);
   }

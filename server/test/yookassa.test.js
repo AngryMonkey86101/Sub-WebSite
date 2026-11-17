@@ -274,11 +274,11 @@ test('ЮKassa: оплачен заказ, который покупатель у
   assert.equal(member.device_limit, 1, 'выдано то, за что заплатили');
   assert.equal(db.prepare('SELECT status, method FROM orders WHERE id = ?').get(first.id).status, 'paid');
   assert.match(delivered.at(-1).text, /Оплата получена/);
-  // второй заказ ждёт своей оплаты как продление
+  // второй заказ ждёт своей оплаты — это ещё 2 устройства, со своим сроком
   yk.succeed(second.order.payment_id);
   await shop.poll();
-  assert.equal(portal.memberByChat('700').device_limit, 2);
-  assert.match(delivered.at(-1).text, /доступ продлён/);
+  assert.equal(portal.memberByChat('700').device_limit, 3);
+  assert.match(delivered.at(-1).text, /устройства добавлены/);
 
   // отменённый заказ, чей платёж ЮKassa отменила, закрывается совсем: чата нет, опроса нет
   const third = await orderOf('701');
@@ -397,13 +397,14 @@ test('возврат через ЮKassa: подтверждение в боте,
   assert.match(delivered.at(-1).text, new RegExp(`Вам вернули 100 ₽ по заказу №${id}[\\s\\S]*откуда была оплата`));
   assert.match(await admin.run('/refund_confirm', []), /устарело/, 'подтверждение одноразовое');
 
-  // остаток — полный: срок минус месяц, то есть сейчас; ключи на паузе
-  assert.match(await admin.run('/refund', [String(id)]), /Вернуть 400 ₽[\s\S]*доступ закончится сразу/);
+  // остаток — полный: места этого заказа заканчиваются сейчас; ключ на паузе
+  assert.match(await admin.run('/refund', [String(id)]), /Вернуть 400 ₽[\s\S]*доступ по заказу закончится сразу/);
   assert.match(await admin.run('/refund_confirm', []), /возвращено 400 ₽[\s\S]*Доступ закончен, ключи на паузе/);
   assert.equal(yk.refunds[1].key, `family-vpn-refund-${id}-100-400-0`);
   const after = portal.memberByChat('1500');
-  assert.equal(after.status, 'paused');
+  assert.equal(after.status, 'active', 'на паузе ключи, а не участник');
   assert.equal(after.paid_until, now());
+  assert.ok(portal.slotsOf(member.id).every((slot) => slot.until === now()));
   assert.equal(fake.state.clients.get(device.client_id).status, 'disabled');
   assert.match(delivered.at(-1).text, /Вам вернули 400 ₽[\s\S]*Доступ по этому заказу закончен/);
   assert.match(await admin.run('/refund', [String(id)]), /уже возвращены полностью/);
@@ -421,15 +422,19 @@ test('возврат через ЮKassa: подтверждение в боте,
 test('возврат: продление — срок уменьшается на срок заказа; отказ и недоступность ЮKassa; ручная оплата', async () => {
   const { db, yk, portal, shop, admin, paidOrder, now } = setup();
   await paidOrder('1600', 'order:1m:1:300');
-  const renew = await paidOrder('1600', 'order:1m:1:300');
+  const firstUntil = portal.memberByChat('1600').paid_until;
+  const [slot] = portal.slotsOf(portal.memberByChat('1600').id);
+  const renew = await paidOrder('1600', `rorder:${slot.id}:1m:300`);
   const until = portal.memberByChat('1600').paid_until;
+  assert.ok(until > firstUntil);
   const preview = shop.refundPreview(renew.id);
-  assert.ok(preview.newUntil > now() && preview.newUntil < until);
+  assert.equal(preview.newUntil, firstUntil, 'продление отменяется целиком');
+  assert.match(await admin.run('/refund', [String(renew.id)]), /срок ключа заказа уменьшится на 1 месяц/);
   await shop.refundOrder(renew.id);
   const member = portal.memberByChat('1600');
   assert.notEqual(member.status, 'paused', 'первый месяц ещё оплачен');
-  assert.equal(member.paid_until, preview.newUntil);
-  assert.ok(Math.abs(member.paid_until - (until - 30 * DAY)) <= DAY, 'примерно на месяц меньше');
+  assert.equal(member.paid_until, firstUntil);
+  assert.ok(Math.abs(member.paid_until - (until - 31 * DAY)) <= DAY, 'примерно на месяц меньше');
 
   // ЮKassa отклонила — ничего не учтено
   const other = await paidOrder('1601');

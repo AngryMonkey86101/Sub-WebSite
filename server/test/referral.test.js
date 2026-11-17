@@ -234,17 +234,22 @@ test('рефералы: друг вернул деньги, а скидку уж
   const friendOrder = await buy(F);
   const own = await buy(A);
   assert.equal(own.amount, 210);
-  const until = shop.memberOf(A).paid_until;
+  // у каждого ключа свой срок: убавляется место, купленное со скидкой
+  const ownUntil = () => db.prepare('SELECT until FROM slots WHERE order_id = ?').get(own.id).until;
+  const firstUntil = () => db.prepare('SELECT until FROM slots WHERE member_id = ? AND order_id != ?').get(own.member_id, own.id).until;
+  const until = ownUntil();
+  const other = firstUntil();
 
   // предупреждение в боте админа: 30% от месяца (30 дней) — 9 дней
   const asked = await admin.run('/refund', [String(friendOrder.id)]);
   assert.match(asked, /пришёл по приглашению .{4}, и тот уже купил со скидкой 30%: его срок убавится на 9 дн\./);
   const done = await admin.run('/refund_confirm', []);
   assert.match(done, /срок убавлен на 9 дн\./);
-  assert.equal(shop.memberOf(A).paid_until, until - 9 * DAY);
+  assert.equal(ownUntil(), until - 9 * DAY);
+  assert.equal(firstUntil(), other, 'место, купленное без скидки, не меняется');
   assert.equal(reward().revoked_reason, 'cut');
   assert.equal(reward().cut_days, 9);
-  assert.match(delivered.findLast((d) => d.chat === A).text, /Срок доступа уменьшен на 9 дней/);
+  assert.match(delivered.findLast((d) => d.chat === A).text, /Срок ключа этого заказа уменьшен на 9 дней/);
 
   // простить: срок не меняется
   saveReferral({ referral_hold: '0' });
@@ -313,4 +318,23 @@ test('рефералы: текст из админки экранируется,
     server.close();
     db.close();
   }
+});
+
+test('рефералы: скидка действует и на продление ключа', async () => {
+  const { db, shop, portal, tap, buy, refCode, join } = setup({ referral: { referral_hold: '0' } });
+  await buy(A);
+  await join(F, await refCode(A));
+  await buy(F);
+  const [slot] = portal.slotsOf(shop.memberOf(A).id);
+  const confirm = await tap(A, `ren:${slot.id}:1m`);
+  assert.match(confirm.text, /Скидка 30% за приглашённого друга/);
+  const action = confirm.buttons.flat().find((b) => b.action?.startsWith('rorder:')).action;
+  assert.equal(action, `rorder:${slot.id}:1m:210`);
+  await tap(A, action);
+  const order = shop.pendingOrder(A);
+  assert.equal(order.amount, 210);
+  assert.equal(order.renew, String(slot.id));
+  await shop.grantOrder(order.id);
+  assert.ok(portal.slotsOf(shop.memberOf(A).id)[0].until > slot.until, 'срок ключа продлён');
+  db.close();
 });

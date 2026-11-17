@@ -246,7 +246,8 @@ function createApp({
       const devices = portal.devicesOf(member.id);
       const { statuses } = devices.length ? await serverKeysOrError() : { statuses: null };
       const usage = traffic ? { ...traffic.usageOf(member), devices: traffic.deviceUsage(member.id) } : null;
-      return page(200, cabinetPage({ member, devices, statuses, protocols: config.protocols, traffic: usage, nowMs: now() }));
+      const slots = member.role === 'client' ? portal.slotsOf(member.id) : null;
+      return page(200, cabinetPage({ member, devices, statuses, protocols: config.protocols, traffic: usage, slots, nowMs: now() }));
     }],
 
     // Мини-приложение Telegram: страница входа, данные запуска приходят формой из static/tg.js
