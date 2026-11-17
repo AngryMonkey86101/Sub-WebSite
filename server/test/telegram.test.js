@@ -526,3 +526,14 @@ test('Telegram: экраны и ответы админу — HTML, уведом
   assert.equal(tg.edited.at(-1).parse_mode, undefined, 'и при правке экрана');
   assert.match(tg.edited.at(-1).text, /Доступа пока нет/);
 });
+
+test('Telegram: /start ref_… — ссылка приглашения покупателя, не попытка подключить чат админа', async () => {
+  const { db, tg, telegram, say } = setup();
+  await say(700, '/start ref_ABCD2345');
+  assert.equal(telegram.info().linked, false);
+  assert.doesNotMatch(tg.last(), /Ссылка для подключения недействительна/);
+  assert.match(tg.last(), /Nomad VPN/, 'обычное клиентское меню');
+  await say(-100700, '/start ref_ABCD2345', 'group');
+  assert.doesNotMatch(tg.last(), /только в личном чате/);
+  db.close();
+});

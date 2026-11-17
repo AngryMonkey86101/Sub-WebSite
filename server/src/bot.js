@@ -191,6 +191,9 @@ function createBotCommands({ portal, config, watchdog = null, heartbeat = null, 
     } else if (!preview.full) {
       lines.push('Возврат частичный: срок доступа не меняется.');
     }
+    const ref = preview.referral;
+    if (ref?.used) lines.push(`Покупатель пришёл по приглашению ${code(ref.code)}, и тот уже купил со скидкой ${ref.percent}%: его срок убавится на ${ref.cutDays} дн. Простить — возврат из админки с галкой «не убавлять».`);
+    else if (ref) lines.push(`Скидка ${ref.percent}% у пригласившего ${code(ref.code)} за этого друга будет снята${ref.pendingOrder ? `, его заказ №${ref.pendingOrder} со скидкой отменится` : ''}.`);
     lines.push('', `Подтвердить: /refund_confirm ${i('(в течение минуты)')}`);
     return lines.join('\n');
   }
@@ -202,6 +205,9 @@ function createBotCommands({ portal, config, watchdog = null, heartbeat = null, 
     const result = await shop.refundOrder(asked.orderId, String(asked.amount));
     const lines = [`💸 ${b(`Заказ №${asked.orderId}: возвращено ${formatRub(result.amount)}`)}${result.pending ? ' (ЮKassa ещё обрабатывает возврат)' : ''}. Покупателю отправлено сообщение.`];
     if (result.newUntil !== null) lines.push(result.newUntil <= now() ? 'Доступ закончен, ключи на паузе.' : `Срок теперь до ${formatMsk(result.newUntil)}.`);
+    const ref = result.referral;
+    if (ref?.days) lines.push(`${code(ref.code ?? '—')}: срок убавлен на ${ref.days} дн. — скидка за этого друга уже была потрачена.`);
+    else if (ref?.revoked) lines.push(`${code(ref.code)}: скидка за этого друга снята.`);
     return lines.join('\n');
   }
 
@@ -215,6 +221,7 @@ function createBotCommands({ portal, config, watchdog = null, heartbeat = null, 
     if (r.orders) lines.push(`Новых покупателей: ${r.newClients}, продлений: ${r.orders - r.newClients}`);
     if (r.orders) lines.push(`Через ЮKassa: ${r.byMethod.yookassa}, вручную: ${r.byMethod.manual}`);
     if (r.byTariff.length) lines.push('', b('По тарифам'), ...r.byTariff.map((t) => `${esc(t.label)}: ${t.count} шт., ${formatRub(t.sum)}`));
+    if (r.discounts.count) lines.push(`Со скидкой по реферальной программе: ${r.discounts.count}, скидок на ${formatRub(r.discounts.sum)}`);
     if (r.trials) lines.push('', `Пробный период: ${r.trials}, из них купили: ${r.trialsConverted}`);
     lines.push('', `Сейчас: ${r.activeClients} покупателей с действующим сроком, мест занято ${r.seats.used} из ${r.seats.total}`);
     lines.push(`${r.year.nearLimit ? '⚠️ ' : ''}Доход за ${r.year.year} год: ${formatRub(r.year.sum)} из ${formatRub(r.year.limit)} — лимит самозанятого`);

@@ -12,7 +12,7 @@ import { miniAppUrl } from './miniApp.js';
 // { text, url } — ссылка. Кнопки переключают экраны, правя то же сообщение (telegram.js).
 //
 // Действия кнопок (callback_data без префикса «c:», до 64 байт):
-//   menu, help, keys, trial, relink, relink!          — экраны и простые действия
+//   menu, help, keys, trial, relink, relink!, invite  — экраны и простые действия
 //   apps, apps:<система>   (apps:ios, apps:android)    — выбор системы и ссылки на приложение
 //   buy                                                — у кого есть места: что продлить; иначе выбор срока
 //   new                                                — новые устройства: выбор срока
@@ -22,6 +22,8 @@ import { miniAppUrl } from './miniApp.js';
 //   ren:<место>            (ren:12, ren:all)           — продление места или всех мест: выбор срока
 //   ren:<место>:<срок>                                 — подтверждение продления с ценой
 //   rorder:<место>:<срок>:<цена>                       — оформить продление
+//
+// /start ref_<код> — переход по ссылке приглашения (реферальная программа, shop.js).
 //   cancel:<номер заказа>
 //
 // О покупателе бот не хранит ни имени, ни username: только номер чата у участника и в заказе.
@@ -34,8 +36,15 @@ const LIST = [
 ];
 
 const BACK = [{ text: '← Меню', action: 'menu' }];
+const REF_ARG = /^ref_([A-Z0-9]{4,16})$/;
 
-function createClientBot({ config, shop, now = () => Date.now() }) {
+// Текст программы из админки: всё экранируется, потом подставляются {скидка}, {скидка_другу}, {ссылка}
+function fillReferralText(template, values) {
+  return esc(template).replace(/\{(скидка_другу|скидка|ссылка)\}/g, (_, name) => values[name]);
+}
+
+// botUsername() — имя бота в Telegram (для ссылки приглашения), null — пока неизвестно
+function createClientBot({ config, shop, botUsername = () => null, now = () => Date.now() }) {
   // Кабинет внутри Telegram — только тем, у кого есть доступ (и если портал на HTTPS)
   const cabinetUrl = miniAppUrl(config);
   const cabinetButton = (member) => (member && cabinetUrl ? [[{ text: '📱 Открыть кабинет', webApp: cabinetUrl }]] : []);
@@ -49,9 +58,21 @@ function createClientBot({ config, shop, now = () => Date.now() }) {
     return lines.join('\n');
   }
 
+  // Цена: со скидкой — прежняя зачёркнута
+  const priceHtml = (amount, full = null) => (full && full !== amount ? `<s>${esc(formatRub(full))}</s> ${b(formatRub(amount))}` : b(formatRub(amount)));
+
   // Карточка заказа: номер копируется нажатием, сумма выделена
   const orderCard = (order) =>
-    `🧾 ${b(`Заказ №${order.id}`)}\n${esc(periodLabel(parsePeriodKey(order.period)))}, ${devicesLabel(order.devices)}${order.renew ? ' (продление)' : ''} — ${b(formatRub(order.amount))}`;
+    `🧾 ${b(`Заказ №${order.id}`)}\n${esc(periodLabel(parsePeriodKey(order.period)))}, ${devicesLabel(order.devices)}${order.renew ? ' (продление)' : ''} — ${priceHtml(order.amount, order.full_amount)}${order.discount_percent ? ` (скидка ${order.discount_percent}%)` : ''}`;
+
+  // Скидка чата одной строкой — в меню и при выборе срока
+  function discountLine(chat) {
+    const discount = shop.discountFor(chat);
+    if (!discount) return null;
+    return discount.kind === 'referrer'
+      ? `🎁 У вас скидка ${b(`${discount.percent}%`)} на следующую покупку — за приглашённого друга.`
+      : `🎁 По приглашению друга — скидка ${b(`${discount.percent}%`)} на первую покупку.`;
+  }
 
   function menu(chat) {
     const member = shop.memberOf(chat);
@@ -62,6 +83,7 @@ function createClientBot({ config, shop, now = () => Date.now() }) {
       const { trial } = shop.settings();
       rows.push([{ text: `🎁 Попробовать бесплатно — ${trial.days} ${plural(trial.days, ['день', 'дня', 'дней'])}`, action: 'trial' }]);
     }
+    if (member && shop.referralEnabled()) rows.push([{ text: '🎁 Пригласить друга', action: 'invite' }]);
     rows.push([
       { text: '🔑 Мой доступ', action: 'keys' },
       { text: '❓ Помощь', action: 'help' }
@@ -75,6 +97,8 @@ function createClientBot({ config, shop, now = () => Date.now() }) {
       : i('Продажа сейчас закрыта. Загляните позже.');
     const lines = [`🛡 Здравствуйте! Это ${b('Nomad VPN')} — VPN на AmneziaVPN.`, '', offer];
     if (member) lines.push('', describeAccess(member));
+    const discount = open ? discountLine(chat) : null;
+    if (discount) lines.push('', discount);
     if (ad?.text) lines.push('', quote(esc(ad.text)));
     return { text: lines.join('\n'), buttons: rows };
   }
@@ -150,8 +174,9 @@ function createClientBot({ config, shop, now = () => Date.now() }) {
       rows.push([{ text: `Все сразу (${slots.length})`, action: 'ren:all' }]);
     }
     rows.push([{ text: '➕ Добавить устройства', action: 'new' }], BACK);
+    const discount = discountLine(chat);
     return {
-      text: [`🛒 ${b('Что продлить?')} У каждого ключа свой срок, новый прибавится к текущему.`, '', ...shop.slotLines(member)].join('\n'),
+      text: [`🛒 ${b('Что продлить?')} У каждого ключа свой срок, новый прибавится к текущему.`, '', ...shop.slotLines(member), ...(discount ? ['', `${discount} Цены — без скидки, она применится при оформлении.`] : [])].join('\n'),
       buttons: rows
     };
   }
@@ -160,10 +185,12 @@ function createClientBot({ config, shop, now = () => Date.now() }) {
     if (!shop.isOpen()) return closed();
     const member = shop.memberOf(chat);
     const periods = shop.catalog();
+    const discount = discountLine(chat);
+    const question = member
+      ? `🛒 ${b('Новые устройства: на какой срок?')} Срок новых устройств — свой, от сегодняшнего дня.`
+      : `🛒 ${b('На какой срок?')}`;
     return {
-      text: member
-        ? `🛒 ${b('Новые устройства: на какой срок?')} Срок новых устройств — свой, от сегодняшнего дня.`
-        : `🛒 ${b('На какой срок?')}`,
+      text: discount ? `${question}\n\n${discount} Цены ниже — без скидки, она применится при оформлении.` : question,
       buttons: [
         ...periods.map((p) => [{ text: `${p.label} — от ${formatRub(Math.min(...p.prices.filter((x) => x !== null)))}`, action: `buy:${p.key}` }]),
         member ? [{ text: '← Назад', action: 'buy' }] : BACK
@@ -198,15 +225,17 @@ function createClientBot({ config, shop, now = () => Date.now() }) {
   function renewConfirm(chat, target, key) {
     const slots = shop.isOpen() ? renewSlots(chat, target) : null;
     if (!slots) return chooseRenew(chat);
-    const found = shop.priceOf(key, slots.length);
+    const found = shop.offer(chat, key, slots.length);
     if (!found) return renewPeriod(chat, target);
+    const lines = [
+      b('🛒 Продление:'),
+      `${esc(renewTitle(slots))}, ${esc(found.period.label)} — ${priceHtml(found.amount, found.price)}`,
+      ...slots.map((slot) => `${slotName(slot)}: новый срок — до ${b(formatMsk(termEnd(slot.until, found.period, now())))}`)
+    ];
+    if (found.discount) lines.push(`🎁 Скидка ${found.discount.percent}% ${found.discount.kind === 'referrer' ? 'за приглашённого друга' : 'по приглашению друга'}.`);
     return {
-      text: [
-        b('🛒 Продление:'),
-        `${esc(renewTitle(slots))}, ${esc(found.period.label)} — ${b(formatRub(found.price))}`,
-        ...slots.map((slot) => `${slotName(slot)}: новый срок — до ${b(formatMsk(termEnd(slot.until, found.period, now())))}`)
-      ].join('\n'),
-      buttons: [[{ text: '✅ Оформить заказ', action: `rorder:${target}:${key}:${found.price}` }], [{ text: '← Изменить', action: `ren:${target}` }]]
+      text: lines.join('\n'),
+      buttons: [[{ text: '✅ Оформить заказ', action: `rorder:${target}:${key}:${found.amount}` }], [{ text: '← Изменить', action: `ren:${target}` }]]
     };
   }
 
@@ -224,23 +253,24 @@ function createClientBot({ config, shop, now = () => Date.now() }) {
   }
 
   function confirm(chat, key, devices) {
-    const found = shop.isOpen() ? shop.priceOf(key, devices) : null;
+    const found = shop.isOpen() ? shop.offer(chat, key, devices) : null;
     if (!found) return chooseDevices(chat, key);
+    const lines = [b('🛒 Ваш заказ:'), `${esc(found.period.label)}, ${devicesLabel(devices)} — ${priceHtml(found.amount, found.price)}`];
+    if (found.discount) {
+      lines.push(`🎁 Скидка ${found.discount.percent}% ${found.discount.kind === 'referrer' ? 'за приглашённого друга' : 'по приглашению друга'}.`);
+    }
     return {
-      text: [
-        b('🛒 Ваш заказ:'),
-        `${esc(found.period.label)}, ${devicesLabel(devices)} — ${b(formatRub(found.price))}`
-      ].join('\n'),
-      buttons: [[{ text: '✅ Оформить заказ', action: `order:${key}:${devices}:${found.price}` }], [{ text: '← Изменить', action: `buy:${key}` }]]
+      text: lines.join('\n'),
+      buttons: [[{ text: '✅ Оформить заказ', action: `order:${key}:${devices}:${found.amount}` }], [{ text: '← Изменить', action: `buy:${key}` }]]
     };
   }
 
   async function order(chat, key, devices, price, target = null) {
     const slots = target === null ? null : renewSlots(chat, target);
     if (target !== null && !slots) return chooseRenew(chat);
-    const found = shop.isOpen() ? shop.priceOf(key, slots ? slots.length : devices) : null;
-    // цену поменяли, пока покупатель смотрел старый экран
-    if (!found || found.price !== price) {
+    const found = shop.isOpen() ? shop.offer(chat, key, slots ? slots.length : devices) : null;
+    // цену или скидку поменяли, пока покупатель смотрел старый экран
+    if (!found || found.amount !== price) {
       const screen = slots ? renewConfirm(chat, target, key) : confirm(chat, key, devices);
       return { ...screen, text: `⚠️ ${b('Цена изменилась.')}\n\n${screen.text}` };
     }
@@ -266,6 +296,29 @@ function createClientBot({ config, shop, now = () => Date.now() }) {
       ].join('\n'),
       buttons: [[{ text: 'Отменить заказ', action: `cancel:${created.id}` }], BACK]
     };
+  }
+
+  // Пригласить друга: текст из админки, личная ссылка, скидки за приглашённых
+  function invite(chat) {
+    const info = shop.referralInfo(chat);
+    if (!info) return menu(chat);
+    const username = botUsername();
+    const link = username ? `https://t.me/${username}?start=ref_${info.code}` : null;
+    const linkHtml = link ? esc(link) : i('ссылка появится через минуту — бот подключается к Telegram');
+    const text = fillReferralText(info.text, { скидка: b(`${info.percent}%`), скидка_другу: b(`${info.inviteePercent}%`), ссылка: linkHtml });
+    const lines = [text];
+    if (!info.text.includes('{ссылка}')) lines.push('', `Ваша ссылка: ${linkHtml}`);
+    if (info.joined) lines.push('', `👥 По вашей ссылке пришли: ${b(info.joined)}, оплатили: ${b(info.paid)}.`);
+    for (const r of info.ready) lines.push(`✅ Скидка ${b(`${r.percent}%`)} — применится к следующей покупке.`);
+    for (const r of info.waiting) lines.push(`⏳ Скидка ${b(`${r.percent}%`)} — станет доступна ${formatMsk(r.available_at)}.`);
+    const rows = [];
+    if (link) {
+      const pitch = info.inviteePercent ? `Скидка ${info.inviteePercent}% на первую покупку VPN по моей ссылке` : 'VPN по моей ссылке';
+      rows.push([{ text: '📤 Поделиться ссылкой', url: `https://t.me/share/url?url=${encodeURIComponent(link)}&text=${encodeURIComponent(pitch)}` }]);
+    }
+    if (info.ready.length && shop.isOpen()) rows.push([{ text: '🛒 Продлить со скидкой', action: 'buy' }]);
+    rows.push(BACK);
+    return { text: lines.join('\n'), buttons: rows };
   }
 
   function relinkAsk() {
@@ -315,6 +368,8 @@ function createClientBot({ config, shop, now = () => Date.now() }) {
         return relinkAsk();
       case 'relink!':
         return relinkDo(chat);
+      case 'invite':
+        return invite(chat);
       default:
         return menu(chat);
     }
@@ -332,12 +387,17 @@ function createClientBot({ config, shop, now = () => Date.now() }) {
 
   const COMMANDS = { '/start': 'menu', '/buy': 'buy', '/keys': 'keys', '/help': 'help' };
 
-  // Команда или любой текст. На незнакомое — меню.
-  const command = (name, chat) => safe(String(chat), COMMANDS[name] ?? 'menu');
+  // Команда или любой текст. На незнакомое — меню. /start ref_КОД — переход по ссылке
+  // приглашения: приглашение засчитывается (если можно), скидка видна в меню.
+  function command(name, chat, args = []) {
+    const ref = name === '/start' ? REF_ARG.exec(args[0] ?? '') : null;
+    if (ref) shop.joinByLink(String(chat), ref[1]);
+    return safe(String(chat), COMMANDS[name] ?? 'menu');
+  }
   // Нажатие кнопки. Неизвестное действие (кнопка из старого сообщения) — тоже меню.
   const action = (name, chat) => safe(String(chat), name);
 
   return { command, action, list: LIST };
 }
 
-export { createClientBot };
+export { createClientBot, fillReferralText, REF_ARG };
