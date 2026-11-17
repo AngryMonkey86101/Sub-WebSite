@@ -2,6 +2,7 @@ import { setTimeout as sleep } from 'node:timers/promises';
 import { sha256, newToken } from './crypto.js';
 import { MINUTE } from './config.js';
 import { PortalError } from './portal.js';
+import { toPlain } from './tgHtml.js';
 
 // Telegram-бот: уведомления портала, команды админа (bot.js) и клиентское меню (client.js).
 //
@@ -12,6 +13,7 @@ import { PortalError } from './portal.js';
 // группы — ничего.
 //
 // В текстах только коды участников и номера устройств: ни IP-адресов, ни имён, ни меток.
+// Экраны меню и ответы на команды — с разметкой HTML (tgHtml.js), уведомления — простой текст.
 // Токен бота не попадает ни в журналы, ни в сообщения об ошибках.
 
 const API = 'https://api.telegram.org';
@@ -46,7 +48,7 @@ function createTelegram({ settings, db, fetch = globalThis.fetch, now = () => Da
     };
     return {
       configured: false,
-      notify: async (text) => log.log('Уведомление:', text),
+      notify: async (text, { html = false } = {}) => log.log('Уведомление:', html ? toPlain(text) : text),
       relay: off,
       info: () => ({ configured: false }),
       chatId: () => null,
@@ -106,7 +108,21 @@ function createTelegram({ settings, db, fetch = globalThis.fetch, now = () => Da
 
   const send = (chat, text) => call('sendMessage', { chat_id: chat, text, link_preview_options: { is_disabled: true } });
 
-  // Экран клиентского меню: { text, buttons } → сообщение с кнопками под ним
+  // Сообщение с разметкой. Если Telegram её не разобрал (что-то вставлено без esc), то же
+  // сообщение уходит простым текстом: человек не должен остаться без ответа.
+  async function callHtml(method, params) {
+    try {
+      return await call(method, { ...params, parse_mode: 'HTML' });
+    } catch (err) {
+      if (!/can't parse entities/i.test(err.message)) throw err;
+      log.error(`Telegram не разобрал разметку (${err.message}) — отправляю простым текстом`);
+      return call(method, { ...params, text: toPlain(params.text) });
+    }
+  }
+
+  const sendHtml = (chat, html) => callHtml('sendMessage', { chat_id: chat, text: html, link_preview_options: { is_disabled: true } });
+
+  // Экран клиентского меню: { text, buttons } → сообщение с кнопками под ним. text — HTML (tgHtml.js)
   const keyboard = (buttons) =>
     buttons?.length
       ? {
@@ -122,14 +138,14 @@ function createTelegram({ settings, db, fetch = globalThis.fetch, now = () => Da
     const params = { chat_id: chat, text: screen.text, link_preview_options: { is_disabled: true }, reply_markup: keyboard(screen.buttons) };
     if (messageId) {
       try {
-        await call('editMessageText', { ...params, message_id: messageId });
+        await callHtml('editMessageText', { ...params, message_id: messageId });
         return;
       } catch (err) {
         // тот же экран ещё раз — Telegram отвечает «message is not modified»
         if (/not modified/i.test(err.message)) return;
       }
     }
-    await call('sendMessage', params);
+    await callHtml('sendMessage', params);
   }
 
   const hits = new Map();
@@ -160,11 +176,12 @@ function createTelegram({ settings, db, fetch = globalThis.fetch, now = () => Da
     await send(chat, text);
   }
 
-  async function notify(text) {
+  // html: true — текст размечен (tgHtml.js)
+  async function notify(text, { html = false } = {}) {
     const chat = chatId();
-    if (!chat) return log.log('Уведомление:', text);
+    if (!chat) return log.log('Уведомление:', html ? toPlain(text) : text);
     try {
-      await send(chat, text);
+      await (html ? sendHtml(chat, text) : send(chat, text));
     } catch (err) {
       log.error('Уведомление в Telegram не отправлено:', err.message);
     }
@@ -301,7 +318,7 @@ function createTelegram({ settings, db, fetch = globalThis.fetch, now = () => Da
         await hideCommands(previous);
         await send(previous, 'Бот подключён к другому чату. Если это сделали не вы, создайте ссылку в админке и подключите бота заново.').catch(() => {});
       }
-      await send(chat, `✅ Бот подключён: сюда будут приходить уведомления портала.\n\n${handlers.admin.help()}`);
+      await sendHtml(chat, `✅ <b>Бот подключён:</b> сюда будут приходить уведомления портала.\n\n${handlers.admin.help()}`);
       await showCommands(chat, handlers.admin.list);
       return;
     }
@@ -309,7 +326,7 @@ function createTelegram({ settings, db, fetch = globalThis.fetch, now = () => Da
     if (!isAdmin) return show(chat, await handlers.client.command(command, chat));
     // админ смотрит клиентское меню глазами покупателя; заказы и пробный период из него настоящие
     if (command === '/client') return show(chat, await handlers.client.command('/start', chat));
-    await send(chat, await handlers.admin.run(command, args));
+    await sendHtml(chat, await handlers.admin.run(command, args));
   }
 
   async function allowed(chat) {

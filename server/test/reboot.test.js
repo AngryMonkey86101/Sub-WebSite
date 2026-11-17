@@ -15,6 +15,7 @@ import { createReboot } from '../src/reboot.js';
 import { createBotCommands } from '../src/bot.js';
 import { createApp } from '../src/app.js';
 import { startFakeAmnezia } from './fakeAmnezia.js';
+import { plainAdmin } from './plain.js';
 
 // Перезагрузка по команде: портал кладёт файл-запрос, служба на сервере перезагружает.
 // Таймеры и время подменены; скрипт установки службы — настоящий bash с заглушками systemctl и docker.
@@ -119,7 +120,7 @@ test('бот: /reboot спрашивает подтверждение, оно д
   const config = loadConfig({ PUBLIC_URL: 'https://m2pr7x.duckdns.org', AMNEZIA_API_URL: fake.url, AMNEZIA_API_KEY: API_KEY, KEY_ENCRYPTION_KEY: randomBytes(32).toString('base64') });
   const t = setup('bot');
   const portal = createPortal({ db: t.db, config, amnezia: createAmneziaClient({ baseUrl: fake.url, apiKey: API_KEY }), notify: () => {} });
-  const commands = createBotCommands({ portal, config, reboot: t.reboot, now: t.now });
+  const commands = plainAdmin(createBotCommands({ portal, config, reboot: t.reboot, now: t.now }));
   assert.ok(commands.list.some((c) => c.command === 'reboot'));
   assert.match(commands.help(), /\/reboot/);
 
@@ -135,7 +136,7 @@ test('бот: /reboot спрашивает подтверждение, оно д
   assert.match(await commands.run('/reboot_confirm', []), /устарело/, 'подтверждение одноразовое');
 
   const off = setup('bot-off', { enabled: false });
-  const without = createBotCommands({ portal, config, reboot: off.reboot, now: off.now });
+  const without = plainAdmin(createBotCommands({ portal, config, reboot: off.reboot, now: off.now }));
   assert.match(await without.run('/reboot', []), /⚠️ Перезагрузка по команде не настроена[\s\S]*install-reboot\.sh/);
   t.db.close();
   off.db.close();

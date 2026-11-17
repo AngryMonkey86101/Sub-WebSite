@@ -1,3 +1,5 @@
+import { b } from './tgHtml.js';
+
 // Трафик участников и лимит на 30 дней.
 //
 // Откуда цифры. amnezia-api отдаёт у каждого ключа счётчики приёма и передачи (AmneziaWG — из
@@ -206,7 +208,7 @@ function createTraffic({ db, amnezia, portal, notify = () => {}, deliver = async
         await portal.setPaused(m.id, false, { quiet: true });
         resumed.push(m.code);
         event('traffic_resumed', m.code, `период до ${shortDate(end)}`);
-        await tell(m.telegram_chat, `📶 Начался новый период — трафик снова доступен, ключи включены. Выключите и включите VPN.`);
+        await tell(m.telegram_chat, `📶 ${b('Начался новый период — трафик снова доступен,')} ключи включены. Выключите и включите VPN.`);
       } catch (err) {
         log.error?.(`Включение ${m.code} после лимита трафика не удалось:`, err.message);
       }
@@ -234,11 +236,11 @@ function createTraffic({ db, amnezia, portal, notify = () => {}, deliver = async
         paused.push(m.code);
         event('traffic_paused', m.code, `${formatGb(bytes)} из ${formatGb(limit)}`);
         notify(`📶 ${m.code}: трафик за ${CYCLE_DAYS} дней — ${formatGb(bytes)} из ${formatGb(limit)}. Ключи на паузе до ${until}. Включить раньше — админка, «Возобновить» (до конца периода без лимита).`);
-        await tell(m.telegram_chat, `📶 Трафик за ${CYCLE_DAYS} дней исчерпан: ${formatGb(bytes)} из ${formatGb(limit)}. VPN выключен до ${until} (00:00 МСК), потом включится сам.`);
+        await tell(m.telegram_chat, `📶 ${b(`Трафик за ${CYCLE_DAYS} дней исчерпан:`)} ${formatGb(bytes)} из ${formatGb(limit)}. VPN выключен до ${b(until)} (00:00 МСК), потом включится сам.`);
       } else if (bytes >= limit * WARN_AT && m.traffic_warned !== period) {
         q.setWarned.run(period, m.id);
         event('traffic_warned', m.code, `${formatGb(bytes)} из ${formatGb(limit)}`);
-        await tell(m.telegram_chat, `📶 Израсходовано ${formatGb(bytes)} из ${formatGb(limit)} трафика за ${CYCLE_DAYS} дней. Когда лимит кончится, VPN выключится до ${until}.`);
+        await tell(m.telegram_chat, `📶 Израсходовано ${b(`${formatGb(bytes)} из ${formatGb(limit)}`)} трафика за ${CYCLE_DAYS} дней. Когда лимит кончится, VPN выключится до ${until}.`);
       }
     }
     return paused;

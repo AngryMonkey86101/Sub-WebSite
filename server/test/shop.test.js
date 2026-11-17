@@ -11,6 +11,7 @@ import { createClientBot } from '../src/client.js';
 import { createBotCommands } from '../src/bot.js';
 import { createApp } from '../src/app.js';
 import { startFakeAmnezia } from './fakeAmnezia.js';
+import { plainScreen, plainClient, plainAdmin, plainNotify, telegramHtmlProblem } from './plain.js';
 
 // Продажа доступа: тарифы из админки, заказ кнопками бота, подтверждение админом, продление,
 // пробный период, места, конец срока. Поддельный amnezia-api, без Telegram и сети.
@@ -43,11 +44,12 @@ function setup() {
   const db = openDatabase(':memory:');
   const notes = [];
   const delivered = [];
-  const notify = (text) => notes.push(text);
+  const notify = plainNotify(notes);
   const portal = createPortal({ db, config, amnezia, notify, now });
-  const shop = createShop({ db, config, portal, notify, deliver: async (chat, screen) => delivered.push({ chat, ...screen }), now, log: quiet });
-  const client = createClientBot({ config, shop, now });
-  const admin = createBotCommands({ portal, config, shop, now });
+  const shop = createShop({ db, config, portal, notify, deliver: async (chat, screen) => delivered.push({ chat, ...plainScreen(screen) }), now, log: quiet });
+  const client = plainClient(createClientBot({ config, shop, now }));
+  const rawAdmin = createBotCommands({ portal, config, shop, now });
+  const admin = plainAdmin(rawAdmin);
   const form = (fields) => new URLSearchParams(fields);
   // тарифы как из формы админки
   const prices = (rows) => {
@@ -67,7 +69,7 @@ function setup() {
   const buttons = (screen) => screen.buttons.flat();
   const actionsOf = (screen) => buttons(screen).filter((b) => b.action).map((b) => b.action);
   return {
-    db, portal, shop, client, admin, notes, delivered, form, prices, configure, tap, buttons, actionsOf, now,
+    db, portal, shop, client, admin, rawAdmin, notes, delivered, form, prices, configure, tap, buttons, actionsOf, now,
     advance: (ms) => {
       clock += ms;
     }
@@ -564,3 +566,54 @@ test('реклама в боте: по умолчанию — @spisokvmeste_bot,
   db.close();
 });
 
+
+test('бот: экраны и ответы админу — карточки HTML, текст админа экранируется', async () => {
+  const { shop, rawAdmin, delivered, notes, prices, configure, tap, form } = setup();
+  const valid = (html, where) => assert.equal(telegramHtmlProblem(html), null, `${where}: ${html}`);
+  prices([[1, 'month', 300, 500, null, null]]);
+  // реквизиты и реклама — текст админа: угловые скобки и «&» не должны ломать сообщение
+  configure({ pay_info: 'СБП <Тинькофф> & Сбер, «Иван И.»' });
+  shop.savePromo(form({ promo_enabled: '1', promo_text: 'Списки <вместе> & быстро', promo_button: '📝 Списки', promo_url: 'https://t.me/spisokvmeste_bot' }));
+  shop.setOpen(true);
+
+  const menu = await tap('500', 'menu');
+  valid(menu.html, 'меню');
+  assert.match(menu.html, /<b>Nomad VPN<\/b>/);
+  assert.match(menu.html, /<blockquote>Списки &lt;вместе&gt; &amp; быстро<\/blockquote>/, 'реклама — врезкой, экранирована');
+
+  const ordered = await tap('500', 'order:1m:2:500');
+  valid(ordered.html, 'заказ');
+  const id = Number(ordered.text.match(/Заказ №(\d+)/)[1]);
+  assert.match(ordered.html, new RegExp(`🧾 <b>Заказ №${id}</b>\\n1 месяц, 2 устройства — <b>500 ₽</b>`), 'карточка заказа: номер и сумма выделены');
+  assert.match(ordered.html, /<blockquote>СБП &lt;Тинькофф&gt; &amp; Сбер, «Иван И\.»<\/blockquote>/);
+  assert.match(ordered.html, new RegExp(`номер заказа: <code>${id}</code>`), 'номер заказа копируется нажатием');
+  assert.match(ordered.text, /СБП <Тинькофф> & Сбер/, 'покупатель видит реквизиты как есть');
+
+  for (const action of ['help', 'apps', 'apps:ios', 'apps:android', 'keys', 'buy', 'buy:1m', 'buy:1m:2', 'order:1m:2:999', 'relink', 'cancel:abc', 'нет-такого']) {
+    valid((await tap('500', action)).html, action);
+  }
+  assert.match((await tap('500', 'help')).html, /<blockquote>На iPhone/);
+
+  // ошибка магазина — тоже экранируется
+  const err = await tap('500', 'cancel:999');
+  valid(err.html, 'ошибка');
+
+  // ответы админу: карточки с заголовками, коды участников — моноширинным
+  const orders = await rawAdmin.run('/orders', []);
+  valid(orders, '/orders');
+  assert.match(orders, new RegExp(`<b>🧾 Ждут оплаты: 1</b>\n<b>№${id}</b> · 1 месяц, 2 устройства — 500 ₽`));
+  const granted = await rawAdmin.run('/grant', [String(id)]);
+  valid(granted, '/grant');
+  assert.match(granted, /доступ <code>\w{4}<\/code> до <b>/);
+  assert.match(delivered.at(-1).html, /<b>✅ Оплата получена, спасибо!<\/b>\n🔑 Доступ до <b>/);
+  valid(delivered.at(-1).html, 'доступ выдан');
+  const members = await rawAdmin.run('/members', []);
+  valid(members, '/members');
+  assert.match(members, /<b>👥 Участники: 1<\/b>\n<code>\w{4}<\/code> · покупатель до/);
+  for (const [command, args] of [['/help', []], ['/shop', []], ['/sales', []], ['/gift', ['<b>', '3']], ['/relink', ['<x>']], ['/refund', [String(id)]], ['/cancel', ['1']]]) {
+    valid(await rawAdmin.run(command, args), command);
+  }
+  assert.match(await rawAdmin.run('/relink', ['<x>']), /Участник &lt;x&gt; не найден/, 'ввод админа экранируется');
+  // уведомление о заказе размечено так же — в notes оно уже без разметки
+  assert.match(notes.join('\n'), new RegExp(`Заказ №${id}: 1 месяц, 2 устройства — 500 ₽, новый покупатель\\.\\nПосле оплаты: /grant ${id}`));
+});

@@ -1,11 +1,13 @@
 import { PortalError } from './portal.js';
 import { DAY } from './config.js';
-import { formatMsk, formatRub, devicesLabel, plural, DEVICE_OPTIONS } from './shop.js';
+import { formatMsk, formatRub, devicesLabel, plural, periodLabel, parsePeriodKey, DEVICE_OPTIONS } from './shop.js';
 import { appLinks, SYSTEMS } from './apps.js';
+import { esc, b, i, code, quote } from './tgHtml.js';
 
 // Клиентская часть бота: то, что видят в Telegram все, кроме админа (docs/PLAN.md, раздел 14).
 //
-// Ответ — «экран»: { text, buttons }. buttons — ряды кнопок: { text, action } — кнопка бота,
+// Ответ — «экран»: { text, buttons }. text — HTML (tgHtml.js): всё, что задаёт админ
+// (реквизиты, реклама) и тексты ошибок, — только через esc(). buttons — ряды кнопок: { text, action } — кнопка бота,
 // { text, url } — ссылка. Кнопки переключают экраны, правя то же сообщение (telegram.js).
 //
 // Действия кнопок (callback_data без префикса «c:», до 64 байт):
@@ -29,6 +31,18 @@ const LIST = [
 const BACK = [{ text: '← Меню', action: 'menu' }];
 
 function createClientBot({ config, shop, now = () => Date.now() }) {
+  // Срок доступа одной строкой — в меню и в «Мой доступ»
+  function describeAccess(member) {
+    const active = member.paid_until > now() && member.status !== 'paused';
+    return active
+      ? `🔑 Доступ до ${b(formatMsk(member.paid_until))}, ${devicesLabel(member.device_limit)}.`
+      : `⏳ ${b(`Срок доступа закончился ${formatMsk(member.paid_until)}`)}, ключи на паузе. После продления заработают снова. Если не продлить до ${formatMsk(member.paid_until + shop.settings().deleteAfterDays * DAY)}, ключи будут удалены.`;
+  }
+
+  // Карточка заказа: номер копируется нажатием, сумма выделена
+  const orderCard = (order) =>
+    `🧾 ${b(`Заказ №${order.id}`)}\n${esc(periodLabel(parsePeriodKey(order.period)))}, ${devicesLabel(order.devices)} — ${b(formatRub(order.amount))}`;
+
   function menu(chat) {
     const member = shop.memberOf(chat);
     const open = shop.isOpen();
@@ -47,20 +61,25 @@ function createClientBot({ config, shop, now = () => Date.now() }) {
     if (ad) rows.push([{ text: ad.button, url: ad.url }]);
     const periods = shop.catalog();
     const offer = open && periods.length
-      ? `Здесь можно купить доступ: ${periods.map((p) => p.label).join(', ')}, до ${devicesLabel(Math.max(...periods.flatMap((p) => DEVICE_OPTIONS.filter((n) => p.prices[n - 1] !== null))))}.`
-      : 'Продажа сейчас закрыта. Загляните позже.';
-    return { text: `Здравствуйте! Это Nomad VPN — VPN на AmneziaVPN.\n\n${offer}${ad?.text ? `\n\n${ad.text}` : ''}`, buttons: rows };
+      ? `Здесь можно купить доступ: ${b(periods.map((p) => p.label).join(', '))}, до ${b(devicesLabel(Math.max(...periods.flatMap((p) => DEVICE_OPTIONS.filter((n) => p.prices[n - 1] !== null)))))}.`
+      : i('Продажа сейчас закрыта. Загляните позже.');
+    const lines = [`🛡 Здравствуйте! Это ${b('Nomad VPN')} — VPN на AmneziaVPN.`, '', offer];
+    if (member) lines.push('', describeAccess(member));
+    if (ad?.text) lines.push('', quote(esc(ad.text)));
+    return { text: lines.join('\n'), buttons: rows };
   }
 
   function help() {
     return {
       text: [
-        'Как подключиться:',
-        '1. Установите приложение AmneziaVPN — кнопка «Скачать приложение», выберите свою систему. На iPhone с российским Apple ID AmneziaVPN в App Store нет: там будет DefaultVPN от тех же разработчиков — ключ подходит.',
-        '2. Купите доступ или возьмите пробный. Бот пришлёт ссылку на личный кабинет.',
-        '3. В кабинете добавьте устройство и вставьте ключ в приложение.',
+        b('❓ Как подключиться'),
         '',
-        'Если VPN перестал подключаться — выключите и включите его в приложении.'
+        `${b('1.')} Установите приложение AmneziaVPN — кнопка «Скачать приложение», выберите свою систему.`,
+        quote('На iPhone с российским Apple ID AmneziaVPN в App Store нет: там будет DefaultVPN от тех же разработчиков — ключ подходит.'),
+        `${b('2.')} Купите доступ или возьмите пробный. Бот пришлёт ссылку на личный кабинет.`,
+        `${b('3.')} В кабинете добавьте устройство и вставьте ключ в приложение.`,
+        '',
+        `💡 ${i('Если VPN перестал подключаться — выключите и включите его в приложении.')}`
       ].join('\n'),
       buttons: [[{ text: '⬇️ Скачать приложение', action: 'apps' }], BACK]
     };
@@ -73,10 +92,10 @@ function createClientBot({ config, shop, now = () => Date.now() }) {
     if (!chosen) {
       const rows = [];
       for (let i = 0; i < SYSTEMS.length; i += 2) rows.push(SYSTEMS.slice(i, i + 2).map((s) => ({ text: all[s].title, action: `apps:${s}` })));
-      return { text: 'Приложение AmneziaVPN — для какой системы?', buttons: [...rows, [{ text: '← Помощь', action: 'help' }]] };
+      return { text: `⬇️ ${b('Приложение AmneziaVPN')} — для какой системы?`, buttons: [...rows, [{ text: '← Помощь', action: 'help' }]] };
     }
     return {
-      text: `${chosen.title}\n\n${chosen.note}\n\nПотом откройте приложение и добавьте ключ из личного кабинета.`,
+      text: `${b(chosen.title)}\n\n${esc(chosen.note)}\n\nПотом откройте приложение и добавьте ключ из личного кабинета.`,
       buttons: [...chosen.links.map((l) => [l]), [{ text: '← Другая система', action: 'apps' }], BACK]
     };
   }
@@ -87,17 +106,14 @@ function createClientBot({ config, shop, now = () => Date.now() }) {
     const lines = [];
     const rows = [];
     if (!member) {
-      lines.push('🔑 Доступа пока нет. Когда купите доступ, бот пришлёт ссылку на личный кабинет: в нём вы сами добавляете устройства и забираете ключи.');
+      lines.push(`🔑 ${b('Доступа пока нет.')} Когда купите доступ, бот пришлёт ссылку на личный кабинет: в нём вы сами добавляете устройства и забираете ключи.`);
     } else {
-      const active = member.paid_until > now() && member.status !== 'paused';
-      lines.push(active
-        ? `🔑 Доступ до ${formatMsk(member.paid_until)}, ${devicesLabel(member.device_limit)}.`
-        : `⏳ Срок доступа закончился ${formatMsk(member.paid_until)}, ключи на паузе. После продления заработают снова. Если не продлить до ${formatMsk(member.paid_until + shop.settings().deleteAfterDays * DAY)}, ключи будут удалены.`);
+      lines.push(describeAccess(member));
       lines.push('', 'Ключи — в личном кабинете по вашей личной ссылке. Потеряли ссылку — кнопка «Новая ссылка на кабинет».');
       rows.push([{ text: '🔗 Новая ссылка на кабинет', action: 'relink' }]);
     }
     if (pending) {
-      lines.push('', `🧾 Ждёт оплаты заказ №${pending.id}: ${shop.describeOrder(pending)}.`);
+      lines.push('', quote(`🧾 Ждёт оплаты ${b(`заказ №${pending.id}`)}: ${esc(shop.describeOrder(pending))}.`));
       if (pending.payment_url) rows.push([{ text: `💳 Оплатить заказ №${pending.id}`, url: pending.payment_url }]);
       rows.push([{ text: `Отменить заказ №${pending.id}`, action: `cancel:${pending.id}` }]);
     }
@@ -107,13 +123,13 @@ function createClientBot({ config, shop, now = () => Date.now() }) {
   }
 
   function choosePeriod(chat) {
-    if (!shop.isOpen()) return { text: 'Продажа сейчас закрыта. Загляните позже.', buttons: [BACK] };
+    if (!shop.isOpen()) return { text: i('Продажа сейчас закрыта. Загляните позже.'), buttons: [BACK] };
     const member = shop.memberOf(chat);
     const periods = shop.catalog();
     return {
       text: member
-        ? `На какой срок продлить? Срок прибавится к текущему${member.paid_until > now() ? ` (до ${formatMsk(member.paid_until)})` : ''}.`
-        : 'На какой срок?',
+        ? `🛒 ${b('На какой срок продлить?')} Срок прибавится к текущему${member.paid_until > now() ? ` (до ${formatMsk(member.paid_until)})` : ''}.`
+        : `🛒 ${b('На какой срок?')}`,
       buttons: [
         ...periods.map((p) => [{ text: `${p.label} — от ${formatRub(Math.min(...p.prices.filter((x) => x !== null)))}`, action: `buy:${p.key}` }]),
         BACK
@@ -126,7 +142,7 @@ function createClientBot({ config, shop, now = () => Date.now() }) {
     const period = shop.catalog().find((p) => p.key === key);
     if (!period) return choosePeriod(chat);
     return {
-      text: `${period.label}. Сколько устройств? Телефон, компьютер, планшет — каждое отдельно.`,
+      text: `🛒 ${b(`${period.label}.`)} Сколько устройств? Телефон, компьютер, планшет — каждое отдельно.`,
       buttons: [
         ...DEVICE_OPTIONS.filter((n) => period.prices[n - 1] !== null).map((n) => [{ text: `${devicesLabel(n)} — ${formatRub(period.prices[n - 1])}`, action: `buy:${key}:${n}` }]),
         [{ text: '← Другой срок', action: 'buy' }]
@@ -138,7 +154,10 @@ function createClientBot({ config, shop, now = () => Date.now() }) {
     const found = shop.isOpen() ? shop.priceOf(key, devices) : null;
     if (!found) return chooseDevices(chat, key);
     return {
-      text: `Ваш заказ: ${found.period.label}, ${devicesLabel(devices)} — ${formatRub(found.price)}.`,
+      text: [
+        b('🛒 Ваш заказ:'),
+        `${esc(found.period.label)}, ${devicesLabel(devices)} — ${b(formatRub(found.price))}`
+      ].join('\n'),
       buttons: [[{ text: '✅ Оформить заказ', action: `order:${key}:${devices}:${found.price}` }], [{ text: '← Изменить', action: `buy:${key}` }]]
     };
   }
@@ -148,13 +167,13 @@ function createClientBot({ config, shop, now = () => Date.now() }) {
     // цену поменяли, пока покупатель смотрел старый экран
     if (!found || found.price !== price) {
       const screen = confirm(chat, key, devices);
-      return { ...screen, text: `Цена изменилась.\n\n${screen.text}` };
+      return { ...screen, text: `⚠️ ${b('Цена изменилась.')}\n\n${screen.text}` };
     }
     const { order: created, payInfo, paymentUrl } = await shop.createOrder(chat, key, devices);
     if (paymentUrl) {
       return {
         text: [
-          `🧾 Заказ №${created.id}: ${shop.describeOrder(created)}.`,
+          orderCard(created),
           '',
           'Оплата — на странице ЮKassa, кнопка ниже. Как только платёж пройдёт, бот сам пришлёт ссылку на личный кабинет — обычно за минуту.'
         ].join('\n'),
@@ -163,12 +182,11 @@ function createClientBot({ config, shop, now = () => Date.now() }) {
     }
     return {
       text: [
-        `🧾 Заказ №${created.id}: ${shop.describeOrder(created)}.`,
+        orderCard(created),
         '',
-        'Как оплатить:',
-        payInfo,
-        '',
-        `В комментарии к переводу укажите номер заказа: ${created.id}. После оплаты бот пришлёт ссылку на личный кабинет — обычно в течение нескольких часов. Неоплаченный заказ отменится через 3 дня.`
+        b('Как оплатить:'),
+        quote(esc(payInfo)),
+        `В комментарии к переводу укажите номер заказа: ${code(created.id)}. После оплаты бот пришлёт ссылку на личный кабинет — обычно в течение нескольких часов. ${i('Неоплаченный заказ отменится через 3 дня.')}`
       ].join('\n'),
       buttons: [[{ text: 'Отменить заказ', action: `cancel:${created.id}` }], BACK]
     };
@@ -176,7 +194,7 @@ function createClientBot({ config, shop, now = () => Date.now() }) {
 
   function relinkAsk() {
     return {
-      text: 'Выдать новую ссылку на кабинет? Прежняя личная ссылка перестанет работать, ключи на устройствах останутся.',
+      text: `🔗 ${b('Выдать новую ссылку на кабинет?')} Прежняя личная ссылка перестанет работать, ключи на устройствах останутся.`,
       buttons: [[{ text: 'Да, новая ссылка', action: 'relink!' }], [{ text: '← Назад', action: 'keys' }]]
     };
   }
@@ -184,7 +202,7 @@ function createClientBot({ config, shop, now = () => Date.now() }) {
   function relinkDo(chat) {
     const url = shop.relink(chat);
     return {
-      text: 'Новая ссылка на кабинет — кнопка ниже. Она одноразовая и действует 3 дня: откройте её в браузере, портал выдаст постоянную личную ссылку.',
+      text: `🔗 ${b('Новая ссылка на кабинет')} — кнопка ниже. Она одноразовая и действует ${b('3 дня')}: откройте её в браузере, портал выдаст постоянную личную ссылку.`,
       buttons: [[{ text: '🔑 Открыть кабинет', url }], BACK]
     };
   }
@@ -207,7 +225,7 @@ function createClientBot({ config, shop, now = () => Date.now() }) {
       case 'cancel':
         if (!/^\d{1,9}$/.test(rest[0] ?? '')) return keys(chat);
         shop.cancelOrder(Number(rest[0]), { chat, by: 'покупатель' });
-        return { text: `Заказ №${rest[0]} отменён.`, buttons: [BACK] };
+        return { text: `🚫 ${b(`Заказ №${rest[0]} отменён.`)}`, buttons: [BACK] };
       case 'trial':
         return shop.startTrial(chat);
       case 'relink':
@@ -225,7 +243,7 @@ function createClientBot({ config, shop, now = () => Date.now() }) {
       return await route(chat, name);
     } catch (err) {
       if (!(err instanceof PortalError)) throw err;
-      return { text: `⚠️ ${err.message}`, buttons: [BACK] };
+      return { text: `⚠️ ${esc(err.message)}`, buttons: [BACK] };
     }
   }
 

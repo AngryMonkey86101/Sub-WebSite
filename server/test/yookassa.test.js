@@ -12,6 +12,7 @@ import { createClientBot } from '../src/client.js';
 import { createApp } from '../src/app.js';
 import { createBotCommands } from '../src/bot.js';
 import { startFakeAmnezia } from './fakeAmnezia.js';
+import { plainScreen, plainClient, plainAdmin, plainNotify } from './plain.js';
 
 // Оплата через ЮKassa поверх поддельного API: платёж по заказу, выдача доступа без админа
 // по опросу и по HTTP-уведомлению, отказ оплаты, сумма не сходится, ЮKassa недоступна.
@@ -119,7 +120,7 @@ function setup() {
   const yk = fakeYooKassa();
   const notes = [];
   const delivered = [];
-  const notify = (text) => notes.push(text);
+  const notify = plainNotify(notes);
   const portal = createPortal({ db, config, amnezia, notify, now });
   const shop = createShop({
     db,
@@ -128,12 +129,12 @@ function setup() {
     yookassa: createYooKassa({ settings: config.yookassa, fetch: yk.fetch }),
     returnUrl: () => 'https://t.me/family_vpn_bot',
     notify,
-    deliver: async (chat, screen) => delivered.push({ chat, ...screen }),
+    deliver: async (chat, screen) => delivered.push({ chat, ...plainScreen(screen) }),
     now,
     log: quiet
   });
-  const client = createClientBot({ config, shop, now });
-  const admin = createBotCommands({ portal, config, shop, now });
+  const client = plainClient(createClientBot({ config, shop, now }));
+  const admin = plainAdmin(createBotCommands({ portal, config, shop, now }));
   const form = (fields) => new URLSearchParams(fields);
   shop.saveCatalog(form({ count_0: '1', unit_0: 'month', price_0_1: '300', price_0_2: '500' }));
   // с ЮKassa «Как оплатить» не нужно
@@ -170,7 +171,7 @@ test('ЮKassa: заказ сразу получает платёж и кнопк
   assert.equal(shop.status().whyClosed, null, 'с ЮKassa «Как оплатить» не обязательно');
 
   const { screen, id, order } = await orderOf('500');
-  assert.match(screen.text, /Заказ №\d+: 1 месяц, 2 устройства — 500 ₽[\s\S]*бот сам пришлёт ссылку/);
+  assert.match(screen.text, /Заказ №\d+\n1 месяц, 2 устройства — 500 ₽[\s\S]*бот сам пришлёт ссылку/);
   const pay = screen.buttons.flat().find((b) => b.url);
   assert.equal(pay.text, '💳 Оплатить 500 ₽');
   assert.equal(pay.url, order.payment_url);
@@ -388,7 +389,7 @@ test('возврат через ЮKassa: подтверждение в боте,
 
   // частичный — срок не трогает
   const ask = await admin.run('/refund', [String(id), '100']);
-  assert.match(ask, new RegExp(`Вернуть 100 ₽ по заказу №${id} \\(${member.code}, 1 месяц, 2 устройства — 500 ₽\\)\\?[\\s\\S]*Деньги вернёт ЮKassa[\\s\\S]*частичный: срок доступа не меняется[\\s\\S]*/refund_confirm`));
+  assert.match(ask, new RegExp(`Вернуть 100 ₽ по заказу №${id}\\?\n${member.code}, 1 месяц, 2 устройства — 500 ₽[\\s\\S]*Деньги вернёт ЮKassa[\\s\\S]*частичный: срок доступа не меняется[\\s\\S]*/refund_confirm`));
   assert.equal(yk.refunds.length, 0, 'до подтверждения ничего не происходит');
   assert.match(await admin.run('/refund_confirm', []), new RegExp(`Заказ №${id}: возвращено 100 ₽`));
   assert.deepEqual(yk.refunds[0].body, { payment_id: order.payment_id, amount: { value: '100.00', currency: 'RUB' }, description: `Возврат по заказу №${id}` });
