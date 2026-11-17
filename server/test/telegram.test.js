@@ -13,6 +13,7 @@ import { createClientBot } from '../src/client.js';
 import { createShop } from '../src/shop.js';
 import { createApp } from '../src/app.js';
 import { startFakeAmnezia } from './fakeAmnezia.js';
+import { toPlain } from './plain.js';
 
 // Бот поверх поддельного Bot API: подключение чата админа по одноразовой ссылке, команды,
 // клиентское меню с кнопками, лимит частоты, длинный опрос, отказ Telegram. Сеть не нужна.
@@ -55,8 +56,11 @@ function fakeTelegram() {
   const fetch = async (url, init) => {
     const [, bot, method] = new URL(url).pathname.split('/');
     assert.equal(bot, `bot${TOKEN}`);
-    const params = JSON.parse(init.body);
-    calls.push({ method, params });
+    const raw = JSON.parse(init.body);
+    calls.push({ method, params: raw });
+    // разметку Telegram разбирает сам: кривой HTML — ошибка 400; в sent и edited — текст без разметки
+    if (raw.parse_mode === 'HTML' && state.rejectHtml) return json(400, { ok: false, error_code: 400, description: "Bad Request: can't parse entities: unsupported start tag" });
+    const params = raw.parse_mode === 'HTML' ? { ...raw, text: toPlain(raw.text), html: raw.text } : raw;
     if (state.down) throw new TypeError('fetch failed', { cause: { code: 'ECONNREFUSED' } });
     if (state.rejectToken) return json(401, { ok: false, error_code: 401, description: 'Unauthorized' });
     switch (method) {
@@ -487,4 +491,38 @@ test('админка: раздел Telegram — подключить, прове
     unconfigured.close();
     db.close();
   }
+});
+
+test('Telegram: экраны и ответы админу — HTML, уведомления — простой текст, кривая разметка — простым текстом', async () => {
+  const { tg, log, telegram, say, press, link } = setup();
+  await link(42);
+
+  await say(500, '/start');
+  assert.equal(tg.sent.at(-1).parse_mode, 'HTML', 'экран меню — с разметкой');
+  assert.match(tg.sent.at(-1).html, /<b>Nomad VPN<\/b>/);
+  await press(500, 'c:help', 3);
+  assert.equal(tg.edited.at(-1).parse_mode, 'HTML', 'правка экрана — тоже с разметкой');
+
+  await say(42, '/members');
+  assert.equal(tg.sent.at(-1).parse_mode, 'HTML', 'ответ админу — с разметкой');
+
+  await telegram.notify('⚠️ ошибка <EOF> & прочее');
+  assert.deepEqual(tg.sent.at(-1), { chat_id: '42', text: '⚠️ ошибка <EOF> & прочее', link_preview_options: { is_disabled: true } }, 'уведомление — как есть, без разметки');
+  await telegram.notify('<b>Заказ №1</b> &amp; всё', { html: true });
+  assert.equal(tg.sent.at(-1).parse_mode, 'HTML');
+  assert.equal(tg.sent.at(-1).text, 'Заказ №1 & всё');
+
+  // Telegram не разобрал разметку — то же сообщение уходит простым текстом
+  tg.state.rejectHtml = true;
+  await say(500, '/help');
+  const fallback = tg.sent.at(-1);
+  assert.equal(fallback.parse_mode, undefined);
+  assert.equal(fallback.chat_id, '500');
+  assert.match(fallback.text, /^❓ Как подключиться\n/);
+  assert.ok(!/<\/?[a-z]+>/.test(fallback.text), 'без тегов');
+  assert.ok(fallback.reply_markup.inline_keyboard.length, 'кнопки остаются');
+  assert.ok(log.lines.some((l) => /не разобрал разметку/.test(l)));
+  await press(500, 'c:keys', 3);
+  assert.equal(tg.edited.at(-1).parse_mode, undefined, 'и при правке экрана');
+  assert.match(tg.edited.at(-1).text, /Доступа пока нет/);
 });

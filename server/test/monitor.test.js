@@ -11,6 +11,7 @@ import { createHeartbeat } from '../src/heartbeat.js';
 import { createBotCommands } from '../src/bot.js';
 import { createApp } from '../src/app.js';
 import { startFakeAmnezia } from './fakeAmnezia.js';
+import { plainAdmin } from './plain.js';
 
 // Внешняя проверка доступности (scripts/monitor.mjs) поверх поддельных портала, GitHub API и
 // Telegram, и обратная проверка в портале (heartbeat.js). Сеть не нужна, ожидание подменено.
@@ -165,7 +166,7 @@ test('портал: отметка внешней проверки, предуп
   const notes = [];
   const heartbeat = createHeartbeat({ db, notify: (text) => notes.push(text), now });
   const portal = createPortal({ db, config, amnezia: createAmneziaClient({ baseUrl: fake.url, apiKey }), notify: () => {}, now });
-  const commands = createBotCommands({ portal, config, heartbeat, now });
+  const commands = plainAdmin(createBotCommands({ portal, config, heartbeat, now }));
   const { inviteToken } = portal.createMember({ role: 'admin' });
   const cookie = `__Host-sid=${portal.activateInvite(inviteToken).accessToken}`;
   const server = createServer(createApp({ portal, config, heartbeat, now }));

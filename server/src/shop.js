@@ -2,6 +2,7 @@ import { createHmac } from 'node:crypto';
 import { transaction } from './db.js';
 import { PortalError } from './portal.js';
 import { HOUR, DAY } from './config.js';
+import { esc, b, code } from './tgHtml.js';
 
 // Продажа доступа через бота (docs/PLAN.md, раздел 14): тарифы, заказы, пробный период, сроки.
 //
@@ -157,7 +158,7 @@ function parseSettingsForm(form) {
   };
 }
 
-// deliver(chat, screen) — сообщение покупателю (telegram.js); inviteUrl(token) — ссылка на кабинет
+// deliver(chat, screen) — сообщение покупателю (telegram.js), text — HTML (tgHtml.js); inviteUrl(token) — ссылка на кабинет
 // yookassa — клиент API (yookassa.js) или null; returnUrl() — куда ЮKassa вернёт покупателя
 function createShop({ db, config, portal, yookassa = null, returnUrl = () => config.publicUrl, notify = () => {}, deliver = async () => {}, now = () => Date.now(), log = console }) {
   const q = {
@@ -318,7 +319,7 @@ function createShop({ db, config, portal, yookassa = null, returnUrl = () => con
     event('order_created', member?.code ?? null, `№${order.id}: ${describeOrder(order)}`);
     const who = member ? `продление ${member.code}` : 'новый покупатель';
     if (!yookassa) {
-      notify(`🧾 Заказ №${order.id}: ${describeOrder(order)}, ${who}.\nПосле оплаты: /grant ${order.id}, отменить: /cancel ${order.id}`);
+      notify(`🧾 ${b(`Заказ №${order.id}`)}: ${esc(describeOrder(order))}, ${esc(who)}.\nПосле оплаты: ${code(`/grant ${order.id}`)}, отменить: ${code(`/cancel ${order.id}`)}`, { html: true });
       return { order, payInfo: settings().payInfo };
     }
     let payment;
@@ -376,7 +377,7 @@ function createShop({ db, config, portal, yookassa = null, returnUrl = () => con
 
   // Экран покупателю, когда доступ выдан или продлён
   function accessScreen({ member, inviteToken }, headline) {
-    const lines = [headline, `Доступ до ${formatMsk(member.paid_until)}, ${devicesLabel(member.device_limit)}.`];
+    const lines = [b(headline), `🔑 Доступ до ${b(formatMsk(member.paid_until))}, ${devicesLabel(member.device_limit)}.`];
     if (inviteToken) {
       lines.push('', 'Ваш личный кабинет — кнопка ниже. Ссылка одноразовая и действует 3 дня: откройте её в браузере, портал выдаст постоянную личную ссылку. В кабинете добавьте устройство и вставьте ключ в приложение AmneziaVPN.');
       return { text: lines.join('\n'), buttons: [[{ text: '🔑 Открыть кабинет', url: inviteUrl(inviteToken) }], [{ text: '❓ Как подключиться', action: 'help' }]] };
@@ -417,7 +418,7 @@ function createShop({ db, config, portal, yookassa = null, returnUrl = () => con
     });
     await resumeIfPaused(result);
     event('order_paid', result.member.code, `№${order.id}: ${describeOrder(order)}`);
-    notify(`✅ Заказ №${order.id} оплачен${method === 'yookassa' ? ' через ЮKassa' : ''}: ${result.member.code}, ${describeOrder(order)}, до ${formatMsk(result.member.paid_until)}`);
+    notify(`✅ ${b(`Заказ №${order.id} оплачен`)}${method === 'yookassa' ? ' через ЮKassa' : ''}: ${code(result.member.code)}, ${esc(describeOrder(order))}, до ${formatMsk(result.member.paid_until)}`, { html: true });
     await tell(order.chat, accessScreen(result, result.inviteToken ? '✅ Оплата получена, спасибо!' : '✅ Оплата получена, доступ продлён.'));
     return { order, member: result.member };
   }
@@ -435,7 +436,7 @@ function createShop({ db, config, portal, yookassa = null, returnUrl = () => con
       return created;
     });
     event('trial_started', result.member.code, periodLabel(period));
-    notify(`🎁 Пробный доступ: ${result.member.code}, ${periodLabel(period)}`);
+    notify(`🎁 ${b('Пробный доступ:')} ${code(result.member.code)}, ${periodLabel(period)}`, { html: true });
     return accessScreen(result, `🎁 Пробный доступ на ${periodLabel(period)}, ${devicesLabel(trial.devices)}.`);
   }
 
@@ -511,7 +512,7 @@ function createShop({ db, config, portal, yookassa = null, returnUrl = () => con
       }
     }
     event('order_refunded', order.code, `№${order.id}: ${formatRub(amount)}${full ? ', полностью' : ''}`);
-    const lines = [`💸 Вам вернули ${formatRub(amount)} по заказу №${order.id}.`];
+    const lines = [`💸 ${b(`Вам вернули ${formatRub(amount)}`)} по заказу №${order.id}.`];
     if (preview.viaYooKassa) lines.push('Деньги придут туда, откуда была оплата, — обычно за несколько дней, срок зависит от банка.');
     if (newUntil !== null) lines.push(newUntil <= now() ? 'Доступ по этому заказу закончен, ключи на паузе.' : `Срок доступа уменьшен: теперь до ${formatMsk(newUntil)}.`);
     await tell(order.telegram_chat, { text: lines.join('\n'), buttons: [[{ text: '🔑 Мой доступ', action: 'keys' }]] });
@@ -587,7 +588,7 @@ function createShop({ db, config, portal, yookassa = null, returnUrl = () => con
       if (wasPending) {
         event('order_cancelled', null, `№${order.id}: оплата не прошла (${payment.cancelReason ?? 'отменена'})`);
         await tell(order.chat, {
-          text: `Оплата заказа №${order.id} не прошла или время на оплату вышло. Деньги не списаны. Оформите заказ заново.`,
+          text: `${b(`Оплата заказа №${order.id} не прошла`)} или время на оплату вышло. Деньги не списаны. Оформите заказ заново.`,
           buttons: [[{ text: '🛒 Купить', action: 'buy' }]]
         });
       }
@@ -649,7 +650,7 @@ function createShop({ db, config, portal, yookassa = null, returnUrl = () => con
       q.setReminder.run(level, member.id);
       event('reminder_sent', member.code, `за ${level} ${plural(level, UNITS.day.words)}`);
       await tell(member.telegram_chat, {
-        text: `⏳ Доступ заканчивается ${level === 1 ? 'завтра' : `через ${level} ${plural(level, UNITS.day.words)}`} — ${formatMsk(member.paid_until)}. Продлите, чтобы VPN не отключился: новый срок прибавится к текущему.`,
+        text: `⏳ ${b(`Доступ заканчивается ${level === 1 ? 'завтра' : `через ${level} ${plural(level, UNITS.day.words)}`}`)} — ${formatMsk(member.paid_until)}. Продлите, чтобы VPN не отключился: новый срок прибавится к текущему.`,
         buttons: renewButton
       });
     }
@@ -664,7 +665,7 @@ function createShop({ db, config, portal, yookassa = null, returnUrl = () => con
       }
       event('access_expired', member.code);
       await tell(member.telegram_chat, {
-        text: `⏳ Срок доступа закончился, ключи на паузе. Продлите доступ — ключи на устройствах заработают снова, перенастраивать ничего не нужно. Если не продлить до ${formatMsk(member.paid_until + deleteAfterDays * DAY)}, ключи будут удалены.`,
+        text: `⏳ ${b('Срок доступа закончился, ключи на паузе.')} Продлите доступ — ключи на устройствах заработают снова, перенастраивать ничего не нужно. Если не продлить до ${formatMsk(member.paid_until + deleteAfterDays * DAY)}, ключи будут удалены.`,
         buttons: renewButton
       });
     }
@@ -678,7 +679,7 @@ function createShop({ db, config, portal, yookassa = null, returnUrl = () => con
       }
       event('access_deleted', member.code, `срок кончился ${formatMsk(member.paid_until)}`);
       await tell(member.telegram_chat, {
-        text: `🗑 Доступ не продлили, ключи удалены. Купить доступ снова можно в любой момент — ключи будут новые.`,
+        text: `🗑 ${b('Доступ не продлили, ключи удалены.')} Купить доступ снова можно в любой момент — ключи будут новые.`,
         buttons: [[{ text: '🛒 Купить', action: 'buy' }]]
       });
     }

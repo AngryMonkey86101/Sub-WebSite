@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { openDatabase } from '../src/db.js';
 import { createTraffic, periodOf, periodEnd, formatGb, parseGb, GB } from '../src/traffic.js';
+import { toPlain } from './plain.js';
 
 // Учёт трафика и лимит: счётчики сервера VPN подменены, портал — заглушка, которая ставит паузу в базе
 
@@ -31,7 +32,7 @@ function setup() {
       db.prepare('UPDATE members SET status = ?, pause_reason = ?, traffic_paused = ? WHERE id = ?').run(paused ? 'paused' : 'active', paused ? options.reason ?? 'admin' : null, paused && options.reason === 'traffic' ? options.trafficPeriod : null, id);
     }
   };
-  const traffic = createTraffic({ db, amnezia, portal, notify: (t) => notes.push(t), deliver: async (chat, screen) => told.push({ chat, text: screen.text }), now: () => clock, log: { error() {} } });
+  const traffic = createTraffic({ db, amnezia, portal, notify: (t) => notes.push(t), deliver: async (chat, screen) => told.push({ chat, text: toPlain(screen.text) }), now: () => clock, log: { error() {} } });
   const member = (id) => db.prepare('SELECT * FROM members WHERE id = ?').get(id);
   const limit = (gb) => traffic.saveSettings(new URLSearchParams({ limit_gb: String(gb) }));
   return { db, traffic, counters, notes, told, pauses, addMember, addDevice, member, limit, at: (t) => { clock = t; } };

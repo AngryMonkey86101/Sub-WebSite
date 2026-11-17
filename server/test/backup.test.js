@@ -17,6 +17,7 @@ import { createBotCommands } from '../src/bot.js';
 import { createApp } from '../src/app.js';
 import { main } from '../src/cli.js';
 import { startFakeAmnezia } from './fakeAmnezia.js';
+import { plainAdmin } from './plain.js';
 
 // Бэкап поверх поддельного amnezia-api. Главный тест — с настоящей программой age: архив
 // расшифровывается закрытым ключом и распаковывается обычным tar, как при переезде.
@@ -230,11 +231,11 @@ test('бэкап в админке, в боте и в CLI', async () => {
     assert.match(page, /Бэкап отправлен в Telegram\./);
     assert.match(page, /Последний бэкап: только что/);
 
-    const commands = createBotCommands({ portal, config, backup, now });
+    const commands = plainAdmin(createBotCommands({ portal, config, backup, now }));
     assert.match(await commands.run('/backup', []), /💾 Бэкап отправлен, \d+ КБ\./);
     assert.equal(sent.length, 2);
     assert.match(await commands.run('/status', []), /💾 Последний бэкап: только что/);
-    assert.match(await createBotCommands({ portal, config, backup: unconfigured.backup, now }).run('/status', []), /💾 Бэкап не настроен/);
+    assert.match(await plainAdmin(createBotCommands({ portal, config, backup: unconfigured.backup, now })).run('/status', []), /💾 Бэкап не настроен/);
   } finally {
     for (const server of servers) server.close();
     db.close();
