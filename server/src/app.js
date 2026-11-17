@@ -7,6 +7,8 @@ import {
   invitePage,
   personalLinkPage,
   cabinetPage,
+  miniAppPage,
+  miniAppNoAccessPage,
   devicePage,
   adminPage,
   inviteCreatedPage,
@@ -17,12 +19,16 @@ import {
 } from './pages.js';
 import { createTelegram } from './telegram.js';
 import { createWatchdog } from './watchdog.js';
+import { verifyInitData } from './miniApp.js';
 
 // HTTP-слой портала. Без фреймворков, как сервер групп Компаса: страниц мало, а каждая
 // зависимость — это обновления и риски цепочки поставок на сервере с доступом к VPN.
 //
 // Вход — по личной ссылке /m/<токен>: она кладёт токен в cookie. Формы защищены от
 // подделки запросов проверкой Origin и SameSite=Lax.
+//
+// Мини-приложение Telegram (/tg, miniApp.js): вход по подписи Telegram вместо личной ссылки.
+// Такой вход помечен «tg»: только его страницы можно встроить в веб-версию Telegram.
 
 const TOKEN = '([A-Za-z0-9_-]{43})';
 
@@ -31,6 +37,7 @@ const staticFile = (type, name) => [type, readFileSync(new URL(`./static/${name}
 const STATIC = {
   '/static/style.css': staticFile('text/css; charset=utf-8', 'style.css'),
   '/static/app.js': staticFile('text/javascript; charset=utf-8', 'app.js'),
+  '/static/tg.js': staticFile('text/javascript; charset=utf-8', 'tg.js'),
   '/static/icon-180.png': staticFile('image/png', 'icon-180.png'),
   '/static/icon-192.png': staticFile('image/png', 'icon-192.png'),
   '/static/icon-512.png': staticFile('image/png', 'icon-512.png')
@@ -67,6 +74,14 @@ const SECURITY_HEADERS = {
   'X-Frame-Options': 'DENY',
   'X-Robots-Tag': 'noindex, nofollow'
 };
+
+// Страницы мини-приложения: веб-версия Telegram открывает их во фрейме. Встроить их может
+// только web.telegram.org; остальные страницы встраивать по-прежнему нельзя.
+const MINI_APP_HEADERS = {
+  ...SECURITY_HEADERS,
+  'Content-Security-Policy': SECURITY_HEADERS['Content-Security-Policy'].replace("frame-ancestors 'none'", "frame-ancestors 'self' https://web.telegram.org")
+};
+delete MINI_APP_HEADERS['X-Frame-Options'];
 
 // Ограничение частоты запросов. Адрес живёт только в памяти процесса и не пишется в журналы.
 function createRateLimiter(now) {
@@ -154,8 +169,16 @@ function createApp({
 
   const sessionCookie = (token) =>
     `${cookieName}=${token}; Path=/; Max-Age=${LIMITS.cookieMaxAge / 1000}; HttpOnly; SameSite=Lax${config.cookieSecure ? '; Secure' : ''}`;
+  // Вход из мини-приложения. Во фрейме веб-версии Telegram cookie портала — «сторонняя»:
+  // нужен SameSite=None, а Partitioned держит её только внутри Telegram. Подделку форм
+  // по-прежнему отсекает проверка Origin (sameOrigin).
+  const miniAppCookie = (token) =>
+    config.cookieSecure
+      ? `${cookieName}=${token}; Path=/; Max-Age=${LIMITS.cookieMaxAge / 1000}; HttpOnly; Secure; SameSite=None; Partitioned`
+      : sessionCookie(token);
 
   const page = (status, body, headers = {}) => ({ status, body, headers });
+  const miniApp = (status, body, headers = {}) => ({ status, body, headers, miniApp: true });
   const redirect = (location, headers = {}) => ({ status: 303, headers: { Location: location, ...headers } });
 
   function requireMember(member) {
@@ -224,6 +247,21 @@ function createApp({
       const { statuses } = devices.length ? await serverKeysOrError() : { statuses: null };
       const usage = traffic ? { ...traffic.usageOf(member), devices: traffic.deviceUsage(member.id) } : null;
       return page(200, cabinetPage({ member, devices, statuses, protocols: config.protocols, traffic: usage, nowMs: now() }));
+    }],
+
+    // Мини-приложение Telegram: страница входа, данные запуска приходят формой из static/tg.js
+    ['GET', /^\/tg$/, () => miniApp(200, miniAppPage())],
+
+    ['POST', /^\/tg$/, ({ form, client }) => {
+      limit(`token:${client}`, 30, MINUTE);
+      if (!config.telegram?.token) throw new PortalError(404, 'Бот не настроен');
+      const chat = verifyInitData(form.get('init_data'), config.telegram.token, now());
+      const login = portal.telegramLogin(chat);
+      if (!login) {
+        const username = telegram.info().username;
+        return miniApp(403, miniAppNoAccessPage({ botUrl: username ? `https://t.me/${username}` : null, isAdmin: chat === telegram.chatId() }));
+      }
+      return { ...redirect('/', { 'Set-Cookie': miniAppCookie(login.accessToken) }), miniApp: true };
     }],
 
     // Страница приглашения ничего не меняет: её открывают и предпросмотры мессенджеров.
@@ -493,13 +531,13 @@ function createApp({
   }
 
   return async function handle(req, res) {
-    const send = ({ status, body, json, contentType = 'application/json; charset=utf-8', headers = {} }) => {
+    const send = ({ status, body, json, contentType = 'application/json; charset=utf-8', headers = {}, miniApp: inTelegram = member?.sessionVia === 'tg' }) => {
       if (json) {
         res.writeHead(status, { 'Content-Type': contentType, 'Cache-Control': 'no-store', ...headers });
         return res.end(JSON.stringify(json));
       }
       res.writeHead(status, {
-        ...SECURITY_HEADERS,
+        ...(inTelegram ? MINI_APP_HEADERS : SECURITY_HEADERS),
         'Cache-Control': 'no-store',
         ...(body ? { 'Content-Type': 'text/html; charset=utf-8' } : {}),
         ...headers
@@ -520,8 +558,9 @@ function createApp({
       limit(`all:${client}`, 600, MINUTE);
       const sessionToken = parseCookies(req.headers.cookie)[cookieName];
       const row = portal.memberByToken(sessionToken);
-      // токен входа нужен странице для ярлыка: манифест ведёт на личную ссылку
-      member = row ? { ...row, token: sessionToken } : null;
+      // токен входа нужен странице для ярлыка: манифест ведёт на личную ссылку. У входа из
+      // Telegram ярлыка нет: этот вход заменяется при каждом открытии мини-приложения
+      member = row ? { ...row, token: row.sessionVia === 'tg' ? null : sessionToken } : null;
       if (req.method === 'POST' && path === '/yookassa/notify') return send(await yookassaNotice(req, client));
       for (const [method, pattern, handler] of routes) {
         const match = pattern.exec(path);
@@ -536,7 +575,9 @@ function createApp({
       throw new PortalError(404, 'Страница не найдена');
     } catch (err) {
       if (err instanceof PortalError) {
-        return send(page(err.status, errorPage({ status: err.status, message: err.message, member })));
+        // ошибка входа из мини-приложения должна показаться и во фрейме веб-версии Telegram
+        const inTelegram = path === '/tg' || member?.sessionVia === 'tg';
+        return send({ ...page(err.status, errorPage({ status: err.status, message: err.message, member })), miniApp: inTelegram });
       }
       // В журнал — только тип и текст ошибки, без адреса и содержимого запроса
       console.error('Ошибка портала:', err?.name, err?.message);

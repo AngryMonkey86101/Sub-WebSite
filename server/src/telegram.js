@@ -127,7 +127,9 @@ function createTelegram({ settings, db, fetch = globalThis.fetch, now = () => Da
     buttons?.length
       ? {
           inline_keyboard: buttons.map((row) =>
-            row.map((b) => (b.url ? { text: b.text, url: b.url } : { text: b.text, callback_data: CLIENT_PREFIX + b.action }))
+            row.map((b) =>
+              b.webApp ? { text: b.text, web_app: { url: b.webApp } } : b.url ? { text: b.text, url: b.url } : { text: b.text, callback_data: CLIENT_PREFIX + b.action }
+            )
           )
         }
       : undefined;

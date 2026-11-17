@@ -103,7 +103,9 @@ const ADDED_COLUMNS = [
   ['members', 'traffic_limit_gb', 'REAL'],
   // за какой период уже предупредили о 80% лимита и в каком админ снял лимит (включил вручную)
   ['members', 'traffic_warned', 'TEXT'],
-  ['members', 'traffic_exempt', 'TEXT']
+  ['members', 'traffic_exempt', 'TEXT'],
+  // откуда вход: NULL — личная ссылка (браузер), tg — мини-приложение Telegram (miniApp.js)
+  ['access_tokens', 'via', 'TEXT']
 ];
 
 function openDatabase(path) {
