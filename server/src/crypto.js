@@ -17,6 +17,14 @@ function newMemberCode() {
   return code;
 }
 
+// Код ссылки приглашения (реферальная программа, shop.js): 8 символов из того же алфавита
+const REF_CODE_LENGTH = 8;
+function newRefCode() {
+  let code = '';
+  for (let i = 0; i < REF_CODE_LENGTH; i++) code += CODE_ALPHABET[randomInt(CODE_ALPHABET.length)];
+  return code;
+}
+
 // Ключ vpn:// содержит закрытый ключ устройства, поэтому в базе он лежит зашифрованным
 // (AES-256-GCM). Ключ шифрования — в .env, не в базе. В дополнительные данные (AAD) входит
 // номер записи устройства: шифротекст нельзя незаметно переставить в чужую запись.
@@ -40,4 +48,4 @@ function decryptSecret(key, sealed, aad) {
   return Buffer.concat([decipher.update(raw.subarray(12, raw.length - 16)), decipher.final()]).toString('utf8');
 }
 
-export { sha256, newToken, newMemberCode, CODE, encryptSecret, decryptSecret };
+export { sha256, newToken, newMemberCode, newRefCode, REF_CODE_LENGTH, CODE_ALPHABET, CODE, encryptSecret, decryptSecret };

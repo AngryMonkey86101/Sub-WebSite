@@ -2,6 +2,8 @@ import { DatabaseSync } from 'node:sqlite';
 
 // Хранилище портала. Персональных данных нет: участник — это случайный код, устройство —
 // платформа из списка и номер. Токены — только хэши, ключи VPN — зашифрованы.
+// referrals — кто кого пригласил: приглашённый — HMAC номера чата (как trials), order_id — его первый
+// оплаченный заказ (после него приглашение отработало). rewards — скидки пригласившим (shop.js).
 // settings — служебные значения (чат админа в Telegram и одноразовый код его подключения).
 const SCHEMA = `
   CREATE TABLE IF NOT EXISTS members (
@@ -64,6 +66,25 @@ const SCHEMA = `
     chat_hash TEXT PRIMARY KEY,
     at INTEGER NOT NULL
   );
+  CREATE TABLE IF NOT EXISTS referrals (
+    chat_hash TEXT PRIMARY KEY,
+    referrer_id INTEGER REFERENCES members(id) ON DELETE SET NULL,
+    at INTEGER NOT NULL,
+    order_id INTEGER
+  );
+  CREATE TABLE IF NOT EXISTS rewards (
+    id INTEGER PRIMARY KEY,
+    member_id INTEGER NOT NULL REFERENCES members(id) ON DELETE CASCADE,
+    percent INTEGER NOT NULL,
+    friend_order_id INTEGER NOT NULL,
+    created_at INTEGER NOT NULL,
+    available_at INTEGER NOT NULL,
+    notified INTEGER NOT NULL DEFAULT 0,
+    revoked_at INTEGER,
+    revoked_reason TEXT,
+    cut_days INTEGER
+  );
+  CREATE INDEX IF NOT EXISTS rewards_member ON rewards(member_id);
   CREATE TABLE IF NOT EXISTS settings (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
@@ -105,7 +126,14 @@ const ADDED_COLUMNS = [
   ['members', 'traffic_warned', 'TEXT'],
   ['members', 'traffic_exempt', 'TEXT'],
   // откуда вход: NULL — личная ссылка (браузер), tg — мини-приложение Telegram (miniApp.js)
-  ['access_tokens', 'via', 'TEXT']
+  ['access_tokens', 'via', 'TEXT'],
+  // реферальная программа (shop.js): код ссылки приглашения участника; скидка в заказе — процент,
+  // цена без скидки, чья скидка (referrer — пригласившему, invitee — приглашённому) и какая из rewards
+  ['members', 'ref_code', 'TEXT'],
+  ['orders', 'discount_percent', 'INTEGER NOT NULL DEFAULT 0'],
+  ['orders', 'full_amount', 'INTEGER'],
+  ['orders', 'discount_kind', 'TEXT'],
+  ['orders', 'reward_id', 'INTEGER']
 ];
 
 function openDatabase(path) {
@@ -119,6 +147,8 @@ function openDatabase(path) {
     if (!exists) db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${type}`);
   }
   db.exec('CREATE UNIQUE INDEX IF NOT EXISTS members_chat ON members(telegram_chat) WHERE telegram_chat IS NOT NULL');
+  db.exec('CREATE UNIQUE INDEX IF NOT EXISTS members_ref ON members(ref_code) WHERE ref_code IS NOT NULL');
+  db.exec('CREATE INDEX IF NOT EXISTS orders_reward ON orders(reward_id) WHERE reward_id IS NOT NULL');
   db.exec('CREATE INDEX IF NOT EXISTS orders_payment ON orders(payment_id) WHERE payment_id IS NOT NULL');
   return db;
 }

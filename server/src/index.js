@@ -55,7 +55,7 @@ const shop = createShop({
 const traffic = createTraffic({ db, amnezia, portal, notify: telegram.notify, deliver: telegram.deliver });
 telegram.start({
   admin: createBotCommands({ portal, config, watchdog, heartbeat, backup, reboot, shop }),
-  client: createClientBot({ config, shop })
+  client: createClientBot({ config, shop, botUsername: () => telegram.info().username ?? null })
 });
 const server = createServer(createApp({ portal, config, telegram, watchdog, heartbeat, backup, reboot, shop, traffic }));
 
