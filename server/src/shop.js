@@ -1,4 +1,5 @@
 import { createHmac } from 'node:crypto';
+import { newRefCode } from './crypto.js';
 import { transaction } from './db.js';
 import { PortalError } from './portal.js';
 import { HOUR, DAY } from './config.js';
@@ -20,6 +21,15 @@ import { miniAppUrl } from './miniApp.js';
 // Покупатель — участник с ролью client: код, чат Telegram (без имени и username), срок
 // и лимит устройств. Чат в заказе нужен, пока заказ не закрыт, потом стирается.
 // Пробный период — один раз на чат: в trials лежит только HMAC номера чата.
+//
+// Реферальная программа: у покупателя есть ссылка t.me/<бот>?start=ref_<код>. Кто открыл бота
+// по ней и ещё ничего не оплачивал, получает скидку — половину скидки из админки — на первую
+// покупку. Когда он оплатит первый заказ, пригласившему начисляется скидка из админки на следующую
+// покупку; она становится доступной через holdDays дней (если друг за это время вернёт деньги,
+// скидка снимается). Скидки не суммируются: на заказ одна, бо́льшая; несколько скидок
+// пригласившего тратятся по одной на заказ. Процент скидки пригласившего фиксируется при
+// начислении. Если друг вернул деньги, когда скидку уже потратили, срок заказа со скидкой
+// убавляется на долю скидки (админ может простить). Приглашённый, как и в trials, — HMAC чата.
 
 const DEVICE_OPTIONS = [1, 2, 3, 4];
 const MAX_PERIODS = 8;
@@ -53,9 +63,23 @@ const DEFAULTS = {
     button: '📝 Открыть @spisokvmeste_bot',
     url: 'https://t.me/spisokvmeste_bot'
   },
+  // реферальная программа: percent — скидка пригласившему, другу — половина. В text подставляются
+  // {скидка}, {скидка_другу} и {ссылка}
+  referral: {
+    enabled: true,
+    percent: 30,
+    holdDays: 14,
+    text: '🎁 Приглашайте друзей!\n\nДругу — скидка {скидка_другу} на первую покупку по вашей ссылке. Вам — скидка {скидка} на следующую покупку, когда друг оплатит доступ.\n\nВаша ссылка: {ссылка}'
+  },
   seats: 100,
   payInfo: ''
 };
+
+const REFERRAL_TEXT_MAX = 1000;
+// Скидка приглашённому — половина скидки из админки, с округлением вниз
+const inviteePercent = (percent) => Math.floor(percent / 2);
+// Цена со скидкой — целые рубли, не меньше рубля
+const discounted = (price, percent) => Math.max(1, Math.round((price * (100 - percent)) / 100));
 
 function plural(n, [one, few, many]) {
   const mod10 = n % 10;
@@ -142,6 +166,18 @@ function parsePromoForm(form) {
   return { enabled, text, button, url };
 }
 
+function parseReferralForm(form) {
+  const text = (form.get('referral_text') ?? '').replace(/\r\n/g, '\n').trim();
+  if (!text) throw new PortalError(400, 'Текст о реферальной программе не может быть пустым');
+  if (text.length > REFERRAL_TEXT_MAX || CONTROL.test(text)) throw new PortalError(400, `Текст о реферальной программе — до ${REFERRAL_TEXT_MAX} символов`);
+  return {
+    enabled: form.get('referral_enabled') === '1',
+    percent: intField(form.get('referral_percent'), { min: 1, max: 90, name: 'Скидка пригласившему, %' }),
+    holdDays: intField(form.get('referral_hold'), { min: 0, max: 90, name: 'Скидка доступна через, дней' }),
+    text
+  };
+}
+
 function parseSettingsForm(form) {
   const payInfo = (form.get('pay_info') ?? '').replace(/\r\n/g, '\n').trim();
   if (payInfo.length > PAY_INFO_MAX) throw new PortalError(400, `«Как оплатить» — до ${PAY_INFO_MAX} символов`);
@@ -165,7 +201,7 @@ function createShop({ db, config, portal, yookassa = null, returnUrl = () => con
   const q = {
     get: db.prepare("SELECT value FROM settings WHERE key = 'shop'"),
     set: db.prepare("INSERT INTO settings (key, value) VALUES ('shop', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value"),
-    insertOrder: db.prepare("INSERT INTO orders (member_id, chat, kind, period, devices, amount, status, created_at) VALUES (?, ?, 'paid', ?, ?, ?, 'pending', ?)"),
+    insertOrder: db.prepare("INSERT INTO orders (member_id, chat, kind, period, devices, amount, status, created_at, discount_percent, full_amount, discount_kind, reward_id) VALUES (?, ?, 'paid', ?, ?, ?, 'pending', ?, ?, ?, ?, ?)"),
     insertTrial: db.prepare("INSERT INTO orders (member_id, kind, period, devices, amount, status, method, created_at, paid_at) VALUES (?, 'trial', ?, ?, 0, 'paid', 'trial', ?, ?)"),
     order: db.prepare('SELECT * FROM orders WHERE id = ?'),
     pendingOf: db.prepare("SELECT * FROM orders WHERE chat = ? AND status = 'pending' ORDER BY id DESC"),
@@ -204,12 +240,36 @@ function createShop({ db, config, portal, yookassa = null, returnUrl = () => con
     abandoned: db.prepare("SELECT * FROM members WHERE role = 'client' AND status = 'paused' AND paid_until <= ?"),
     trialUsed: db.prepare('SELECT 1 FROM trials WHERE chat_hash = ?'),
     addTrial: db.prepare('INSERT INTO trials (chat_hash, at) VALUES (?, ?)'),
-    event: db.prepare('INSERT INTO events (at, type, member_code, details) VALUES (?, ?, ?, ?)')
+    event: db.prepare('INSERT INTO events (at, type, member_code, details) VALUES (?, ?, ?, ?)'),
+    // реферальная программа
+    memberByRef: db.prepare('SELECT * FROM members WHERE ref_code = ?'),
+    setRefCode: db.prepare('UPDATE members SET ref_code = ? WHERE id = ? AND ref_code IS NULL'),
+    referralOf: db.prepare('SELECT * FROM referrals WHERE chat_hash = ?'),
+    addReferral: db.prepare('INSERT INTO referrals (chat_hash, referrer_id, at) VALUES (?, ?, ?) ON CONFLICT DO NOTHING'),
+    closeReferral: db.prepare('UPDATE referrals SET order_id = ? WHERE chat_hash = ? AND order_id IS NULL'),
+    referralsOf: db.prepare('SELECT COUNT(*) AS joined, COUNT(order_id) AS paid FROM referrals WHERE referrer_id = ?'),
+    paidOrdersOf: db.prepare("SELECT COUNT(*) AS n FROM orders WHERE member_id = ? AND kind = 'paid' AND status = 'paid'"),
+    insertReward: db.prepare('INSERT INTO rewards (member_id, percent, friend_order_id, created_at, available_at, notified) VALUES (?, ?, ?, ?, ?, ?)'),
+    reward: db.prepare('SELECT * FROM rewards WHERE id = ?'),
+    // свободная скидка: ожидание прошло, не снята и не занята заказом — оплаченным или ждущим
+    // оплаты (кроме заказа этого же чата: новый заказ его отменит)
+    freeReward: db.prepare("SELECT * FROM rewards r WHERE member_id = ? AND revoked_at IS NULL AND available_at <= ? AND NOT EXISTS (SELECT 1 FROM orders o WHERE o.reward_id = r.id AND (o.status = 'paid' OR (o.status = 'pending' AND o.chat IS NOT ?))) ORDER BY percent DESC, id LIMIT 1"),
+    // скидки участника, ещё не потраченные
+    unusedRewards: db.prepare("SELECT * FROM rewards r WHERE member_id = ? AND revoked_at IS NULL AND NOT EXISTS (SELECT 1 FROM orders o WHERE o.reward_id = r.id AND o.status = 'paid') ORDER BY available_at, id"),
+    rewardOfFriend: db.prepare('SELECT r.*, m.code, m.telegram_chat, m.paid_until, m.status AS member_status FROM rewards r JOIN members m ON m.id = r.member_id WHERE r.friend_order_id = ? AND r.revoked_at IS NULL'),
+    orderUsing: db.prepare("SELECT * FROM orders WHERE reward_id = ? AND status IN ('pending', 'paid') ORDER BY status = 'paid' DESC, id DESC LIMIT 1"),
+    revokeReward: db.prepare('UPDATE rewards SET revoked_at = ?, revoked_reason = ?, cut_days = ? WHERE id = ?'),
+    rewardsReady: db.prepare('SELECT r.*, m.telegram_chat FROM rewards r JOIN members m ON m.id = r.member_id WHERE r.notified = 0 AND r.revoked_at IS NULL AND r.available_at <= ?'),
+    setNotified: db.prepare('UPDATE rewards SET notified = 1 WHERE id = ?'),
+    referralTotals: db.prepare('SELECT COUNT(*) AS joined, COUNT(order_id) AS paid FROM referrals'),
+    rewardTotals: db.prepare("SELECT COUNT(*) AS total, COUNT(revoked_at) AS revoked, COALESCE(SUM(EXISTS (SELECT 1 FROM orders o WHERE o.reward_id = r.id AND o.status = 'paid')), 0) AS used FROM rewards r"),
+    discounts: db.prepare("SELECT COUNT(*) AS n, COALESCE(SUM(full_amount - amount), 0) AS sum FROM orders WHERE status = 'paid' AND kind = 'paid' AND discount_percent > 0 AND paid_at > ?")
   };
   const event = (type, code = null, details = null) => q.event.run(now(), type, code, details);
   const inviteUrl = (token) => `${config.publicUrl}/i/${token}`;
   // Номер чата — короткое число, его хэш легко перебрать; HMAC с ключом из .env — нет
   const trialHash = (chat) => createHmac('sha256', config.keyEncryptionKey).update(`trial:${chat}`).digest('base64url');
+  const refHash = (chat) => createHmac('sha256', config.keyEncryptionKey).update(`ref:${chat}`).digest('base64url');
 
   function settings() {
     let stored = {};
@@ -218,7 +278,13 @@ function createShop({ db, config, portal, yookassa = null, returnUrl = () => con
     } catch {
       stored = {};
     }
-    return { ...DEFAULTS, ...stored, trial: { ...DEFAULTS.trial, ...stored.trial }, promo: { ...DEFAULTS.promo, ...stored.promo } };
+    return {
+      ...DEFAULTS,
+      ...stored,
+      trial: { ...DEFAULTS.trial, ...stored.trial },
+      promo: { ...DEFAULTS.promo, ...stored.promo },
+      referral: { ...DEFAULTS.referral, ...stored.referral }
+    };
   }
   const save = (value) => q.set.run(JSON.stringify(value));
 
@@ -277,6 +343,12 @@ function createShop({ db, config, portal, yookassa = null, returnUrl = () => con
     return value.enabled && value.url && value.button ? value : null;
   }
 
+  function saveReferral(form) {
+    const referral = parseReferralForm(form);
+    save({ ...settings(), referral });
+    event('referral_settings', null, `${referral.enabled ? 'включена' : 'выключена'}, ${referral.percent}%, через ${referral.holdDays} дн.`);
+  }
+
   // Свободные места: проданные устройства с действующим сроком. Семья в счёт не идёт.
   // Свои устройства покупателя при продлении не считаются занятыми.
   function seatsFree(exceptMemberId = 0) {
@@ -302,19 +374,179 @@ function createShop({ db, config, portal, yookassa = null, returnUrl = () => con
     return isOpen() && trial.enabled && !memberOf(chat) && !q.trialUsed.get(trialHash(chat));
   }
 
-  const describeOrder = (order) => `${periodLabel(parsePeriodKey(order.period))}, ${devicesLabel(order.devices)} — ${formatRub(order.amount)}`;
+  const describeOrder = (order) =>
+    `${periodLabel(parsePeriodKey(order.period))}, ${devicesLabel(order.devices)} — ${formatRub(order.amount)}${order.discount_percent ? ` (скидка ${order.discount_percent}%)` : ''}`;
+
+  // --- Реферальная программа ---
+
+  // Приглашение чата ещё действует: перешёл по ссылке и первый заказ пока не оплатил
+  function invitationOpen(chat) {
+    const referral = q.referralOf.get(refHash(chat));
+    return Boolean(referral && referral.order_id === null);
+  }
+
+  // Скидка для заказа этого чата: своя скидка пригласившего или скидка приглашённому на первую
+  // покупку. На заказ — одна, бо́льшая. null — без скидки.
+  function discountFor(chat) {
+    const member = memberOf(chat);
+    const reward = member ? q.freeReward.get(member.id, now(), String(chat)) : null;
+    const { referral } = settings();
+    const invitee = referral.enabled && invitationOpen(chat) ? inviteePercent(referral.percent) : 0;
+    if (reward && reward.percent >= invitee) return { percent: reward.percent, kind: 'referrer', rewardId: reward.id };
+    return invitee > 0 ? { percent: invitee, kind: 'invitee', rewardId: null } : null;
+  }
+
+  // Цена для этого чата: { period, price — по тарифу, amount — к оплате, discount }
+  function offer(chat, key, devices) {
+    const found = priceOf(key, devices);
+    if (!found) return null;
+    const discount = discountFor(chat);
+    return { ...found, amount: discount ? discounted(found.price, discount.percent) : found.price, discount };
+  }
+
+  // Переход по ссылке приглашения (/start ref_КОД). Засчитывается один раз на чат и только тому,
+  // кто ещё ничего не оплачивал; себя пригласить нельзя. true — приглашение принято.
+  function joinByLink(chat, refCode) {
+    if (!settings().referral.enabled) return false;
+    const referrer = q.memberByRef.get(String(refCode));
+    if (!referrer || referrer.telegram_chat === String(chat)) return false;
+    const member = memberOf(chat);
+    if (member && q.paidOrdersOf.get(member.id).n > 0) return false;
+    if (q.addReferral.run(refHash(chat), referrer.id, now()).changes === 0) return false;
+    event('referral_joined', referrer.code);
+    return true;
+  }
+
+  // Экран «Пригласить друга»: код ссылки (выдаётся при первом обращении), скидки и счётчики.
+  // null — программа выключена или у чата нет доступа (приглашать могут только покупатели).
+  function referralInfo(chat) {
+    const { referral } = settings();
+    let member = memberOf(chat);
+    if (!referral.enabled || !member) return null;
+    if (!member.ref_code) {
+      let refCode;
+      do refCode = newRefCode();
+      while (q.memberByRef.get(refCode));
+      q.setRefCode.run(refCode, member.id);
+      member = memberOf(chat);
+    }
+    const rewards = q.unusedRewards.all(member.id);
+    const { joined, paid } = q.referralsOf.get(member.id);
+    return {
+      code: member.ref_code,
+      percent: referral.percent,
+      inviteePercent: inviteePercent(referral.percent),
+      text: referral.text,
+      ready: rewards.filter((r) => r.available_at <= now()),
+      waiting: rewards.filter((r) => r.available_at > now()),
+      joined,
+      paid
+    };
+  }
+
+  const referralEnabled = () => settings().referral.enabled;
+
+  // Первая оплата приглашённого (внутри транзакции оплаты): приглашение отработало,
+  // пригласившему — скидка. Скидка — с ожиданием holdDays дней.
+  function rewardReferrer(order, buyer) {
+    if (order.kind !== 'paid' || !order.chat) return null;
+    const hash = refHash(order.chat);
+    const referral = q.referralOf.get(hash);
+    if (!referral || referral.order_id !== null) return null;
+    q.closeReferral.run(order.id, hash);
+    const { referral: program } = settings();
+    const referrer = referral.referrer_id ? portal.memberById(referral.referrer_id) : null;
+    if (!program.enabled || !referrer || referrer.id === buyer.id) return null;
+    const availableAt = now() + program.holdDays * DAY;
+    const id = Number(q.insertReward.run(referrer.id, program.percent, order.id, now(), availableAt, program.holdDays ? 0 : 1).lastInsertRowid);
+    return { id, referrer, percent: program.percent, availableAt };
+  }
+
+  // На сколько дней убавить срок, если скидку потратили, а друг вернул деньги: доля скидки
+  // от срока заказа со скидкой (30% от месяца — 9 дней), не меньше дня
+  function cutDays(reward, used) {
+    const shift = addPeriod(used.paid_at, parsePeriodKey(used.period)) - used.paid_at;
+    return Math.max(1, Math.round((shift * reward.percent) / 100 / DAY));
+  }
+
+  // Что будет со скидкой пригласившего, если вернуть деньги за заказ друга полностью.
+  // null — заказ не приносил скидку (или она уже снята).
+  function referralImpact(orderId) {
+    const reward = q.rewardOfFriend.get(orderId);
+    if (!reward) return null;
+    const using = q.orderUsing.get(reward.id);
+    const used = using?.status === 'paid' && using.refunded < using.amount;
+    return { code: reward.code, percent: reward.percent, used, cutDays: used ? cutDays(reward, using) : 0, pendingOrder: using?.status === 'pending' ? using.id : null };
+  }
+
+  // Убавить срок пригласившему за потраченную скидку, которую друг «отменил» возвратом
+  async function cutReferrer(reward, used, why) {
+    const days = cutDays(reward, used);
+    q.revokeReward.run(now(), 'cut', days, reward.id);
+    const member = portal.memberById(reward.member_id);
+    if (!member) return { code: null, days, newUntil: null };
+    const newUntil = Math.max(now(), (member.paid_until ?? now()) - days * DAY);
+    q.setUntil.run(newUntil, member.id);
+    if (newUntil <= now() && member.status !== 'paused') {
+      try {
+        await portal.setPaused(member.id, true, { reason: 'expired' });
+      } catch (err) {
+        notify(`⚠️ ${member.code}: срок уменьшен, но ключи не встали на паузу — ${err.message}. Уборка повторит через 10 минут`);
+      }
+    }
+    const dayWords = `${days} ${plural(days, UNITS.day.words)}`;
+    event('referral_cut', member.code, `${dayWords}: ${why}`);
+    await tell(member.telegram_chat, {
+      text: `↩️ ${b('Друг вернул деньги за доступ')}, а скидку ${reward.percent}% по его приглашению вы уже потратили (заказ №${used.id}). Срок доступа уменьшен на ${dayWords}: ${newUntil <= now() ? 'доступ закончился, ключи на паузе.' : `теперь до ${formatMsk(newUntil)}.`}`,
+      buttons: [[{ text: '🔑 Мой доступ', action: 'keys' }]]
+    });
+    return { code: member.code, days, newUntil };
+  }
+
+  // Полный возврат за заказ друга: неиспользованная скидка пригласившего снимается (заказ, который
+  // её занял и ждёт оплаты, отменяется), потраченная — убавляет срок, если админ не простил
+  async function settleReferral(order, { forgive = false } = {}) {
+    const reward = q.rewardOfFriend.get(order.id);
+    if (!reward) return null;
+    const using = q.orderUsing.get(reward.id);
+    if (using?.status === 'paid') {
+      if (forgive || using.refunded >= using.amount) {
+        q.revokeReward.run(now(), 'forgiven', null, reward.id);
+        event('referral_revoked', reward.code, `возврат за заказ №${order.id}, срок не убавлен`);
+        return { code: reward.code, forgiven: true };
+      }
+      return { ...(await cutReferrer(reward, using, `возврат за заказ друга №${order.id}`)), forgiven: false };
+    }
+    q.revokeReward.run(now(), 'refund', null, reward.id);
+    let cancelled = null;
+    if (using?.status === 'pending') {
+      q.cancel.run(now(), using.id);
+      cancelled = using.id;
+      event('order_cancelled', reward.code, `№${using.id}: скидка по приглашению снята`);
+    }
+    event('referral_revoked', reward.code, `возврат за заказ №${order.id}`);
+    await tell(reward.telegram_chat, {
+      text: `↩️ ${b('Друг вернул деньги за доступ')} — скидка ${reward.percent}% по его приглашению снята.${cancelled ? ` Заказ №${cancelled} со скидкой отменён — оформите заказ заново.` : ''}`,
+      buttons: [[{ text: '🎁 Пригласить друга', action: 'invite' }]]
+    });
+    return { code: reward.code, revoked: true, cancelled };
+  }
 
   // Заказ покупателя. Прежний неоплаченный заказ этого чата отменяется: висит не больше одного.
   // С ЮKassa у заказа сразу есть платёж: { order, paymentUrl }; без неё — { order, payInfo }.
   async function createOrder(chat, key, devices) {
     if (!isOpen()) throw new PortalError(409, 'Продажа сейчас закрыта');
-    const found = priceOf(key, devices);
-    if (!found) throw new PortalError(409, 'Такого тарифа больше нет');
+    if (!priceOf(key, devices)) throw new PortalError(409, 'Такого тарифа больше нет');
     const member = memberOf(chat);
     if (seatsFree(member?.id ?? 0) < devices) throw new PortalError(409, 'Свободных мест на сервере сейчас нет');
     const order = transaction(db, () => {
+      // скидку прежний заказ этого чата отдаёт новому: discountFor её уже считает свободной
+      const deal = offer(chat, key, devices);
       for (const old of q.pendingOf.all(String(chat))) q.cancel.run(now(), old.id);
-      const id = Number(q.insertOrder.run(member?.id ?? null, String(chat), key, devices, found.price, now()).lastInsertRowid);
+      const { discount } = deal;
+      const id = Number(
+        q.insertOrder.run(member?.id ?? null, String(chat), key, devices, deal.amount, now(), discount?.percent ?? 0, discount ? deal.price : null, discount?.kind ?? null, discount?.rewardId ?? null).lastInsertRowid
+      );
       return q.order.get(id);
     });
     event('order_created', member?.code ?? null, `№${order.id}: ${describeOrder(order)}`);
@@ -420,13 +652,27 @@ function createShop({ db, config, portal, yookassa = null, returnUrl = () => con
     const result = transaction(db, () => {
       const granted = extendOrCreate({ chat: order.chat, period, devices: order.devices });
       if (q.payOrder.run(method, now(), granted.member.id, order.id).changes === 0) throw new PortalError(409, `Заказ №${order.id} уже закрыт`);
-      return granted;
+      return { ...granted, reward: rewardReferrer(order, granted.member) };
     });
     await resumeIfPaused(result);
     event('order_paid', result.member.code, `№${order.id}: ${describeOrder(order)}`);
     notify(`✅ ${b(`Заказ №${order.id} оплачен`)}${method === 'yookassa' ? ' через ЮKassa' : ''}: ${code(result.member.code)}, ${esc(describeOrder(order))}, до ${formatMsk(result.member.paid_until)}`, { html: true });
     await tell(order.chat, accessScreen(result, result.inviteToken ? '✅ Оплата получена, спасибо!' : '✅ Оплата получена, доступ продлён.'));
+    if (result.reward) await announceReward(result.reward, order);
+    // заказ занял скидку, которую сняли, пока он ждал оплаты (друг вернул деньги), и всё же
+    // оплачен (ЮKassa оживила отменённый заказ): срок убавляется, как за потраченную скидку
+    const used = order.reward_id ? q.reward.get(order.reward_id) : null;
+    if (used?.revoked_reason === 'refund') await cutReferrer(used, q.order.get(order.id), `заказ №${order.id} оплачен со снятой скидкой`);
     return { order, member: result.member };
+  }
+
+  async function announceReward({ referrer, percent, availableAt }, order) {
+    event('referral_reward', referrer.code, `${percent}% за заказ №${order.id}${availableAt > now() ? `, доступна с ${formatMsk(availableAt)}` : ''}`);
+    const ready = availableAt <= now();
+    await tell(referrer.telegram_chat, {
+      text: `🎁 ${b('Друг оплатил доступ по вашей ссылке!')} Вам скидка ${b(`${percent}%`)} на следующую покупку — ${ready ? 'она применится при следующем заказе.' : `станет доступна ${formatMsk(availableAt)}.`}`,
+      buttons: ready ? renewButton : [[{ text: '🎁 Пригласить ещё', action: 'invite' }]]
+    });
   }
 
   // Пробный период: сразу, без заказа и админа
@@ -475,10 +721,12 @@ function createShop({ db, config, portal, yookassa = null, returnUrl = () => con
     const period = parsePeriodKey(order.period);
     const shift = addPeriod(order.paid_at, period) - order.paid_at;
     const newUntil = full && order.member_id && order.paid_until ? Math.max(now(), order.paid_until - shift) : null;
-    return { order, amount, full, newUntil, viaYooKassa: Boolean(order.payment_id), periodLabel: periodLabel(period) };
+    const referral = full ? referralImpact(order.id) : null;
+    return { order, amount, full, newUntil, viaYooKassa: Boolean(order.payment_id), periodLabel: periodLabel(period), referral };
   }
 
-  async function refundOrder(orderId, value = null) {
+  // forgive — не убавлять срок пригласившему, если скидку за этого друга он уже потратил
+  async function refundOrder(orderId, value = null, { forgive = false } = {}) {
     const preview = refundPreview(orderId, value);
     const { order, amount, full, newUntil } = preview;
     let refundId = null;
@@ -522,7 +770,8 @@ function createShop({ db, config, portal, yookassa = null, returnUrl = () => con
     if (preview.viaYooKassa) lines.push('Деньги придут туда, откуда была оплата, — обычно за несколько дней, срок зависит от банка.');
     if (newUntil !== null) lines.push(newUntil <= now() ? 'Доступ по этому заказу закончен, ключи на паузе.' : `Срок доступа уменьшен: теперь до ${formatMsk(newUntil)}.`);
     await tell(order.telegram_chat, { text: lines.join('\n'), buttons: [[{ text: '🔑 Мой доступ', action: 'keys' }]] });
-    return { ...preview, refundId, pending, paused };
+    const referral = full ? await settleReferral(order, { forgive }) : null;
+    return { ...preview, refundId, pending, paused, referral };
   }
 
   // Отчёт о продажах за days дней и доход с начала года — для лимита самозанятого
@@ -544,6 +793,7 @@ function createShop({ db, config, portal, yookassa = null, returnUrl = () => con
     const year = q.revenue.get(yearStart).sum;
     const refunds = q.refundsSince.get(since);
     const trials = q.trialMembers.all(since).length;
+    const discounts = q.discounts.get(since);
     return {
       days,
       orders: paid.length,
@@ -556,6 +806,7 @@ function createShop({ db, config, portal, yookassa = null, returnUrl = () => con
       byMethod: { yookassa: paid.filter((o) => o.method === 'yookassa').length, manual: paid.filter((o) => o.method === 'manual').length },
       trials,
       trialsConverted: q.paidAfterTrial.get(since).n,
+      discounts: { count: discounts.n, sum: discounts.sum },
       activeClients: q.activeClients.get(now()).n,
       seats: seats(),
       year: { year: mskYear, sum: year, limit: SELF_EMPLOYED_LIMIT, nearLimit: year >= SELF_EMPLOYED_LIMIT * 0.9 }
@@ -661,6 +912,14 @@ function createShop({ db, config, portal, yookassa = null, returnUrl = () => con
       });
     }
 
+    for (const reward of q.rewardsReady.all(now())) {
+      q.setNotified.run(reward.id);
+      await tell(reward.telegram_chat, {
+        text: `🎁 ${b(`Скидка ${reward.percent}% за приглашённого друга доступна!`)} Она применится к следующей покупке.`,
+        buttons: renewButton
+      });
+    }
+
     const { deleteAfterDays } = settings();
     for (const member of q.expired.all(now())) {
       try {
@@ -701,7 +960,9 @@ function createShop({ db, config, portal, yookassa = null, returnUrl = () => con
       whyClosed: whyClosed(value),
       seats: seats(),
       pending: q.pending.all(),
-      recent: q.recent.all(20),
+      // у оплаченных — что будет со скидкой пригласившего при полном возврате
+      recent: q.recent.all(20).map((order) => ({ ...order, referral: order.status === 'paid' && order.kind === 'paid' ? referralImpact(order.id) : null })),
+      referralStats: { ...q.referralTotals.get(), rewards: q.rewardTotals.get() },
       report: salesReport(30),
       clients: q.clients.all(),
       month: { orders: month.n, sum: month.sum },
@@ -718,6 +979,12 @@ function createShop({ db, config, portal, yookassa = null, returnUrl = () => con
     saveSettings,
     savePromo,
     promo,
+    saveReferral,
+    referralEnabled,
+    referralInfo,
+    joinByLink,
+    discountFor,
+    offer,
     seats,
     seatsFree,
     priceOf,
@@ -741,4 +1008,4 @@ function createShop({ db, config, portal, yookassa = null, returnUrl = () => con
   };
 }
 
-export { createShop, addPeriod, formatMsk, formatRub, plural, periodLabel, devicesLabel, parsePeriodKey, DEVICE_OPTIONS, MAX_PERIODS, PAY_INFO_MAX };
+export { createShop, addPeriod, formatMsk, formatRub, plural, periodLabel, devicesLabel, parsePeriodKey, DEVICE_OPTIONS, MAX_PERIODS, PAY_INFO_MAX, REFERRAL_TEXT_MAX };

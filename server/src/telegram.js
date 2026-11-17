@@ -27,6 +27,8 @@ const RATE_WINDOW = MINUTE;
 const RATE_TRACKED = 5000;
 // Кнопки клиентского меню: callback_data = «c:<действие>»
 const CLIENT_PREFIX = 'c:';
+// /start ref_КОД — ссылка приглашения покупателя (client.js), не ссылка подключения чата админа
+const REFERRAL_START = /^ref_[A-Z0-9]{4,16}$/;
 
 class TelegramError extends Error {
   constructor(message, code) {
@@ -298,17 +300,18 @@ function createTelegram({ settings, db, fetch = globalThis.fetch, now = () => Da
     const [head = '', ...args] = message.text.trim().split(/\s+/);
     const command = head.toLowerCase().replace(/@\w+$/, '');
     const isAdmin = chat === chatId();
+    const linkCode = command === '/start' && args[0] && !REFERRAL_START.test(args[0]) ? args[0] : null;
 
     // Группы: команды в них мог бы отправить любой участник, клиентского меню там тоже нет
     if (!isPrivate) {
-      if (command === '/start' && args[0] && !settings.chatId && !isAdmin) await send(chat, 'Бота можно подключить только в личном чате.');
+      if (linkCode && !settings.chatId && !isAdmin) await send(chat, 'Бота можно подключить только в личном чате.');
       return;
     }
     if (!isAdmin && !(await allowed(chat))) return;
 
     // Подключение по ссылке из админки
-    if (command === '/start' && args[0] && !settings.chatId && !isAdmin) {
-      if (!takeLink(args[0])) {
+    if (linkCode && !settings.chatId && !isAdmin) {
+      if (!takeLink(linkCode)) {
         await send(chat, 'Ссылка для подключения недействительна или устарела. Создайте новую в админке портала.');
         return;
       }
@@ -325,7 +328,7 @@ function createTelegram({ settings, db, fetch = globalThis.fetch, now = () => Da
       return;
     }
 
-    if (!isAdmin) return show(chat, await handlers.client.command(command, chat));
+    if (!isAdmin) return show(chat, await handlers.client.command(command, chat, args));
     // админ смотрит клиентское меню глазами покупателя; заказы и пробный период из него настоящие
     if (command === '/client') return show(chat, await handlers.client.command('/start', chat));
     await sendHtml(chat, await handlers.admin.run(command, args));

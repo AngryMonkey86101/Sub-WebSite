@@ -1,6 +1,6 @@
 import { CYCLE_DAYS, periodEnd, shortDate } from './traffic.js';
 import { PROTOCOLS, PLATFORMS } from './config.js';
-import { formatMsk, formatRub, periodLabel, parsePeriodKey, devicesLabel, DEVICE_OPTIONS, MAX_PERIODS, PAY_INFO_MAX } from './shop.js';
+import { formatMsk, formatRub, periodLabel, parsePeriodKey, devicesLabel, DEVICE_OPTIONS, MAX_PERIODS, PAY_INFO_MAX, REFERRAL_TEXT_MAX } from './shop.js';
 
 // HTML-страницы портала. Всё, что подставляется в разметку, экранируется; сырой HTML —
 // только из других шаблонов этого файла. Внешних шрифтов, CDN и счётчиков нет: браузер
@@ -371,7 +371,12 @@ const EVENT_LABELS = {
   payment_failed: 'ЮKassa не создала платёж',
   payment_mismatch: 'платёж ЮKassa не сходится с заказом',
   order_refunded: 'возврат денег',
-  promo_settings: 'изменена реклама в боте'
+  promo_settings: 'изменена реклама в боте',
+  referral_settings: 'изменена реферальная программа',
+  referral_joined: 'пришёл друг по ссылке приглашения',
+  referral_reward: 'скидка за приглашённого друга',
+  referral_revoked: 'скидка за друга снята: возврат',
+  referral_cut: 'срок убавлен: друг вернул деньги, скидка уже потрачена'
 };
 
 function memberState(member, nowMs = Date.now()) {
@@ -651,8 +656,16 @@ function rebootPage({ admin }) {
 
 const orderLine = (order) => {
   const period = parsePeriodKey(order.period);
-  return html`№${order.id} · ${periodLabel(period)}, ${devicesLabel(order.devices)} · ${order.kind === 'trial' ? 'пробный' : formatRub(order.amount)}`;
+  const discount = order.discount_percent ? ` (скидка ${order.discount_percent}%${order.discount_kind === 'invitee' ? ' приглашённому' : ' за друга'})` : '';
+  return html`№${order.id} · ${periodLabel(period)}, ${devicesLabel(order.devices)} · ${order.kind === 'trial' ? 'пробный' : formatRub(order.amount)}${discount}`;
 };
+
+// Что будет со скидкой пригласившего при полном возврате за заказ друга — для окна подтверждения
+function referralRefundNote(referral) {
+  if (!referral) return '';
+  if (referral.used) return ` Этот покупатель пришёл по приглашению ${referral.code}, и тот уже купил со скидкой ${referral.percent}%: его срок убавится на ${referral.cutDays} дн. (галка «не убавлять» — простить).`;
+  return ` Скидка ${referral.percent}% у пригласившего ${referral.code} за этого друга будет снята${referral.pendingOrder ? `, его заказ №${referral.pendingOrder} со скидкой отменится` : ''}.`;
+}
 
 const ORDER_STATUS = { paid: 'оплачен', cancelled: 'отменён' };
 
@@ -693,6 +706,7 @@ function shopPage({ admin, shop, notice, nowMs }) {
       <h2 id="report">Отчёт за 30 дней</h2>
       <p>Оплат: <b>${r.orders}</b> на ${formatRub(r.gross)}${r.refunds.count ? html`, возвратов: ${r.refunds.count} на ${formatRub(r.refunds.sum)}` : ''}. Итого: <b>${formatRub(r.net)}</b>.</p>
       ${r.orders ? html`<p class="muted">Новых покупателей: ${r.newClients}, продлений: ${r.orders - r.newClients}. Через ЮKassa: ${r.byMethod.yookassa}, вручную: ${r.byMethod.manual}.${r.trials ? ` Пробный период: ${r.trials}, из них купили: ${r.trialsConverted}.` : ''}</p>` : ''}
+      ${r.discounts?.count ? html`<p class="muted">Из них со скидкой по реферальной программе: ${r.discounts.count}, скидок на ${formatRub(r.discounts.sum)}.</p>` : ''}
       ${r.byTariff.length ? html`<ul class="devices compact">${r.byTariff.map((t) => html`<li>${t.label} <span class="status">${t.count} шт., ${formatRub(t.sum)}</span></li>`)}</ul>` : ''}
       <p class="${r.year.nearLimit ? 'warning' : 'muted'}">Доход за ${r.year.year} год: ${formatRub(r.year.sum)} из ${formatRub(r.year.limit)} — лимит дохода самозанятого за год.${r.year.nearLimit ? ' Лимит почти исчерпан: при превышении статус самозанятого теряется.' : ''} Подробнее и за другой срок — /sales ДНЕЙ в боте.</p>
 
@@ -771,6 +785,23 @@ function shopPage({ admin, shop, notice, nowMs }) {
         <button type="submit" class="primary">Сохранить рекламу</button>
       </form>
 
+      <h2 id="referral">Реферальная программа</h2>
+      <p class="muted">У каждого покупателя в боте есть кнопка «🎁 Пригласить друга» с личной ссылкой. Друг, который ещё ничего не оплачивал, получает половину скидки на первую покупку. Когда он оплатит, пригласившему начисляется скидка на следующую покупку — через указанное число дней (если друг вернёт деньги раньше, скидка снимается). Скидки не суммируются: на заказ одна. Если друг вернул деньги, а скидку уже потратили, срок заказа со скидкой убавится на долю скидки.</p>
+      <p class="muted">Пришли по ссылкам: ${shop.referralStats.joined}, оплатили: ${shop.referralStats.paid}. Скидок начислено: ${shop.referralStats.rewards.total}, потрачено: ${shop.referralStats.rewards.used}, снято: ${shop.referralStats.rewards.revoked}.</p>
+      <form method="post" action="/admin/shop/referral" class="stack">
+        <label class="check"><input type="checkbox" name="referral_enabled" value="1"${shop.referral.enabled ? html` checked` : ''}> Программа включена</label>
+        <label>Скидка пригласившему, % (другу — половина: сейчас ${Math.floor(shop.referral.percent / 2)}%)
+          <input type="number" name="referral_percent" min="1" max="90" value="${shop.referral.percent}">
+        </label>
+        <label>Скидка пригласившему доступна через, дней после оплаты друга (0 — сразу)
+          <input type="number" name="referral_hold" min="0" max="90" value="${shop.referral.holdDays}">
+        </label>
+        <label>Текст на экране «Пригласить друга». Подставляются: {скидка} — скидка пригласившему, {скидка_другу} — скидка другу, {ссылка} — личная ссылка
+          <textarea name="referral_text" rows="6" maxlength="${REFERRAL_TEXT_MAX}">${shop.referral.text}</textarea>
+        </label>
+        <button type="submit" class="primary">Сохранить программу</button>
+      </form>
+
       <h2 id="clients">Покупатели</h2>
       ${shop.clients.length
         ? html`<ul class="devices compact">${shop.clients.map((m) => html`
@@ -784,8 +815,9 @@ function shopPage({ admin, shop, notice, nowMs }) {
         <li>
           <span class="muted">${formatMsk(order.paid_at ?? order.created_at)}</span> ${orderLine(order)} · ${order.status === 'paid' ? ORDER_METHOD[order.method] ?? ORDER_STATUS.paid : ORDER_STATUS[order.status] ?? order.status}${order.code ? html` · <b>${order.code}</b>` : ''}${order.refunded ? html` · <b>возвращено ${formatRub(order.refunded)}</b>` : ''}
           ${order.status === 'paid' && order.kind === 'paid' && order.refunded < order.amount
-            ? html`<form method="post" action="/admin/orders/${order.id}/refund" class="inline refund" data-confirm="Вернуть деньги по заказу №${order.id}? Пустая сумма — всё, что ещё не вернули (${order.amount - order.refunded} ₽): срок покупателя уменьшится на срок заказа. Возврат не отменить.">
+            ? html`<form method="post" action="/admin/orders/${order.id}/refund" class="inline refund" data-confirm="Вернуть деньги по заказу №${order.id}? Пустая сумма — всё, что ещё не вернули (${order.amount - order.refunded} ₽): срок покупателя уменьшится на срок заказа.${referralRefundNote(order.referral)} Возврат не отменить.">
             <input type="number" name="amount" min="1" max="${order.amount - order.refunded}" placeholder="${order.amount - order.refunded}" aria-label="Сумма возврата, ₽">
+            ${order.referral?.used ? html`<label class="check"><input type="checkbox" name="forgive" value="1"> не убавлять срок ${order.referral.code}</label>` : ''}
             <button type="submit" class="danger">Вернуть деньги</button>
           </form>`
             : ''}

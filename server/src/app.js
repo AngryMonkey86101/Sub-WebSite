@@ -397,7 +397,7 @@ function createApp({
       return page(200, shopPage({ admin, shop: shop.status(), notice: Object.fromEntries(new URL(req.url, config.publicUrl).searchParams), nowMs: now() }));
     }],
 
-    ['POST', /^\/admin\/shop\/(open|close|catalog|settings|promo)$/, ({ member, params, form }) => {
+    ['POST', /^\/admin\/shop\/(open|close|catalog|settings|promo|referral)$/, ({ member, params, form }) => {
       requireAdmin(member);
       if (!shop) throw new PortalError(404, 'Продажи не подключены');
       switch (params[0]) {
@@ -413,6 +413,9 @@ function createApp({
         case 'promo':
           shop.savePromo(form);
           return redirect('/admin/shop?saved=1#promo');
+        case 'referral':
+          shop.saveReferral(form);
+          return redirect('/admin/shop?saved=1#referral');
         default:
           shop.saveSettings(form);
           return redirect('/admin/shop?saved=1#settings');
@@ -424,7 +427,7 @@ function createApp({
       if (!shop) throw new PortalError(404, 'Продажи не подключены');
       if (params[1] === 'refund') {
         limit(`refund:${admin.id}`, 20, HOUR);
-        await shop.refundOrder(toId(params[0]), form.get('amount') || null);
+        await shop.refundOrder(toId(params[0]), form.get('amount') || null, { forgive: form.get('forgive') === '1' });
         return redirect('/admin/shop?refunded=1#history');
       }
       if (params[1] === 'grant') await shop.grantOrder(toId(params[0]));
