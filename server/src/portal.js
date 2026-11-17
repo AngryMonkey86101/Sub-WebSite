@@ -44,7 +44,8 @@ function createPortal({ db, config, amnezia, notify, now = () => Date.now() }) {
     deleteTokensOf: db.prepare('DELETE FROM access_tokens WHERE member_id = ?'),
 
     deviceById: db.prepare('SELECT * FROM devices WHERE id = ?'),
-    devicesOf: db.prepare('SELECT * FROM devices WHERE member_id = ? AND revoked_at IS NULL ORDER BY number'),
+    // у ключа покупателя — его место: slot_until — до когда оплачен (у семьи и админа NULL)
+    devicesOf: db.prepare('SELECT d.*, s.id AS slot_id, s.until AS slot_until FROM devices d LEFT JOIN slots s ON s.device_id = d.id WHERE d.member_id = ? AND d.revoked_at IS NULL ORDER BY d.number'),
     countDevicesOf: db.prepare('SELECT COUNT(*) AS n FROM devices WHERE member_id = ? AND revoked_at IS NULL'),
     maxNumberOf: db.prepare('SELECT COALESCE(MAX(number), 0) AS n FROM devices WHERE member_id = ?'),
     insertDevice: db.prepare('INSERT INTO devices (member_id, number, platform, protocol, label, created_at) VALUES (?, ?, ?, ?, ?, ?)'),
@@ -55,6 +56,10 @@ function createPortal({ db, config, amnezia, notify, now = () => Date.now() }) {
     ipHosts: db.prepare('SELECT DISTINCT host FROM devices WHERE revoked_at IS NULL AND host IS NOT NULL'),
     activeClientIds: db.prepare('SELECT client_id FROM devices WHERE client_id IS NOT NULL AND revoked_at IS NULL'),
     awgKeys: db.prepare("SELECT * FROM devices WHERE revoked_at IS NULL AND key_enc IS NOT NULL AND protocol = 'amneziawg3'"),
+    slotsOf: db.prepare('SELECT s.*, d.number, d.platform, d.label FROM slots s LEFT JOIN devices d ON d.id = s.device_id WHERE s.member_id = ? ORDER BY d.number IS NULL, d.number, s.until, s.id'),
+    freeSlot: db.prepare('SELECT id FROM slots WHERE member_id = ? AND device_id IS NULL AND until > ? ORDER BY until DESC, id LIMIT 1'),
+    takeSlot: db.prepare('UPDATE slots SET device_id = ? WHERE id = ? AND device_id IS NULL'),
+    releaseSlot: db.prepare('UPDATE slots SET device_id = NULL WHERE device_id = ?'),
     deviceByClient: db.prepare(`SELECT m.code, d.number FROM devices d JOIN members m ON m.id = d.member_id
       WHERE d.client_id = ? AND d.revoked_at IS NULL`),
     pendingNames: db.prepare(`SELECT m.code, d.number FROM devices d JOIN members m ON m.id = d.member_id
@@ -65,6 +70,8 @@ function createPortal({ db, config, amnezia, notify, now = () => Date.now() }) {
   };
 
   const log = (type, code = null, details = null) => q.insertEvent.run(now(), type, code, details);
+  // срок места ключа кончился: ключ должен быть выключен, даже если участник не на паузе
+  const slotEnded = (device) => device.slot_until !== null && device.slot_until !== undefined && device.slot_until <= now();
   const clientName = (member, number) => `${member.code}-${number}`;
   const aad = (deviceId) => `device:${deviceId}`;
 
@@ -207,11 +214,17 @@ function createPortal({ db, config, amnezia, notify, now = () => Date.now() }) {
     const { member, device } = transaction(db, () => {
       const member = requireMember(memberId);
       if (member.status !== 'active') throw new PortalError(403, 'Доступ приостановлен');
-      if (member.role !== 'admin' && q.countDevicesOf.get(member.id).n >= member.device_limit) {
+      // покупателю ключ — только на свободное оплаченное место; у семьи — лимит устройств
+      const slot = member.role === 'client' ? q.freeSlot.get(member.id, now()) : null;
+      if (member.role === 'client' && !slot) {
+        throw new PortalError(409, 'Свободных оплаченных мест нет. Отзовите ненужное устройство или купите ещё одно в боте.');
+      }
+      if (member.role === 'member' && q.countDevicesOf.get(member.id).n >= member.device_limit) {
         throw new PortalError(409, `Лимит устройств: ${member.device_limit}. Отзовите ненужное устройство или попросите админа увеличить лимит.`);
       }
       const number = q.maxNumberOf.get(member.id).n + 1;
       const id = Number(q.insertDevice.run(member.id, number, platform, protocol, note, now()).lastInsertRowid);
+      if (slot) q.takeSlot.run(id, slot.id);
       return { member, device: q.deviceById.get(id) };
     });
     const name = clientName(member, device.number);
@@ -340,6 +353,7 @@ function createPortal({ db, config, amnezia, notify, now = () => Date.now() }) {
       }
     }
     q.revokeDevice.run(now(), device.id);
+    q.releaseSlot.run(device.id);
   }
 
   async function revokeDevice(memberId, deviceId) {
@@ -379,7 +393,8 @@ function createPortal({ db, config, amnezia, notify, now = () => Date.now() }) {
       // занятые адреса — устройство остаётся выключенным, проверка ключей ниже скажет админу
       const busy = paused ? new Set() : await busyOnResume(member);
       for (const device of q.devicesOf.all(member.id)) {
-        if (!device.client_id || busy.has(device.id)) continue;
+        // ключ с закончившимся сроком места не включается вместе с участником
+        if (!device.client_id || busy.has(device.id) || (!paused && slotEnded(device))) continue;
         try {
           await amnezia.setStatus({ id: device.client_id, protocol: device.protocol, status });
         } catch (err) {
@@ -404,6 +419,38 @@ function createPortal({ db, config, amnezia, notify, now = () => Date.now() }) {
       notify(`⚠️ ${label}: не удалось проверить, включились ли ключи (${err.message}). Проверка вручную: docker compose exec portal npm run -s cli -- repair-keys`);
     }
   }
+
+  // Ключ покупателя по сроку его места: кончился — выключить, продлили — включить (если сам
+  // участник не на паузе). Включение — с теми же предосторожностями, что «Возобновить»:
+  // занятый адрес не отбирается, после включения ключ проверяется
+  async function setDeviceEnabled(memberId, deviceId, enabled) {
+    const member = requireMember(memberId);
+    const device = q.devicesOf.all(member.id).find((d) => d.id === deviceId);
+    if (!device?.client_id) return false;
+    if (enabled && member.status === 'paused') return false;
+    await serial(async () => {
+      const busy = enabled ? await busyOnResume(member) : new Set();
+      if (busy.has(device.id)) return;
+      try {
+        await amnezia.setStatus({ id: device.client_id, protocol: device.protocol, status: enabled ? 'active' : 'disabled' });
+      } catch (err) {
+        throw new PortalError(502, `${UNAVAILABLE} (${err.message})`);
+      }
+    });
+    if (enabled) await repairAfterResume(clientName(member, device.number), { memberId: member.id });
+    return true;
+  }
+
+  // Отозвать ключ без участника — конец срока места (shop.js)
+  async function dropDevice(memberId, deviceId) {
+    const member = requireMember(memberId);
+    const device = q.devicesOf.all(member.id).find((d) => d.id === deviceId);
+    if (!device) return;
+    await removeFromServer(member, device);
+    log('device_revoked', member.code, `${device.number}, срок закончился`);
+  }
+
+  const slotsOf = (memberId) => q.slotsOf.all(memberId);
 
   // «Выключить всех»: все участники с доступом (не админы) — на паузу админа
   async function pauseAll() {
@@ -466,8 +513,8 @@ function createPortal({ db, config, amnezia, notify, now = () => Date.now() }) {
       const failed = [];
       const members = memberId ? [requireMember(memberId)] : q.members.all();
       for (const member of members) {
-        const shouldWork = member.status !== 'paused';
         for (const device of q.devicesOf.all(member.id)) {
+          const shouldWork = member.status !== 'paused' && !slotEnded(device);
           if (!device.client_id || device.protocol !== 'amneziawg3' || !allowed.has(device.client_id)) continue;
           const name = clientName(member, device.number);
           const current = allowed.get(device.client_id);
@@ -624,6 +671,9 @@ function createPortal({ db, config, amnezia, notify, now = () => Date.now() }) {
     deviceKey,
     revokeDevice,
     setPaused,
+    setDeviceEnabled,
+    dropDevice,
+    slotsOf,
     pauseAll,
     resumeAll,
     repairKeys,

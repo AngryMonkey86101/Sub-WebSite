@@ -160,8 +160,8 @@ function createBotCommands({ portal, config, watchdog = null, heartbeat = null, 
   async function grant(args) {
     const id = orderNumber(args[0]);
     if (!id) return 'Укажите номер заказа: /grant 12. Номера — в /orders.';
-    const { member } = await shop.grantOrder(id);
-    return `✅ ${b(`Заказ №${id}:`)} доступ ${code(member.code)} до ${b(formatMsk(member.paid_until))}. Покупателю отправлено сообщение.`;
+    const { member, until } = await shop.grantOrder(id);
+    return `✅ ${b(`Заказ №${id}:`)} доступ ${code(member.code)} до ${b(formatMsk(until))}. Покупателю отправлено сообщение.`;
   }
 
   function cancel(args) {
@@ -187,7 +187,7 @@ function createBotCommands({ portal, config, watchdog = null, heartbeat = null, 
     const lines = [`💸 ${b(`Вернуть ${formatRub(preview.amount)} по заказу №${id}?`)}`, esc(`${order.code ?? 'покупатель удалён'}, ${shop.describeOrder(order)}`), ''];
     lines.push(preview.viaYooKassa ? 'Деньги вернёт ЮKassa — туда, откуда была оплата.' : 'Заказ оплачен вручную: деньги верните покупателю сами, бот только учтёт возврат.');
     if (preview.newUntil !== null) {
-      lines.push(preview.newUntil <= now() ? 'Возврат полный: доступ закончится сразу, ключи встанут на паузу.' : `Возврат полный: срок уменьшится на ${preview.periodLabel} — до ${formatMsk(preview.newUntil)}.`);
+      lines.push(preview.newUntil <= now() ? 'Возврат полный: доступ по заказу закончится сразу, ключи встанут на паузу.' : `Возврат полный: срок ${preview.slots.length === 1 ? 'ключа' : 'ключей'} заказа уменьшится на ${preview.periodLabel} — до ${formatMsk(preview.newUntil)}.`);
     } else if (!preview.full) {
       lines.push('Возврат частичный: срок доступа не меняется.');
     }

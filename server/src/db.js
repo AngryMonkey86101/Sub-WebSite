@@ -68,7 +68,41 @@ const SCHEMA = `
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
   );
+  CREATE TABLE IF NOT EXISTS slots (
+    id INTEGER PRIMARY KEY,
+    member_id INTEGER NOT NULL REFERENCES members(id) ON DELETE CASCADE,
+    device_id INTEGER UNIQUE REFERENCES devices(id) ON DELETE SET NULL,
+    until INTEGER NOT NULL,
+    reminder_sent INTEGER NOT NULL DEFAULT 0,
+    ended INTEGER NOT NULL DEFAULT 0,
+    order_id INTEGER,
+    created_at INTEGER NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS slots_member ON slots(member_id);
 `;
+
+// Места покупателя (slots): у каждого оплаченного устройства свой срок. Ключ занимает место;
+// отозвали ключ — место с тем же сроком свободно для нового. reminder_sent — какие напоминания
+// о конце срока места уже ушли (как было у участника), ended = 1 — конец срока уже обработан
+// (ключ на паузе, покупателю сказано), order_id — заказ, которым место куплено (возврат). У семьи и админа мест нет: срока у них нет.
+//
+// До мест срок был общий: members.paid_until и device_limit. Переход: у каждого покупателя
+// столько мест, сколько было устройств по лимиту (или ключей, если их больше), все — с прежним
+// сроком, ключи занимают места по номерам. Пауза «конец срока» у участника становится паузой
+// ключей: участник активен, его ключи на сервере уже выключены и включатся при продлении места.
+function migrateToSlots(db, time) {
+  const clients = db.prepare("SELECT * FROM members WHERE role = 'client' AND paid_until IS NOT NULL").all();
+  const devicesOf = db.prepare('SELECT id FROM devices WHERE member_id = ? AND revoked_at IS NULL ORDER BY number');
+  const insert = db.prepare('INSERT INTO slots (member_id, device_id, until, reminder_sent, ended, created_at) VALUES (?, ?, ?, ?, ?, ?)');
+  const unpause = db.prepare("UPDATE members SET status = 'active', pause_reason = NULL WHERE id = ? AND status = 'paused' AND pause_reason = 'expired'");
+  for (const member of clients) {
+    const devices = devicesOf.all(member.id);
+    const count = Math.max(member.device_limit, devices.length);
+    const ended = member.paid_until <= time ? 1 : 0;
+    for (let k = 0; k < count; k++) insert.run(member.id, devices[k]?.id ?? null, member.paid_until, member.reminder_sent, ended, time);
+    unpause.run(member.id);
+  }
+}
 
 // Колонки, добавленные после первой выкладки: в уже созданную базу их дописывает ALTER TABLE,
 // в новой они есть сразу (SCHEMA)
@@ -105,7 +139,9 @@ const ADDED_COLUMNS = [
   ['members', 'traffic_warned', 'TEXT'],
   ['members', 'traffic_exempt', 'TEXT'],
   // откуда вход: NULL — личная ссылка (браузер), tg — мини-приложение Telegram (miniApp.js)
-  ['access_tokens', 'via', 'TEXT']
+  ['access_tokens', 'via', 'TEXT'],
+  // заказ-продление: какие места продлить (номера мест через запятую); NULL — новые места
+  ['orders', 'renew', 'TEXT']
 ];
 
 function openDatabase(path) {
@@ -113,11 +149,13 @@ function openDatabase(path) {
   db.exec('PRAGMA foreign_keys = ON;');
   // WAL: команды CLI (docker compose exec portal …) работают с базой параллельно с сервером
   if (path !== ':memory:') db.exec('PRAGMA journal_mode = WAL; PRAGMA busy_timeout = 5000;');
+  const hadSlots = Boolean(db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'slots'").get());
   db.exec(SCHEMA);
   for (const [table, column, type] of ADDED_COLUMNS) {
     const exists = db.prepare(`PRAGMA table_info(${table})`).all().some((c) => c.name === column);
     if (!exists) db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${type}`);
   }
+  if (!hadSlots) transaction(db, () => migrateToSlots(db, Date.now()));
   db.exec('CREATE UNIQUE INDEX IF NOT EXISTS members_chat ON members(telegram_chat) WHERE telegram_chat IS NOT NULL');
   db.exec('CREATE INDEX IF NOT EXISTS orders_payment ON orders(payment_id) WHERE payment_id IS NOT NULL');
   return db;

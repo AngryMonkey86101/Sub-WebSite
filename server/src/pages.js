@@ -180,6 +180,12 @@ function homeScreenSection() {
 const deviceName = (device) =>
   html`№${device.number} · ${PLATFORMS[device.platform]}${device.label ? html` · «${device.label}»` : ''}`;
 
+// Срок ключа покупателя (его места): «оплачен до …» или «срок закончился …»
+const slotTerm = (device, nowMs) =>
+  device.slot_until === null || device.slot_until === undefined
+    ? ''
+    : device.slot_until > nowMs ? `оплачен до ${formatMsk(device.slot_until)}` : `срок закончился ${formatMsk(device.slot_until)}`;
+
 // Лимит устройств — только для участников: админ выдаёт ключи и за других
 const deviceCount = (member, count) =>
   member.role === 'admin' ? `${count}` : `${count} из ${member.device_limit}`;
@@ -201,8 +207,10 @@ function deviceFields(protocols) {
           : html`<input type="hidden" name="protocol" value="${protocols[0]}">`}`;
 }
 
-function cabinetPage({ member, devices, statuses, protocols, traffic = null, nowMs }) {
-  const full = member.role !== 'admin' && devices.length >= member.device_limit;
+// slots — места покупателя (у семьи и админа null): у каждого ключа свой срок
+function cabinetPage({ member, devices, statuses, protocols, traffic = null, slots = null, nowMs }) {
+  const freeSlots = (slots ?? []).filter((slot) => !slot.device_id && slot.until > nowMs);
+  const full = slots ? !freeSlots.length : member.role !== 'admin' && devices.length >= member.device_limit;
   return layout({
     title: 'Кабинет',
     member,
@@ -222,7 +230,7 @@ function cabinetPage({ member, devices, statuses, protocols, traffic = null, now
             <div>
               <b>${deviceName(device)}</b>
               <span class="muted">${PROTOCOLS[device.protocol]} · с ${formatDate(device.created_at)}</span>
-              <span class="status">${[deviceStatus(device, statuses?.get(device.client_id), nowMs, { monthly: Boolean(traffic) }), traffic ? `за ${CYCLE_DAYS} дней ${formatBytes(traffic.devices.get(device.id) ?? 0)}` : ''].filter(Boolean).join(' · ')}</span>
+              <span class="status">${[slotTerm(device, nowMs), deviceStatus(device, statuses?.get(device.client_id), nowMs, { monthly: Boolean(traffic) }), traffic ? `за ${CYCLE_DAYS} дней ${formatBytes(traffic.devices.get(device.id) ?? 0)}` : ''].filter(Boolean).join(' · ')}</span>
             </div>
             <div class="actions">
               ${device.key_enc ? html`<a class="button" href="/devices/${device.id}">Показать ключ</a>` : html`<span class="muted">ключ создаётся…</span>`}
@@ -233,11 +241,14 @@ function cabinetPage({ member, devices, statuses, protocols, traffic = null, now
           </li>`)}</ul>`
         : html`<p>Устройств пока нет.</p>`}
       <p class="muted">Устройств: ${deviceCount(member, devices.length)}.${traffic ? ` ${trafficText(traffic).replace(/^т/, 'Т')}.` : ''}</p>
+      ${slots ? html`<p class="muted">У каждого ключа свой срок, продлить — в боте.${freeSlots.length ? ` Свободных оплаченных мест: ${freeSlots.length} (${freeSlots.map((slot) => `до ${formatMsk(slot.until)}`).join(', ')}).` : ''}</p>` : ''}
 
       ${member.status !== 'active'
         ? ''
         : full
-          ? html`<p>Лимит устройств исчерпан. Отзовите ненужное устройство или попросите админа увеличить лимит.</p>`
+          ? slots
+            ? html`<p>Свободных оплаченных мест нет. Отзовите ненужное устройство или купите ещё одно в боте.</p>`
+            : html`<p>Лимит устройств исчерпан. Отзовите ненужное устройство или попросите админа увеличить лимит.</p>`
           : html`
       <h2>Новое устройство</h2>
       <form method="post" action="/devices" class="stack">
@@ -553,7 +564,7 @@ function adminPage({ admin, members, statuses, foreign, statusError, ipHosts, ev
             ? html`<details class="keys">
             <summary>Ключи (${member.devices.length})</summary>
             <ul class="devices compact">${member.devices.map((device) => html`
-              <li>${deviceName(device)} · ${PROTOCOLS[device.protocol]} <span class="status">${[deviceStatus(device, statuses?.get(device.client_id), nowMs, { monthly: Boolean(traffic) }), traffic ? `за ${CYCLE_DAYS} дней ${formatBytes(traffic.devices.get(device.id) ?? 0)}` : ''].filter(Boolean).join(' · ')}</span></li>`)}</ul>
+              <li>${deviceName(device)} · ${PROTOCOLS[device.protocol]} <span class="status">${[slotTerm(device, nowMs), deviceStatus(device, statuses?.get(device.client_id), nowMs, { monthly: Boolean(traffic) }), traffic ? `за ${CYCLE_DAYS} дней ${formatBytes(traffic.devices.get(device.id) ?? 0)}` : ''].filter(Boolean).join(' · ')}</span></li>`)}</ul>
           </details>`
             : html`<p class="muted">Ключей нет.</p>`}
           <div class="actions">
@@ -563,10 +574,12 @@ function adminPage({ admin, members, statuses, foreign, statusError, ipHosts, ev
             ${member.role === 'admin'
               ? ''
               : html`
-            <form method="post" action="/admin/members/${member.id}/limit" class="inline">
+            ${member.role === 'client'
+              ? ''
+              : html`<form method="post" action="/admin/members/${member.id}/limit" class="inline">
               <input type="number" name="devices" min="1" max="20" value="${member.device_limit}" aria-label="Лимит устройств">
               <button type="submit">Лимит</button>
-            </form>
+            </form>`}
             ${traffic
               ? html`<form method="post" action="/admin/members/${member.id}/traffic" class="inline">
               <input type="text" inputmode="decimal" name="limit_gb" size="5" value="${member.traffic_limit_gb ?? ''}" placeholder="общий" aria-label="Лимит трафика, ГБ за ${CYCLE_DAYS} дней (пусто — общий, 0 — без лимита)">
@@ -700,7 +713,7 @@ function shopPage({ admin, shop, notice, nowMs }) {
       ${shop.pending.length
         ? html`<ul class="members">${shop.pending.map((order) => html`
         <li>
-          <div class="member-head"><b>${orderLine(order)}</b> <span class="muted">${formatMsk(order.created_at)}${order.member_id ? ' · продление' : ' · новый покупатель'}${order.payment_id ? ' · ждёт оплаты в ЮKassa, доступ выдастся сам' : ''}</span></div>
+          <div class="member-head"><b>${orderLine(order)}</b> <span class="muted">${formatMsk(order.created_at)}${order.renew ? ' · продление' : order.member_id ? ' · ещё устройства' : ' · новый покупатель'}${order.payment_id ? ' · ждёт оплаты в ЮKassa, доступ выдастся сам' : ''}</span></div>
           <div class="actions">
             <form method="post" action="/admin/orders/${order.id}/grant" data-confirm="Деньги по заказу №${order.id} пришли? Покупатель получит доступ.">
               <button type="submit" class="primary">Оплачен — выдать доступ</button>
@@ -774,8 +787,10 @@ function shopPage({ admin, shop, notice, nowMs }) {
       <h2 id="clients">Покупатели</h2>
       ${shop.clients.length
         ? html`<ul class="devices compact">${shop.clients.map((m) => html`
-        <li><b>${m.code}</b> · ${devicesLabel(m.device_limit)} <span class="status">${m.paid_until > nowMs && m.status !== 'paused' ? `до ${formatMsk(m.paid_until)}` : `закончился ${formatMsk(m.paid_until)}`}</span></li>`)}</ul>
-      <p class="muted">Пауза, лимит и удаление — в админке, раздел «Участники». Добавить дни — /gift КОД ДНИ в боте.</p>`
+        <li><b>${m.code}</b> · ${devicesLabel(m.slots.length || m.device_limit)} <span class="status">${m.slots.length
+          ? m.slots.map((slot) => `${slot.number ? `№${slot.number}` : 'место'} ${slot.until > nowMs ? `до ${formatMsk(slot.until)}` : `закончился ${formatMsk(slot.until)}`}`).join(' · ')
+          : `закончился ${formatMsk(m.paid_until)}`}${m.status === 'paused' ? ' · на паузе' : ''}</span></li>`)}</ul>
+      <p class="muted">У каждого ключа свой срок. Пауза и удаление — в админке, раздел «Участники». Добавить дни всем ключам покупателя — /gift КОД ДНИ в боте.</p>`
         : html`<p class="muted">Покупателей пока нет.</p>`}
 
       <h2 id="history">Последние заказы</h2>

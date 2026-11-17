@@ -1,7 +1,7 @@
 import { createHmac } from 'node:crypto';
 import { transaction } from './db.js';
 import { PortalError } from './portal.js';
-import { HOUR, DAY } from './config.js';
+import { HOUR, DAY, PLATFORMS } from './config.js';
 import { esc, b, code } from './tgHtml.js';
 import { miniAppUrl } from './miniApp.js';
 
@@ -17,8 +17,12 @@ import { miniAppUrl } from './miniApp.js';
 // - без ЮKassa — покупатель переводит деньги, как написано в «Как оплатить», админ подтверждает
 //   заказ (/grant в боте или кнопка в админке).
 //
-// Покупатель — участник с ролью client: код, чат Telegram (без имени и username), срок
-// и лимит устройств. Чат в заказе нужен, пока заказ не закрыт, потом стирается.
+// Покупатель — участник с ролью client: код, чат Telegram (без имени и username) и места.
+// Место — оплаченное устройство со своим сроком (таблица slots, db.js): покупка на 2 устройства —
+// 2 места, ключ из кабинета занимает свободное место. Срок кончился — на паузу только ключ этого
+// места; продлить можно один ключ или все сразу. members.paid_until и device_limit покупателя —
+// самый поздний срок и число мест (для списков и отчётов). Чат в заказе нужен, пока заказ
+// не закрыт, потом стирается.
 // Пробный период — один раз на чат: в trials лежит только HMAC номера чата.
 
 const DEVICE_OPTIONS = [1, 2, 3, 4];
@@ -92,12 +96,32 @@ function addPeriod(fromMs, period) {
   return d.getTime();
 }
 
+// Конец срока места: день оплаты по Москве + срок, конец — в 00:00 следующего дня (1 месяц
+// с 17 ноября — до 00:00 18 декабря). Действующее место продлевается от своего конца,
+// закончившееся — от дня оплаты. from — нынешний срок места (0 — нового).
+function termEnd(from, period, nowMs) {
+  const base = from > nowMs ? from - 1 : nowMs;
+  const d = new Date(base + MSK);
+  const day = Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate());
+  return addPeriod(day, period) + DAY - MSK;
+}
+
+// Обратно: срок места без срока заказа (полный возврат продления)
+function termBack(until, period) {
+  const back = { ...period, count: -period.count };
+  return addPeriod(until + MSK, back) - MSK;
+}
+
 // Дата и время по Москве — так понятнее покупателю, чем UTC
 function formatMsk(ms) {
   const d = new Date(ms + MSK);
   const pad = (n) => String(n).padStart(2, '0');
   return `${pad(d.getUTCDate())}.${pad(d.getUTCMonth() + 1)}.${d.getUTCFullYear()} ${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())} МСК`;
 }
+
+// Место одной строкой: «Ключ №2 · iPhone» или «Свободное место»
+const slotName = (slot) => (slot.number ? `Ключ №${slot.number} · ${PLATFORMS[slot.platform] ?? slot.platform}` : 'Свободное место');
+const idList = (text) => (text ? text.split(',').map(Number).filter(Number.isInteger) : null);
 
 const formatRub = (amount) => `${String(amount).replace(/\B(?=(\d{3})+(?!\d))/g, ' ')} ₽`;
 
@@ -165,7 +189,7 @@ function createShop({ db, config, portal, yookassa = null, returnUrl = () => con
   const q = {
     get: db.prepare("SELECT value FROM settings WHERE key = 'shop'"),
     set: db.prepare("INSERT INTO settings (key, value) VALUES ('shop', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value"),
-    insertOrder: db.prepare("INSERT INTO orders (member_id, chat, kind, period, devices, amount, status, created_at) VALUES (?, ?, 'paid', ?, ?, ?, 'pending', ?)"),
+    insertOrder: db.prepare("INSERT INTO orders (member_id, chat, kind, period, devices, amount, status, created_at, renew) VALUES (?, ?, 'paid', ?, ?, ?, 'pending', ?, ?)"),
     insertTrial: db.prepare("INSERT INTO orders (member_id, kind, period, devices, amount, status, method, created_at, paid_at) VALUES (?, 'trial', ?, ?, 0, 'paid', 'trial', ?, ?)"),
     order: db.prepare('SELECT * FROM orders WHERE id = ?'),
     pendingOf: db.prepare("SELECT * FROM orders WHERE chat = ? AND status = 'pending' ORDER BY id DESC"),
@@ -187,21 +211,31 @@ function createShop({ db, config, portal, yookassa = null, returnUrl = () => con
     activeClients: db.prepare("SELECT COUNT(*) AS n FROM members WHERE role = 'client' AND paid_until > ? AND status != 'paused'"),
     orderWithMember: db.prepare('SELECT o.*, m.code, m.telegram_chat, m.paid_until, m.role, m.status AS member_status FROM orders o LEFT JOIN members m ON m.id = o.member_id WHERE o.id = ?'),
     addRefund: db.prepare("UPDATE orders SET refunded = refunded + ?, refunded_at = ?, refund_id = COALESCE(?, refund_id) WHERE id = ? AND status = 'paid' AND refunded + ? <= amount"),
-    setUntil: db.prepare('UPDATE members SET paid_until = ? WHERE id = ?'),
     nextRefundAttempt: db.prepare('UPDATE orders SET refund_attempt = refund_attempt + 1 WHERE id = ?'),
     firstPaid: db.prepare("SELECT COUNT(*) AS n FROM orders o WHERE o.kind = 'paid' AND o.status = 'paid' AND o.paid_at > ? AND NOT EXISTS (SELECT 1 FROM orders p WHERE p.member_id = o.member_id AND p.kind = 'paid' AND p.status = 'paid' AND p.id < o.id)"),
     // кто брал пробный период и кто из них потом заплатил
     trialMembers: db.prepare("SELECT DISTINCT member_id FROM orders WHERE kind = 'trial' AND paid_at > ? AND member_id IS NOT NULL"),
     paidAfterTrial: db.prepare("SELECT COUNT(DISTINCT t.member_id) AS n FROM orders t JOIN orders p ON p.member_id = t.member_id AND p.kind = 'paid' AND p.status = 'paid' WHERE t.kind = 'trial' AND t.paid_at > ?"),
-    seatsUsed: db.prepare("SELECT COALESCE(SUM(device_limit), 0) AS n FROM members WHERE role = 'client' AND paid_until > ? AND id != ?"),
+    // занятые места на сервере — места покупателей с действующим сроком
+    seatsUsed: db.prepare('SELECT COUNT(*) AS n FROM slots WHERE until > ?'),
     clients: db.prepare("SELECT * FROM members WHERE role = 'client' ORDER BY paid_until DESC"),
-    expired: db.prepare("SELECT * FROM members WHERE role = 'client' AND paid_until <= ? AND status IN ('active', 'invited')"),
-    extend: db.prepare('UPDATE members SET paid_until = ?, device_limit = ?, reminder_sent = ? WHERE id = ?'),
-    setReminder: db.prepare('UPDATE members SET reminder_sent = ? WHERE id = ?'),
-    // действующий срок кончается скоро — кандидаты на напоминание
-    endingSoon: db.prepare("SELECT * FROM members WHERE role = 'client' AND status IN ('active', 'invited') AND paid_until > ? AND paid_until <= ? AND reminder_sent != 1"),
-    // срок кончился давно и не продлён — ключи удаляются
-    abandoned: db.prepare("SELECT * FROM members WHERE role = 'client' AND status = 'paused' AND paid_until <= ?"),
+    slot: db.prepare('SELECT * FROM slots WHERE id = ?'),
+    slotsOf: db.prepare('SELECT * FROM slots WHERE member_id = ? ORDER BY until, id'),
+    insertSlot: db.prepare('INSERT INTO slots (member_id, until, reminder_sent, order_id, created_at) VALUES (?, ?, ?, ?, ?)'),
+    extendSlot: db.prepare('UPDATE slots SET until = ?, reminder_sent = ?, ended = 0 WHERE id = ?'),
+    setSlotUntil: db.prepare('UPDATE slots SET until = ?, ended = ? WHERE id = ?'),
+    setSlotReminder: db.prepare('UPDATE slots SET reminder_sent = ? WHERE id = ?'),
+    endSlot: db.prepare('UPDATE slots SET ended = 1 WHERE id = ?'),
+    deleteSlot: db.prepare('DELETE FROM slots WHERE id = ?'),
+    slotsCount: db.prepare('SELECT COUNT(*) AS n FROM slots WHERE member_id = ?'),
+    // срок покупателя для списков: самый поздний из мест, «устройств» — сколько мест
+    syncMember: db.prepare("UPDATE members SET paid_until = COALESCE((SELECT MAX(until) FROM slots WHERE member_id = members.id), paid_until), device_limit = MAX(1, (SELECT COUNT(*) FROM slots WHERE member_id = members.id)) WHERE id = ? AND role = 'client'"),
+    // места с действующим сроком, который скоро кончится, — кандидаты на напоминание
+    slotsEndingSoon: db.prepare("SELECT s.*, m.code, m.telegram_chat FROM slots s JOIN members m ON m.id = s.member_id WHERE m.role = 'client' AND m.status IN ('active', 'invited') AND s.until > ? AND s.until <= ? AND s.reminder_sent != 1 ORDER BY s.member_id, s.until"),
+    // срок места кончился, а ключ ещё не выключен
+    slotsExpired: db.prepare("SELECT s.*, m.code, m.telegram_chat FROM slots s JOIN members m ON m.id = s.member_id WHERE m.role = 'client' AND s.until <= ? AND s.ended = 0 ORDER BY s.member_id, s.until"),
+    // срок кончился давно и не продлён — ключ места удаляется
+    slotsAbandoned: db.prepare("SELECT s.*, m.code, m.telegram_chat FROM slots s JOIN members m ON m.id = s.member_id WHERE m.role = 'client' AND s.until <= ? ORDER BY s.member_id, s.until"),
     trialUsed: db.prepare('SELECT 1 FROM trials WHERE chat_hash = ?'),
     addTrial: db.prepare('INSERT INTO trials (chat_hash, at) VALUES (?, ?)'),
     event: db.prepare('INSERT INTO events (at, type, member_code, details) VALUES (?, ?, ?, ?)')
@@ -278,9 +312,9 @@ function createShop({ db, config, portal, yookassa = null, returnUrl = () => con
   }
 
   // Свободные места: проданные устройства с действующим сроком. Семья в счёт не идёт.
-  // Свои устройства покупателя при продлении не считаются занятыми.
-  function seatsFree(exceptMemberId = 0) {
-    return settings().seats - q.seatsUsed.get(now(), exceptMemberId).n;
+  // Продление действующего места нового места не занимает.
+  function seatsFree() {
+    return settings().seats - q.seatsUsed.get(now()).n;
   }
 
   function seats() {
@@ -302,23 +336,41 @@ function createShop({ db, config, portal, yookassa = null, returnUrl = () => con
     return isOpen() && trial.enabled && !memberOf(chat) && !q.trialUsed.get(trialHash(chat));
   }
 
-  const describeOrder = (order) => `${periodLabel(parsePeriodKey(order.period))}, ${devicesLabel(order.devices)} — ${formatRub(order.amount)}`;
+  const describeOrder = (order) => `${periodLabel(parsePeriodKey(order.period))}, ${devicesLabel(order.devices)}${order.renew ? ' (продление)' : ''} — ${formatRub(order.amount)}`;
+
+  // Места покупателя с ключами: { id, until, number, platform, … } — для экранов бота
+  const slotsOf = (member) => (member ? portal.slotsOf(member.id) : []);
+
+  // Что продлевает заказ: 'all' — все места покупателя, номер — одно место, null — новые места
+  function renewTarget(member, target) {
+    if (target === null || target === undefined) return null;
+    const slots = slotsOf(member);
+    const chosen = target === 'all' ? slots : slots.filter((slot) => slot.id === target);
+    if (!chosen.length) throw new PortalError(409, 'Этого ключа больше нет — выберите заново');
+    return chosen;
+  }
 
   // Заказ покупателя. Прежний неоплаченный заказ этого чата отменяется: висит не больше одного.
+  // renew — продлить места ('all' или номер места), иначе — новые места на devices устройств
+  // (тогда devices берётся из заказа, при продлении — по числу мест).
   // С ЮKassa у заказа сразу есть платёж: { order, paymentUrl }; без неё — { order, payInfo }.
-  async function createOrder(chat, key, devices) {
+  async function createOrder(chat, key, devices, { renew = null } = {}) {
     if (!isOpen()) throw new PortalError(409, 'Продажа сейчас закрыта');
-    const found = priceOf(key, devices);
-    if (!found) throw new PortalError(409, 'Такого тарифа больше нет');
     const member = memberOf(chat);
-    if (seatsFree(member?.id ?? 0) < devices) throw new PortalError(409, 'Свободных мест на сервере сейчас нет');
+    const slots = renewTarget(member, renew);
+    const count = slots ? slots.length : devices;
+    const found = priceOf(key, count);
+    if (!found) throw new PortalError(409, 'Такого тарифа больше нет');
+    // новые места и продление закончившихся занимают места на сервере
+    const needed = slots ? slots.filter((slot) => slot.until <= now()).length : count;
+    if (needed && seatsFree() < needed) throw new PortalError(409, 'Свободных мест на сервере сейчас нет');
     const order = transaction(db, () => {
       for (const old of q.pendingOf.all(String(chat))) q.cancel.run(now(), old.id);
-      const id = Number(q.insertOrder.run(member?.id ?? null, String(chat), key, devices, found.price, now()).lastInsertRowid);
+      const id = Number(q.insertOrder.run(member?.id ?? null, String(chat), key, count, found.price, now(), slots ? slots.map((slot) => slot.id).join(',') : null).lastInsertRowid);
       return q.order.get(id);
     });
     event('order_created', member?.code ?? null, `№${order.id}: ${describeOrder(order)}`);
-    const who = member ? `продление ${member.code}` : 'новый покупатель';
+    const who = !member ? 'новый покупатель' : slots ? `продление ${member.code}: ${slots.map(slotName).join(', ')}` : `ещё устройства ${member.code}`;
     if (!yookassa) {
       notify(`🧾 ${b(`Заказ №${order.id}`)}: ${esc(describeOrder(order))}, ${esc(who)}.\nПосле оплаты: ${code(`/grant ${order.id}`)}, отменить: ${code(`/cancel ${order.id}`)}`, { html: true });
       return { order, payInfo: settings().payInfo };
@@ -361,25 +413,57 @@ function createShop({ db, config, portal, yookassa = null, returnUrl = () => con
     return REMIND.reduce((level, days) => (left <= days * DAY ? days : level), 0);
   }
 
-  // Продлить срок покупателя или выдать доступ новому. Внутри транзакции — только база:
-  // включение ключей на сервере (если срок кончился) идёт после.
-  function extendOrCreate({ chat, period, devices }) {
-    const member = memberOf(chat);
-    if (member) {
-      const paidUntil = addPeriod(Math.max(now(), member.paid_until ?? 0), period);
-      q.extend.run(paidUntil, devices, reminderLevel(paidUntil), member.id);
-      return { member: { ...member, paid_until: paidUntil, device_limit: devices }, inviteToken: null, wasPaused: member.status === 'paused' && member.pause_reason !== 'traffic' };
+  // Места одной строкой каждое — в экранах бота: «🔑 Ключ №1 · iPhone — до 18.12.2026 00:00 МСК»
+  // Свободные места с одним сроком — одной строкой: «🆓 Свободные места: 2 — до …»
+  function slotLines(member) {
+    const { deleteAfterDays } = settings();
+    const lines = [];
+    const free = new Map();
+    for (const slot of slotsOf(member)) {
+      if (slot.until <= now()) {
+        lines.push(`⏳ ${slotName(slot)} — срок закончился ${formatMsk(slot.until)}${slot.number ? ', ключ на паузе' : ''}. Удалится ${formatMsk(slot.until + deleteAfterDays * DAY)}, если не продлить`);
+      } else if (slot.number) {
+        lines.push(`🔑 ${slotName(slot)} — до ${b(formatMsk(slot.until))}`);
+      } else {
+        free.set(slot.until, (free.get(slot.until) ?? 0) + 1);
+      }
     }
-    const paidUntil = addPeriod(now(), period);
-    const created = portal.createMember({ role: 'client', deviceLimit: devices, telegramChat: String(chat), paidUntil, inTransaction: true });
-    q.setReminder.run(reminderLevel(paidUntil), created.member.id);
-    return { ...created, wasPaused: false };
+    for (const [until, n] of free) lines.push(`🆓 ${n === 1 ? 'Свободное место' : `Свободные места: ${n}`} — до ${b(formatMsk(until))}`);
+    return lines;
+  }
+
+  // Оплаченный заказ, пробный период: продлить места или добавить новые (новому покупателю —
+  // создать участника). Внутри транзакции — только база: включение ключей на сервере идёт после.
+  // exact — срок ровно на period, без «до полуночи» (пробный период).
+  function applyOrder({ chat, member: known = null, period, devices, renew = null, orderId = null, exact = false }) {
+    let member = known ?? memberOf(chat);
+    let inviteToken = null;
+    if (!member) {
+      ({ member, inviteToken } = portal.createMember({ role: 'client', deviceLimit: devices, telegramChat: String(chat), inTransaction: true }));
+    }
+    const wasPaused = member.status === 'paused' && member.pause_reason !== 'traffic';
+    const touched = [];
+    const existing = renew ? q.slotsOf.all(member.id).filter((slot) => renew.includes(slot.id)) : [];
+    for (const slot of existing) {
+      const until = termEnd(slot.until, period, now());
+      q.extendSlot.run(until, reminderLevel(until), slot.id);
+      touched.push({ ...slot, until, wasEnded: slot.ended === 1 || slot.until <= now() });
+    }
+    // новые места; при продлении — взамен мест, которые успели удалить, пока заказ ждал оплаты
+    const fresh = renew ? renew.length - existing.length : devices;
+    for (let k = 0; k < fresh; k++) {
+      const until = exact ? addPeriod(now(), period) : termEnd(0, period, now());
+      const id = Number(q.insertSlot.run(member.id, until, reminderLevel(until), orderId, now()).lastInsertRowid);
+      touched.push({ ...q.slot.get(id), wasEnded: false });
+    }
+    q.syncMember.run(member.id);
+    return { member: portal.memberById(member.id), inviteToken, slots: touched, wasPaused };
   }
 
   // Экран покупателю, когда доступ выдан или продлён. Кабинет открывается прямо в Telegram
   // (мини-приложение, miniApp.js); одноразовая ссылка — для браузера.
   function accessScreen({ member, inviteToken }, headline) {
-    const lines = [b(headline), `🔑 Доступ до ${b(formatMsk(member.paid_until))}, ${devicesLabel(member.device_limit)}.`];
+    const lines = [b(headline), ...slotLines(member)];
     const cabinet = miniAppUrl(config) ? [[{ text: '📱 Открыть кабинет', webApp: miniAppUrl(config) }]] : [];
     if (inviteToken) {
       lines.push('', cabinet.length
@@ -388,16 +472,30 @@ function createShop({ db, config, portal, yookassa = null, returnUrl = () => con
       const browser = { text: cabinet.length ? '🌐 Кабинет в браузере' : '🔑 Открыть кабинет', url: inviteUrl(inviteToken) };
       return { text: lines.join('\n'), buttons: [...cabinet, [browser], [{ text: '❓ Как подключиться', action: 'help' }]] };
     }
-    lines.push('', 'Ключи на ваших устройствах прежние.');
+    const free = slotsOf(member).some((slot) => !slot.device_id && slot.until > now());
+    lines.push('', free ? 'Добавьте устройство в кабинете — ключ займёт свободное место. Ключи на других устройствах прежние.' : 'Ключи на ваших устройствах прежние.');
     return { text: lines.join('\n'), buttons: [...cabinet, [{ text: '🔑 Мои ключи', action: 'keys' }]] };
   }
 
-  async function resumeIfPaused(result) {
-    if (!result.wasPaused) return;
-    try {
-      await portal.setPaused(result.member.id, false);
-    } catch (err) {
-      notify(`⚠️ ${result.member.code}: срок продлён, но ключи не включились — ${err.message}. Админка → «Возобновить»`);
+  // После продления: участник на паузе (не по трафику) — возобновить целиком; иначе включить
+  // ключи мест, у которых срок уже кончился
+  async function resumeAfter(result) {
+    const { member } = result;
+    if (result.wasPaused) {
+      try {
+        await portal.setPaused(member.id, false);
+      } catch (err) {
+        notify(`⚠️ ${member.code}: срок продлён, но ключи не включились — ${err.message}. Админка → «Возобновить»`);
+      }
+      return;
+    }
+    for (const slot of result.slots) {
+      if (!slot.wasEnded || !slot.device_id) continue;
+      try {
+        await portal.setDeviceEnabled(member.id, slot.device_id, true);
+      } catch (err) {
+        notify(`⚠️ ${member.code}: срок ключа продлён, но ключ не включился — ${err.message}. Админка → «Пауза», затем «Возобновить»`);
+      }
     }
   }
 
@@ -418,15 +516,17 @@ function createShop({ db, config, portal, yookassa = null, returnUrl = () => con
     if (!payable) throw new PortalError(404, `Неоплаченного заказа №${orderId} нет`);
     const period = parsePeriodKey(order.period);
     const result = transaction(db, () => {
-      const granted = extendOrCreate({ chat: order.chat, period, devices: order.devices });
+      const granted = applyOrder({ chat: order.chat, period, devices: order.devices, renew: idList(order.renew), orderId: order.id });
       if (q.payOrder.run(method, now(), granted.member.id, order.id).changes === 0) throw new PortalError(409, `Заказ №${order.id} уже закрыт`);
       return granted;
     });
-    await resumeIfPaused(result);
+    await resumeAfter(result);
+    const until = Math.max(...result.slots.map((slot) => slot.until));
     event('order_paid', result.member.code, `№${order.id}: ${describeOrder(order)}`);
-    notify(`✅ ${b(`Заказ №${order.id} оплачен`)}${method === 'yookassa' ? ' через ЮKassa' : ''}: ${code(result.member.code)}, ${esc(describeOrder(order))}, до ${formatMsk(result.member.paid_until)}`, { html: true });
-    await tell(order.chat, accessScreen(result, result.inviteToken ? '✅ Оплата получена, спасибо!' : '✅ Оплата получена, доступ продлён.'));
-    return { order, member: result.member };
+    notify(`✅ ${b(`Заказ №${order.id} оплачен`)}${method === 'yookassa' ? ' через ЮKassa' : ''}: ${code(result.member.code)}, ${esc(describeOrder(order))}, до ${formatMsk(until)}`, { html: true });
+    const headline = result.inviteToken ? '✅ Оплата получена, спасибо!' : order.renew ? '✅ Оплата получена, доступ продлён.' : '✅ Оплата получена, устройства добавлены.';
+    await tell(order.chat, accessScreen(result, headline));
+    return { order, member: result.member, until };
   }
 
   // Пробный период: сразу, без заказа и админа
@@ -437,7 +537,7 @@ function createShop({ db, config, portal, yookassa = null, returnUrl = () => con
     const period = { count: trial.days, unit: 'day' };
     const result = transaction(db, () => {
       q.addTrial.run(trialHash(chat), now());
-      const created = extendOrCreate({ chat, period, devices: trial.devices });
+      const created = applyOrder({ chat, period, devices: trial.devices, exact: true });
       q.insertTrial.run(created.member.id, periodKey(period), trial.devices, now(), now());
       return created;
     });
@@ -446,15 +546,15 @@ function createShop({ db, config, portal, yookassa = null, returnUrl = () => con
     return accessScreen(result, `🎁 Пробный доступ на ${periodLabel(period)}, ${devicesLabel(trial.devices)}.`);
   }
 
-  // Подарок или компенсация от админа: дни к сроку покупателя
+  // Подарок или компенсация от админа: дни к сроку всех мест покупателя
   async function gift(code, days) {
     const member = portal.memberByCode(code);
     if (!member || member.role !== 'client') throw new PortalError(404, `Покупатель ${code} не найден`);
     const count = intField(days, { min: 1, max: 365, name: 'Дней' });
-    const paidUntil = addPeriod(Math.max(now(), member.paid_until ?? 0), { count, unit: 'day' });
-    q.extend.run(paidUntil, member.device_limit, reminderLevel(paidUntil), member.id);
-    const result = { member: { ...member, paid_until: paidUntil }, inviteToken: null, wasPaused: member.status === 'paused' && member.pause_reason !== 'traffic' };
-    await resumeIfPaused(result);
+    const slots = q.slotsOf.all(member.id);
+    if (!slots.length) throw new PortalError(409, `У ${member.code} нет оплаченных мест`);
+    const result = transaction(db, () => applyOrder({ member, period: { count, unit: 'day' }, devices: 0, renew: slots.map((slot) => slot.id) }));
+    await resumeAfter(result);
     event('gift', member.code, `${count} ${plural(count, UNITS.day.words)}`);
     await tell(member.telegram_chat, accessScreen(result, `🎁 Вам добавлено ${count} ${plural(count, UNITS.day.words)}.`));
     return result.member;
@@ -462,8 +562,23 @@ function createShop({ db, config, portal, yookassa = null, returnUrl = () => con
 
   // Возврат денег по оплаченному заказу. amount — рубли, по умолчанию всё, что ещё не вернули.
   // ЮKassa — через API; ручная оплата — деньги админ возвращает сам, здесь только учёт.
-  // Полный возврат уменьшает срок покупателя на срок заказа; если срок вышел — ключи на паузу.
-  // Частичный (компенсация) срок не трогает.
+  // Полный возврат уменьшает срок мест заказа: новые места заканчиваются сразу, продлённые —
+  // теряют срок заказа; у заказов до мест — все места покупателя, как было с общим сроком.
+  // Срок места вышел — его ключ на паузу. Частичный (компенсация) срок не трогает.
+  function refundSlots(order) {
+    if (!order.member_id) return [];
+    const period = parsePeriodKey(order.period);
+    const all = q.slotsOf.all(order.member_id);
+    const renew = idList(order.renew);
+    const own = all.filter((slot) => slot.order_id === order.id);
+    // свои места заказа (новые или взамен удалённых) заканчиваются сразу, продлённые — теряют срок заказа
+    const ended = own.map((slot) => ({ slot, until: Math.min(slot.until, now()) }));
+    if (renew) return [...all.filter((slot) => renew.includes(slot.id) && slot.order_id !== order.id).map((slot) => ({ slot, until: Math.max(now(), termBack(slot.until, period)) })), ...ended];
+    if (own.length) return ended;
+    const shift = addPeriod(order.paid_at, period) - order.paid_at;
+    return all.map((slot) => ({ slot, until: Math.max(now(), slot.until - shift) }));
+  }
+
   function refundPreview(orderId, value = null) {
     const order = q.orderWithMember.get(orderId);
     if (!order || order.status !== 'paid' || order.kind !== 'paid') throw new PortalError(404, `Оплаченного заказа №${orderId} нет`);
@@ -473,14 +588,15 @@ function createShop({ db, config, portal, yookassa = null, returnUrl = () => con
     if (order.payment_id && !yookassa) throw new PortalError(409, 'Заказ оплачен через ЮKassa, а ЮKassa сейчас не подключена: верните деньги в личном кабинете ЮKassa');
     const full = amount === left;
     const period = parsePeriodKey(order.period);
-    const shift = addPeriod(order.paid_at, period) - order.paid_at;
-    const newUntil = full && order.member_id && order.paid_until ? Math.max(now(), order.paid_until - shift) : null;
-    return { order, amount, full, newUntil, viaYooKassa: Boolean(order.payment_id), periodLabel: periodLabel(period) };
+    // slots — места и их сроки после возврата; newUntil — самый поздний из них (null — срок не меняется)
+    const slots = full ? refundSlots(order) : [];
+    const newUntil = slots.length ? Math.max(...slots.map((x) => x.until)) : null;
+    return { order, amount, full, slots, newUntil, viaYooKassa: Boolean(order.payment_id), periodLabel: periodLabel(period) };
   }
 
   async function refundOrder(orderId, value = null) {
     const preview = refundPreview(orderId, value);
-    const { order, amount, full, newUntil } = preview;
+    const { order, amount, full, slots, newUntil } = preview;
     let refundId = null;
     let pending = false;
     if (preview.viaYooKassa) {
@@ -506,21 +622,24 @@ function createShop({ db, config, portal, yookassa = null, returnUrl = () => con
     }
     if (q.addRefund.run(amount, now(), refundId, order.id, amount).changes === 0) throw new PortalError(409, `Возврат по заказу №${order.id} уже учтён`);
     let paused = false;
-    if (newUntil !== null) {
-      q.setUntil.run(newUntil, order.member_id);
-      if (newUntil <= now() && order.member_status !== 'paused') {
-        try {
-          await portal.setPaused(order.member_id, true, { reason: 'expired' });
-          paused = true;
-        } catch (err) {
-          notify(`⚠️ ${order.code}: срок уменьшен, но ключи не встали на паузу — ${err.message}. Уборка повторит через 10 минут`);
-        }
+    for (const { slot, until } of slots) {
+      const ended = until <= now();
+      // ended = 0: ключ выключит уборка, если здесь не получится
+      q.setSlotUntil.run(until, 0, slot.id);
+      if (!ended) continue;
+      try {
+        if (slot.device_id) await portal.setDeviceEnabled(order.member_id, slot.device_id, false);
+        q.endSlot.run(slot.id);
+        paused = true;
+      } catch (err) {
+        notify(`⚠️ ${order.code}: срок уменьшен, но ключ не встал на паузу — ${err.message}. Уборка повторит через 10 минут`);
       }
     }
+    if (slots.length) q.syncMember.run(order.member_id);
     event('order_refunded', order.code, `№${order.id}: ${formatRub(amount)}${full ? ', полностью' : ''}`);
     const lines = [`💸 ${b(`Вам вернули ${formatRub(amount)}`)} по заказу №${order.id}.`];
     if (preview.viaYooKassa) lines.push('Деньги придут туда, откуда была оплата, — обычно за несколько дней, срок зависит от банка.');
-    if (newUntil !== null) lines.push(newUntil <= now() ? 'Доступ по этому заказу закончен, ключи на паузе.' : `Срок доступа уменьшен: теперь до ${formatMsk(newUntil)}.`);
+    if (newUntil !== null) lines.push(newUntil <= now() ? 'Доступ по этому заказу закончен, ключи на паузе.' : 'Срок доступа уменьшен:', ...(newUntil <= now() ? [] : slotLines(portal.memberById(order.member_id))));
     await tell(order.telegram_chat, { text: lines.join('\n'), buttons: [[{ text: '🔑 Мой доступ', action: 'keys' }]] });
     return { ...preview, refundId, pending, paused };
   }
@@ -642,51 +761,112 @@ function createShop({ db, config, portal, yookassa = null, returnUrl = () => con
 
   const renewButton = [[{ text: '🛒 Продлить', action: 'buy' }]];
 
-  // Раз в 10 минут (index.js): брошенные заказы — отменить; скоро конец срока — напомнить;
-  // срок кончился — ключи на паузу; давно кончился и не продлён — ключи удалить
+  // Сообщение покупателю по нескольким местам сразу: заголовок, по строке на место, хвост
+  const grouped = (rows) => {
+    const byMember = new Map();
+    for (const row of rows) byMember.set(row.member_id, [...(byMember.get(row.member_id) ?? []), row]);
+    return [...byMember.values()];
+  };
+  const withKeys = (memberId, slots) => {
+    const named = new Map(portal.slotsOf(memberId).map((slot) => [slot.id, slot]));
+    return slots.map((slot) => ({ ...slot, ...named.get(slot.id) }));
+  };
+  const when = (level) => (level === 1 ? 'завтра' : `через ${level} ${plural(level, UNITS.day.words)}`);
+
+  // Раз в 10 минут (index.js): брошенные заказы — отменить; скоро конец срока места — напомнить;
+  // срок кончился — ключ места на паузу; давно кончился и не продлён — ключ удалить, а когда
+  // мест не осталось — и участника. Сообщения — одно на покупателя за раз, со всеми его местами.
   async function sweep() {
     for (const order of q.stale.all(now() - ORDER_TTL)) {
       q.cancel.run(now(), order.id);
       event('order_cancelled', null, `№${order.id}: не оплачен за 3 дня`);
     }
 
-    for (const member of q.endingSoon.all(now(), now() + REMIND[0] * DAY)) {
-      const level = reminderLevel(member.paid_until);
-      if (!level || (member.reminder_sent && member.reminder_sent <= level)) continue;
-      q.setReminder.run(level, member.id);
-      event('reminder_sent', member.code, `за ${level} ${plural(level, UNITS.day.words)}`);
-      await tell(member.telegram_chat, {
-        text: `⏳ ${b(`Доступ заканчивается ${level === 1 ? 'завтра' : `через ${level} ${plural(level, UNITS.day.words)}`}`)} — ${formatMsk(member.paid_until)}. Продлите, чтобы VPN не отключился: новый срок прибавится к текущему.`,
+    const due = [];
+    for (const slot of q.slotsEndingSoon.all(now(), now() + REMIND[0] * DAY)) {
+      const level = reminderLevel(slot.until);
+      if (!level || (slot.reminder_sent && slot.reminder_sent <= level)) continue;
+      q.setSlotReminder.run(level, slot.id);
+      due.push({ ...slot, level });
+    }
+    for (const rows of grouped(due)) {
+      const slots = withKeys(rows[0].member_id, rows);
+      event('reminder_sent', rows[0].code, slots.map((slot) => `${slotName(slot)}: за ${slot.level} ${plural(slot.level, UNITS.day.words)}`).join('; '));
+      await tell(rows[0].telegram_chat, {
+        text: [
+          `⏳ ${b(slots.length === 1 ? `Срок заканчивается ${when(slots[0].level)}` : 'Скоро конец срока')}`,
+          ...slots.map((slot) => `${slotName(slot)} — ${slots.length === 1 ? '' : `${when(slot.level)}, `}до ${formatMsk(slot.until)}`),
+          '',
+          'Продлите, чтобы VPN не отключился: новый срок прибавится к текущему.'
+        ].join('\n'),
         buttons: renewButton
       });
     }
 
     const { deleteAfterDays } = settings();
-    for (const member of q.expired.all(now())) {
-      try {
-        await portal.setPaused(member.id, true, { reason: 'expired' });
-      } catch (err) {
-        log.error(`Пауза ${member.code} по сроку не удалась:`, err.message);
-        continue;
+    const ended = [];
+    for (const slot of q.slotsExpired.all(now())) {
+      if (slot.device_id) {
+        try {
+          await portal.setDeviceEnabled(slot.member_id, slot.device_id, false);
+        } catch (err) {
+          log.error(`Пауза ключа ${slot.code} по сроку не удалась:`, err.message);
+          continue;
+        }
       }
-      event('access_expired', member.code);
-      await tell(member.telegram_chat, {
-        text: `⏳ ${b('Срок доступа закончился, ключи на паузе.')} Продлите доступ — ключи на устройствах заработают снова, перенастраивать ничего не нужно. Если не продлить до ${formatMsk(member.paid_until + deleteAfterDays * DAY)}, ключи будут удалены.`,
+      q.endSlot.run(slot.id);
+      ended.push(slot);
+    }
+    for (const rows of grouped(ended)) {
+      const slots = withKeys(rows[0].member_id, rows);
+      event('access_expired', rows[0].code, slots.map(slotName).join(', '));
+      const keys = slots.filter((slot) => slot.number);
+      await tell(rows[0].telegram_chat, {
+        text: [
+          `⏳ ${b(keys.length ? `Срок закончился, ${keys.length === 1 ? 'ключ' : 'ключи'} на паузе` : 'Срок закончился')}`,
+          ...slots.map((slot) => `${slotName(slot)} — удалится ${formatMsk(slot.until + deleteAfterDays * DAY)}, если не продлить`),
+          '',
+          keys.length ? 'Продлите — ключи на устройствах заработают снова, перенастраивать ничего не нужно.' : 'Продлите, чтобы добавить устройство.'
+        ].join('\n'),
         buttons: renewButton
       });
     }
 
-    for (const member of q.abandoned.all(now() - deleteAfterDays * DAY)) {
-      try {
-        await portal.deleteMember(member.id);
-      } catch (err) {
-        log.error(`Удаление ${member.code} по сроку не удалось:`, err.message);
+    const abandoned = q.slotsAbandoned.all(now() - deleteAfterDays * DAY);
+    for (const rows of grouped(abandoned)) {
+      const first = rows[0];
+      const slots = withKeys(first.member_id, rows);
+      const removed = [];
+      for (const slot of slots) {
+        try {
+          if (slot.device_id) await portal.dropDevice(slot.member_id, slot.device_id);
+        } catch (err) {
+          log.error(`Удаление ключа ${first.code} по сроку не удалось:`, err.message);
+          continue;
+        }
+        q.deleteSlot.run(slot.id);
+        removed.push(slot);
+      }
+      if (!removed.length) continue;
+      if (q.slotsCount.get(first.member_id).n === 0) {
+        try {
+          await portal.deleteMember(first.member_id);
+        } catch (err) {
+          log.error(`Удаление ${first.code} по сроку не удалось:`, err.message);
+          continue;
+        }
+        event('access_deleted', first.code, `срок кончился ${formatMsk(Math.max(...removed.map((slot) => slot.until)))}`);
+        await tell(first.telegram_chat, {
+          text: `🗑 ${b('Доступ не продлили, ключи удалены.')} Купить доступ снова можно в любой момент — ключи будут новые.`,
+          buttons: [[{ text: '🛒 Купить', action: 'buy' }]]
+        });
         continue;
       }
-      event('access_deleted', member.code, `срок кончился ${formatMsk(member.paid_until)}`);
-      await tell(member.telegram_chat, {
-        text: `🗑 ${b('Доступ не продлили, ключи удалены.')} Купить доступ снова можно в любой момент — ключи будут новые.`,
-        buttons: [[{ text: '🛒 Купить', action: 'buy' }]]
+      q.syncMember.run(first.member_id);
+      event('access_deleted', first.code, removed.map(slotName).join(', '));
+      await tell(first.telegram_chat, {
+        text: [`🗑 ${b('Срок не продлили — удалено:')}`, ...removed.map(slotName), '', 'Остальные ключи работают как прежде.'].join('\n'),
+        buttons: [[{ text: '🔑 Мой доступ', action: 'keys' }]]
       });
     }
   }
@@ -703,7 +883,7 @@ function createShop({ db, config, portal, yookassa = null, returnUrl = () => con
       pending: q.pending.all(),
       recent: q.recent.all(20),
       report: salesReport(30),
-      clients: q.clients.all(),
+      clients: q.clients.all().map((member) => ({ ...member, slots: portal.slotsOf(member.id) })),
       month: { orders: month.n, sum: month.sum },
       payments
     };
@@ -733,6 +913,8 @@ function createShop({ db, config, portal, yookassa = null, returnUrl = () => con
     gift,
     relink,
     memberOf,
+    slotsOf,
+    slotLines,
     poll,
     paymentNotice,
     sweep,
@@ -741,4 +923,4 @@ function createShop({ db, config, portal, yookassa = null, returnUrl = () => con
   };
 }
 
-export { createShop, addPeriod, formatMsk, formatRub, plural, periodLabel, devicesLabel, parsePeriodKey, DEVICE_OPTIONS, MAX_PERIODS, PAY_INFO_MAX };
+export { createShop, addPeriod, termEnd, slotName, formatMsk, formatRub, plural, periodLabel, devicesLabel, parsePeriodKey, DEVICE_OPTIONS, MAX_PERIODS, PAY_INFO_MAX };
