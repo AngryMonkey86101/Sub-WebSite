@@ -113,7 +113,7 @@ function createBotCommands({ portal, config, watchdog = null, heartbeat = null, 
     // код — моноширинным: нажатие копирует его для /relink и /gift
     const rows = list.map((m) => {
       const devices = m.role === 'admin' ? m.devices.length : `${m.devices.length}/${m.device_limit}`;
-      const role = m.role === 'admin' ? ' · админ' : m.role === 'client' ? ` · покупатель до ${formatMsk(m.paid_until)}` : '';
+      const role = m.role === 'admin' ? ' · админ' : '';
       return `${code(m.code)}${esc(role)} · ${esc(memberState(m))} · устройств ${devices}`;
     });
     return [b(`👥 Участники: ${list.length}`), ...rows].join('\n');
@@ -174,7 +174,7 @@ function createBotCommands({ portal, config, watchdog = null, heartbeat = null, 
   async function gift(args) {
     if (!args[0] || !args[1]) return 'Укажите код покупателя и число дней: /gift K7M2 7. Коды — в /members.';
     const member = await shop.gift(args[0].toUpperCase(), args[1]);
-    return `🎁 ${code(member.code)}: доступ до ${b(formatMsk(member.paid_until))}.`;
+    return [`🎁 ${b(`${member.code}: дни добавлены`)}`, ...shop.slotLines(member)].join('\n');
   }
 
   // Возврат денег — необратим, поэтому сначала показывается, что произойдёт

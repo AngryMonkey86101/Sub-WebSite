@@ -385,10 +385,18 @@ const EVENT_LABELS = {
   promo_settings: 'изменена реклама в боте'
 };
 
+// Сроки мест покупателя: «№1 до 18.12.2026 00:00 МСК · №2 закончился … · место до …»
+const slotsSummary = (slots, nowMs) =>
+  slots.map((slot) => `${slot.number ? `№${slot.number}` : 'место'} ${slot.until > nowMs ? `до ${formatMsk(slot.until)}` : `закончился ${formatMsk(slot.until)}`}`).join(' · ');
+
 function memberState(member, nowMs = Date.now()) {
   if (member.status === 'paused' && member.pause_reason === 'traffic') {
     const end = periodEnd(member.traffic_paused);
     return `на паузе: исчерпан лимит трафика, включится ${end ? shortDate(end) : 'с новым периодом'}`;
+  }
+  if (member.role === 'client' && member.slots?.length) {
+    const state = member.status === 'paused' ? 'на паузе' : 'покупатель';
+    return `${state}: ${slotsSummary(member.slots, nowMs)}${member.hasAccess ? '' : ', кабинет не открыт'}`;
   }
   if (member.role === 'client' && member.paid_until) {
     // пауза при оплаченном сроке — пауза админа, а не конец срока
@@ -788,7 +796,7 @@ function shopPage({ admin, shop, notice, nowMs }) {
       ${shop.clients.length
         ? html`<ul class="devices compact">${shop.clients.map((m) => html`
         <li><b>${m.code}</b> · ${devicesLabel(m.slots.length || m.device_limit)} <span class="status">${m.slots.length
-          ? m.slots.map((slot) => `${slot.number ? `№${slot.number}` : 'место'} ${slot.until > nowMs ? `до ${formatMsk(slot.until)}` : `закончился ${formatMsk(slot.until)}`}`).join(' · ')
+          ? slotsSummary(m.slots, nowMs)
           : `закончился ${formatMsk(m.paid_until)}`}${m.status === 'paused' ? ' · на паузе' : ''}</span></li>`)}</ul>
       <p class="muted">У каждого ключа свой срок. Пауза и удаление — в админке, раздел «Участники». Добавить дни всем ключам покупателя — /gift КОД ДНИ в боте.</p>`
         : html`<p class="muted">Покупателей пока нет.</p>`}

@@ -240,7 +240,7 @@ test('продажи: заказ кнопками бота, оплата вру�
   assert.equal(portal.memberByToken(portal.activateInvite(buttons(relinked).find((b) => b.url).url.split('/i/')[1]).accessToken).code, client.code);
 
   assert.match(await admin.run('/shop', []), /Продажа открыта\nМеста: занято 2 из 100, свободно 98\nПокупателей: 1, ждут оплаты: 0\nЗа 30 дней: 4 оплат на 1 900 ₽/);
-  assert.match(await admin.run('/members', []), new RegExp(`${client.code} · покупатель до 17\\.03\\.2027 00:00 МСК`));
+  assert.match(await admin.run('/members', []), new RegExp(`${client.code} · покупатель: №1 до 07\\.02\\.2027 00:00 МСК · №2 до 17\\.03\\.2027 00:00 МСК · устройств 2/2`), 'у каждого ключа свой срок');
   assert.ok(now() > 0);
   db.close();
 });
@@ -360,7 +360,7 @@ test('продажи: у каждого ключа свой срок — пау�
   assert.match(await admin.run('/gift', []), /Укажите код покупателя/);
   assert.match(await admin.run('/gift', ['ZZZZ', '3']), /Покупатель ZZZZ не найден/);
   assert.match(await admin.run('/gift', [member.code, 'abc']), /Дней: целое число/);
-  assert.match(await admin.run('/gift', [member.code.toLowerCase(), '3']), new RegExp(`🎁 ${member.code}: доступ до 25\\.11\\.2026 00:00 МСК`));
+  assert.match(await admin.run('/gift', [member.code.toLowerCase(), '3']), new RegExp(`🎁 ${member.code}: дни добавлены\\n🔑 Ключ №1 · iPhone / iPad — до 25\\.11\\.2026 00:00 МСК\\n🔑 Ключ №2 · Android — до 20\\.11\\.2026 00:00 МСК`));
   assert.match(delivered.at(-1).text, /Вам добавлено 3 дня[\s\S]*Ключ №1 · iPhone \/ iPad — до 25\.11\.2026 00:00 МСК[\s\S]*Ключ №2 · Android — до 20\.11\.2026 00:00 МСК/);
   assert.equal(peer(second).status, 'active');
   db.close();
@@ -637,7 +637,7 @@ test('админка: раздел «Продажи» — тарифы, наст
 
     // участник-покупатель в общей админке — со сроком, без поля «Лимит»: устройств столько, сколько мест
     const adminPage = await (await get('/admin')).text();
-    assert.match(adminPage, /покупатель до \d\d\.\d\d\.\d{4} \d\d:\d\d МСК, кабинет не открыт/);
+    assert.match(adminPage, /покупатель: место до 07\.12\.2026 00:00 МСК · место до 07\.12\.2026 00:00 МСК, кабинет не открыт/);
     const buyer = portal.memberByChat('1200');
     assert.ok(!adminPage.includes(`/admin/members/${buyer.id}/limit`));
 
@@ -733,7 +733,7 @@ test('бот: экраны и ответы админу — карточки HTM
   valid(delivered.at(-1).html, 'доступ выдан');
   const members = await rawAdmin.run('/members', []);
   valid(members, '/members');
-  assert.match(members, /<b>👥 Участники: 1<\/b>\n<code>\w{4}<\/code> · покупатель до/);
+  assert.match(members, /<b>👥 Участники: 1<\/b>\n<code>\w{4}<\/code> · покупатель: место до 07\.12\.2026 00:00 МСК/);
   for (const [command, args] of [['/help', []], ['/shop', []], ['/sales', []], ['/gift', ['<b>', '3']], ['/relink', ['<x>']], ['/refund', [String(id)]], ['/cancel', ['1']]]) {
     valid(await rawAdmin.run(command, args), command);
   }

@@ -598,6 +598,8 @@ function createPortal({ db, config, amnezia, notify, now = () => Date.now() }) {
       return {
         ...member,
         devices: q.devicesOf.all(member.id),
+        // у покупателя срок свой у каждого места (ключа)
+        slots: member.role === 'client' ? q.slotsOf.all(member.id) : null,
         hasAccess: q.countTokensOf.get(member.id).n > 0,
         inviteExpiresAt: inviteExpiresAt > time ? inviteExpiresAt : null
       };
