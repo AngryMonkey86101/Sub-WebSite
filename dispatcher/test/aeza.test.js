@@ -257,7 +257,8 @@ test('переезд: Zomro не собрала сервер — заказ уд
     backups: { latest: () => ({ file: join(dataDir, 'latest.age') }) },
     monitor: { probeServer: async () => ({ ok: true, ip: '77.1.2.3' }) },
     notify: async (t) => notes.push(t),
-    run: async () => ({ code: 1, stdout: Buffer.alloc(0), stderr: 'стоп после выбора хостера' }),
+    // проверка готовности SSH проходит, первая настоящая команда — стоп
+    run: async (cmd, args) => (/cloud-init/.test(args.at(-1)) ? { code: 0, stdout: Buffer.alloc(0), stderr: '' } : { code: 1, stdout: Buffer.alloc(0), stderr: 'стоп после выбора хостера' }),
     lookup: async () => ({ address: '77.1.2.3' }),
     now, wait, tcp: async () => true, out: () => {}
   });
@@ -375,7 +376,8 @@ async function cancelWorld(name, mode) {
     backups: { latest: () => ({ file: join(dataDir, 'latest.age') }) },
     monitor: { probeServer: async () => ({ ok: true, ip: '77.1.2.3' }) },
     notify: async (t) => notes.push(t),
-    run: async () => ({ code: 1, stdout: Buffer.alloc(0), stderr: 'стоп после выбора хостера' }),
+    // проверка готовности SSH проходит, первая настоящая команда — стоп
+    run: async (cmd, args) => (/cloud-init/.test(args.at(-1)) ? { code: 0, stdout: Buffer.alloc(0), stderr: '' } : { code: 1, stdout: Buffer.alloc(0), stderr: 'стоп после выбора хостера' }),
     lookup: async () => ({ address: '77.1.2.3' }),
     now, wait, tcp: async () => true, out: () => {}
   });
