@@ -36,7 +36,8 @@ const open = (keyText, data) => {
   return spawnSync('age', ['-d', '-i', file], { input: data });
 };
 
-async function world(name, { oldOurs = false, probe = 'up', freeze = 'direct', failAt = null } = {}) {
+// ssh(script) — подмена ответа ssh на новом сервере (вернуть undefined — обычный ответ)
+async function world(name, { oldOurs = false, probe = 'up', freeze = 'direct', failAt = null, ssh = null } = {}) {
   const dataDir = join(dir, name);
   const config = loadConfig({ PORTAL_HOST: 'proxyizi.duckdns.org', DATA_DIR: dataDir, ZOMRO_USER: 'u@example.com', ZOMRO_PASSWORD: 'p' });
   const keys = await ensureKeys(dataDir);
@@ -90,6 +91,8 @@ async function world(name, { oldOurs = false, probe = 'up', freeze = 'direct', f
     if (command !== 'sshpass') return realRun(command, args, options);
     const script = args.at(-1);
     log.root.push({ args, script, input: options.input ? Buffer.from(options.input) : null, password: options.env?.SSHPASS });
+    const forced = ssh?.(script);
+    if (forced) return forced;
     if (/restore\.sh --prepare/.test(script)) {
       if (failAt === 'prepare') return { code: 1, stdout: Buffer.from('▶ 4/7 AmneziaWG\n'), stderr: '✗ Остановка на шаге «4/7 AmneziaWG»' };
       return { code: 0, stdout: Buffer.from('▶ 1/7 Программы\n  ✓ Docker version 27\nСервер подготовлен.\n'), stderr: '' };
@@ -104,7 +107,7 @@ async function world(name, { oldOurs = false, probe = 'up', freeze = 'direct', f
   };
   const lookup = async () => ({ address: namesMoved ? NEW_IP : OLD_IP });
   const migration = createMigration({ config, keys, state, clouds: { zomro: cloud }, backups, monitor, orders, notify: async (t) => log.notes.push(t), run, lookup, now, wait, tcp: async () => true, out: (l) => log.out.push(l) });
-  return { config, keys, state, orders, log, migration, dataDir, plainLatest, plainFinal };
+  return { config, keys, state, orders, log, migration, dataDir, plainLatest, plainFinal, now };
 }
 
 // загрузки на новый сервер по порядку: имя файла → содержимое
@@ -201,6 +204,51 @@ test('переезд: сбой подготовки — старый не тро
   assert.match(w.log.notes.at(-1), /⚠️ Переезд по команде не удался[\s\S]*Старый сервер не трогали/);
   assert.equal(w.state.get('migration').phase, 'failed');
   assert.equal(existsSync(join(w.dataDir, 'migration.lock')), false);
+});
+
+// ssh не дошёл до сервера: команда не выполнялась
+const REFUSED = { code: 255, stdout: Buffer.alloc(0), stderr: 'ssh: connect to host 203.0.113.9 port 22: Connection refused\r\n' };
+
+test('переезд: сразу после сборки сервер перезагрузился — SSH ждём, prepare повторяем, сервер не удаляем', { skip: !HAS_TOOLS && 'нет age' }, async () => {
+  // 22.11.2026: «Сервер готов» через минуту, загрузки прошли, а restore.sh --prepare — Connection refused
+  let settleFails = 2;
+  let prepareFails = 3;
+  const w = await world('reboot-after-build', {
+    ssh: (script) => {
+      if (/cloud-init/.test(script) && settleFails > 0) {
+        settleFails -= 1;
+        return settleFails ? REFUSED : { code: 5, stdout: Buffer.alloc(0), stderr: '' };
+      }
+      if (/restore\.sh --prepare/.test(script) && prepareFails > 0) {
+        prepareFails -= 1;
+        return REFUSED;
+      }
+      return undefined;
+    }
+  });
+  const r = await w.migration.migrate();
+  assert.equal(r.ok, true, w.log.out.join('\n'));
+  assert.deepEqual(w.log.removed, [], 'новый сервер не удалён');
+  const settle = w.log.root.findIndex((c) => /cloud-init status --wait/.test(c.script));
+  assert.ok(settle >= 0 && settle < w.log.root.findIndex((c) => /authorized_keys/.test(c.script)), 'готовность SSH — до первых команд');
+  assert.equal(w.log.root.filter((c) => /cloud-init status --wait/.test(c.script)).length, 3);
+  assert.equal(w.log.root.filter((c) => /restore\.sh --prepare/.test(c.script)).length, 4, 'prepare повторён после отказа в соединении');
+  assert.ok(w.log.out.some((l) => /SSH 203\.0\.113\.9 не принял соединение \(ssh: connect to host 203\.0\.113\.9 port 22: Connection refused\)/.test(l)));
+});
+
+test('переезд: SSH нового сервера так и не вернулся — по истечении ZOMRO_SSH_MIN откат, новый удалён', { skip: !HAS_TOOLS && 'нет age' }, async () => {
+  const w = await world('ssh-gone', { ssh: (script) => (/restore\.sh --prepare/.test(script) ? REFUSED : undefined) });
+  const t0 = w.now();
+  await assert.rejects(w.migration.migrate(), /restore\.sh --prepare: код 255[\s\S]*Connection refused/);
+  assert.ok(w.now() - t0 >= w.config.zomro.sshTimeout, 'сдались не раньше ZOMRO_SSH_MIN');
+  assert.deepEqual(w.log.removed, ['7300001']);
+  assert.match(w.log.notes.at(-1), /Старый сервер не трогали/);
+});
+
+test('переезд: сбой самой команды на сервере не повторяется', { skip: !HAS_TOOLS && 'нет age' }, async () => {
+  const w = await world('no-retry', { failAt: 'prepare' });
+  await assert.rejects(w.migration.migrate(), /код 1/);
+  assert.equal(w.log.root.filter((c) => /restore\.sh --prepare/.test(c.script)).length, 1);
 });
 
 test('переезд: сбой до переноса имён — старый разморожен, новый удалён', { skip: !HAS_TOOLS && 'нет age' }, async () => {

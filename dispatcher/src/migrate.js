@@ -8,7 +8,8 @@ import { stopper, CancelledError } from './cancel.js';
 // Переезд на новый сервер (docs/PLAN.md, раздел 15, этапы 5–7). Один и тот же порядок и для
 // переезда по команде, и для плановой смены, и для аварии:
 //
-//   1. заказать сервер у Zomro, дождаться сборки и SSH;
+//   1. заказать сервер у Zomro, дождаться сборки и SSH: порт 22 открыт, root входит по паролю,
+//      cloud-init закончил первую настройку (сразу после сборки сервер ещё может перезагрузиться);
 //   2. подготовить его заранее — restore.sh --prepare с последним бэкапом: программы, фаервол,
 //      AmneziaWG с прежними ключами. Портал, бот и имена DuckDNS пока на старом сервере;
 //   3. заморозить старый (freeze): бот, оплаты, сторож DuckDNS и сайт останавливаются, VPN
@@ -81,8 +82,54 @@ function createMigration({ config, keys, state, clouds = {}, backups, monitor, o
     ], { env: { ...process.env, SSHPASS: server.password }, input, timeoutMs });
   }
 
+  // ssh упал, не дойдя до команды: сервер не принял соединение. У нового сервера так бывает в первые
+  // минуты — первая загрузка образа кончается перезагрузкой или перезапуском sshd (cloud-init ставит
+  // обновления). Команда при этом не выполнялась — повторить её можно, не боясь сделать дважды.
+  const UNREACHABLE = /connect to host \S+ port \d+: (Connection refused|Connection timed out|No route to host|Network is unreachable)|kex_exchange_identification|ssh_exchange_identification|Connection (reset|closed) by \S+ port \d+|Connection timed out during banner exchange/i;
+  const unreachable = (res) => res.code === 255 && UNREACHABLE.test(String(res.stderr ?? ''));
+  const why = (res) => String(res.stderr ?? '').trim().split('\n').filter(Boolean).at(-1) ?? `код ${res.code}`;
+  const reconnectMs = (server) => config[server.provider]?.sshTimeout ?? 15 * MIN;
+
+  // ждать, пока порт 22 снова откроется, и ещё немного — чтобы sshd успел подняться целиком
+  async function waitPort(server, deadline) {
+    await wait(15000);
+    while (!(await tcp(server.ip, 22))) {
+      if (now() >= deadline) return false;
+      await wait(10000);
+    }
+    await wait(15000);
+    return true;
+  }
+
+  // rootSsh, но сервер, не принявший соединение, получает время до reconnectMs: ждём порт 22 и
+  // повторяем. Сбой самой команды (код не 255 или обрыв посреди работы) не повторяется.
+  async function rootSshRetry(server, script, options) {
+    const deadline = now() + reconnectMs(server);
+    for (;;) {
+      const res = await rootSsh(server, script, options);
+      if (!unreachable(res) || now() >= deadline) return res;
+      say(`  SSH ${server.ip} не принял соединение (${why(res)}) — жду, пока сервер поднимется, и повторяю`);
+      touch();
+      await waitPort(server, deadline);
+    }
+  }
+
+  // Порт 22 открылся — это ещё не готовность: сервер может тут же перезагрузиться или перезапустить
+  // sshd. Готов — когда пускает root по паролю и cloud-init (если есть) закончил первую настройку.
+  async function settle(server, deadline) {
+    const check = 'if command -v cloud-init >/dev/null 2>&1; then timeout 900 cloud-init status --wait >/dev/null 2>&1 || true; fi; uptime';
+    for (;;) {
+      const res = await rootSsh(server, check, { timeoutMs: 16 * MIN });
+      if (res.code === 0) return;
+      if (now() >= deadline) throw new MigrationError(`на новом сервере ${server.ip} SSH так и не заработал (${res.timedOut ? 'не уложилось во время' : why(res)})`);
+      say(`  SSH ${server.ip} ещё не готов (${res.timedOut ? 'не уложилось во время' : why(res)}) — жду`);
+      touch();
+      await waitPort(server, deadline);
+    }
+  }
+
   async function root(server, script, what, options) {
-    const res = await rootSsh(server, script, options);
+    const res = await rootSshRetry(server, script, options);
     if (res.code !== 0) {
       const tail = `${res.stdout}\n${res.stderr}`.trim().split('\n').filter(Boolean).slice(-6).join('\n');
       throw new MigrationError(`${what}: ${res.timedOut ? 'не уложилось во время' : `код ${res.code}`}${tail ? `\n${tail}` : ''}`);
@@ -193,6 +240,7 @@ function createMigration({ config, keys, state, clouds = {}, backups, monitor, o
           stop();
           await wait(10000);
         }
+        await settle(server, Math.max(sshDeadline, now() + 10 * MIN));
         return server;
       } catch (err) {
         errors.push(`${NAMES[name]}: ${err.message}`);
@@ -315,7 +363,7 @@ function createMigration({ config, keys, state, clouds = {}, backups, monitor, o
       const pulled = await backups.pull();
       say(pulled.ok ? '✓ Бэкап с нового сервера получен' : `⚠️ Бэкап с нового сервера не получен: ${pulled.error}`);
       // ключ диспетчера у root больше не нужен
-      await rootSsh(server, `sed -i '/${MARK}/d' /root/.ssh/authorized_keys`, { timeoutMs: MIN });
+      await rootSshRetry(server, `sed -i '/${MARK}/d' /root/.ssh/authorized_keys`, { timeoutMs: MIN });
 
       // 6. старый сервер — на удаление после переподключения семьи
       let oldNote = '';
