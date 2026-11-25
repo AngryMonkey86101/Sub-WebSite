@@ -11,6 +11,7 @@ import { createOrders } from './orders.js';
 import { createMigration } from './migrate.js';
 import { createCancel } from './cancel.js';
 import { createEmergency } from './emergency.js';
+import { createBalanceWatch } from './balance.js';
 import { spawn } from 'node:child_process';
 import { openSync, closeSync } from 'node:fs';
 import { join } from 'node:path';
@@ -50,7 +51,9 @@ async function createDispatcher({ config, fetch = globalThis.fetch, run = defaul
   // аварийный переезд — отдельным процессом (как «Переезд сейчас» из меню): служба продолжает
   // проверять сервер, ход переезда — в /data/migrate.log
   const emergency = createEmergency({ config, state, notify, start: startEmergency ?? ((info) => spawnMigration(config, info, log)), now, log });
-  return { config, state, notify, keys, monitor, backups, cloud, clouds, orders, migration, cancel, emergency, run };
+  // баланс Zomro меньше порога — напоминания админу, пока не пополнят (balance.js)
+  const balance = createBalanceWatch({ config, state, cloud: clouds.zomro ?? null, notify, now, log });
+  return { config, state, notify, keys, monitor, backups, cloud, clouds, orders, migration, cancel, emergency, balance, run };
 }
 
 function spawnMigration(config, { minutes }, log = console) {

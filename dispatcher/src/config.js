@@ -40,6 +40,10 @@ function loadConfig(env = process.env) {
   const zomroUser = env.ZOMRO_USER?.trim() || '';
   const zomroPassword = env.ZOMRO_PASSWORD ?? '';
   if (Boolean(zomroUser) !== Boolean(zomroPassword)) throw new ConfigError('Zomro: нужны оба — ZOMRO_USER и ZOMRO_PASSWORD');
+  // напоминание о низком балансе Zomro (balance.js): порог в EUR, дробный — через точку; 0 — выключено
+  const balanceMinRaw = (env.ZOMRO_BALANCE_MIN?.trim() || '3').replace(',', '.');
+  const balanceMin = Number(balanceMinRaw);
+  if (!/^\d{1,4}(\.\d{1,2})?$/.test(balanceMinRaw) || !Number.isFinite(balanceMin)) throw new ConfigError('ZOMRO_BALANCE_MIN: сумма в EUR, например 3 или 2.5; 0 — без напоминаний');
   const zomroId = (name, fallback, pattern) => {
     const value = env[name]?.trim() || fallback;
     if (!pattern.test(value)) throw new ConfigError(`${name}: неверное значение`);
@@ -153,7 +157,9 @@ function loadConfig(env = process.env) {
           // Zomro собирает серверы долго: сколько ждать, пока сервер станет активным и получит IP,
           // и потом — пока на нём откроется SSH
           buildTimeout: number('ZOMRO_BUILD_MIN', 90, { min: 10, max: 360 }) * MINUTE,
-          sshTimeout: number('ZOMRO_SSH_MIN', 20, { min: 1, max: 120 }) * MINUTE
+          sshTimeout: number('ZOMRO_SSH_MIN', 20, { min: 1, max: 120 }) * MINUTE,
+          // баланс меньше min EUR — сообщение и напоминания раз в remindHours часов (balance.js)
+          balance: balanceMin > 0 ? { min: balanceMin, remindHours: number('ZOMRO_BALANCE_REMIND_H', 12, { min: 1, max: 168 }) } : null
         }
       : null
   };

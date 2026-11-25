@@ -163,6 +163,8 @@ async function main(argv, { env = process.env, out = console.log, deps = {} } = 
       if (b.error && (!b.lastAt || b.failedAt > b.lastAt)) out(`Последняя попытка бэкапа не удалась (${fmt(b.failedAt)}): ${b.error}`);
       out(lastMove({ state: d.state, migrating: d.emergency.migrating() }));
       out(d.emergency.describe(m));
+      const balanceLine = d.balance.describe();
+      if (balanceLine) out(balanceLine);
       return 0;
     }
     case 'last-move':

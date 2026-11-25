@@ -2,7 +2,7 @@ import { loadConfig, ConfigError } from './config.js';
 import { createDispatcher, keysHelp } from './app.js';
 
 // Служба диспетчера: раз в минуту — проверка сервера из РФ (долго недоступен — аварийный переезд),
-// раз в час — бэкап с сервера.
+// раз в час — бэкап с сервера и баланс Zomro (меньше порога — напоминания пополнить).
 
 let config;
 try {
@@ -50,6 +50,12 @@ async function cycle() {
     } catch (err) {
       console.error('Уборка заказов:', err?.message);
     }
+  }
+  // баланс Zomro: сам решает, пора ли проверять (раз в час) и напоминать (balance.js)
+  try {
+    await d.balance.tick();
+  } catch (err) {
+    console.error('Баланс Zomro:', err?.message);
   }
   busy = false;
 }
