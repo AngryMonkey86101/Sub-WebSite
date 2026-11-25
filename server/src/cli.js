@@ -83,16 +83,24 @@ async function restoreVpn({ amnezia, input, wait, out }) {
     throw new PortalError(400, 'В amnezia.json нет ключей AmneziaWG (раздел amneziaWg3)');
   }
   await waitForApi(amnezia, wait);
-  const available = (await amnezia.serverInfo()).protocols;
+  // какой запрос к amnezia-api не прошёл: его собственный текст бывает просто «Непредвиденная ошибка»
+  const step = async (what, fn) => {
+    try {
+      return await fn();
+    } catch (err) {
+      throw new PortalError(err?.status || 502, `${what}: ${err?.message}`);
+    }
+  };
+  const available = (await step('amnezia-api не отдал сведения о сервере (GET /server)', () => amnezia.serverInfo())).protocols;
   const protocols = data.protocols.filter((p) => available.includes(p));
   if (!protocols.includes('amneziawg3')) throw new PortalError(400, 'На этом сервере нет контейнера AmneziaWG (amnezia-awg2)');
   const skipped = data.protocols.filter((p) => !available.includes(p));
   if (skipped.length) out(`⚠️ Не восстановлены — их нет на этом сервере: ${skipped.join(', ')}`);
-  await amnezia.importServerBackup({ ...data, protocols });
+  await step('amnezia-api не принял ключи из бэкапа (POST /server/backup)', () => amnezia.importServerBackup({ ...data, protocols }));
   const peers = wgPeerList(data.amneziaWg3.wgConfig);
   const expected = peers.filter((peer) => !peer.disabled).map((peer) => peer.key);
   const paused = peers.length - expected.length;
-  const present = new Set((await amnezia.listClients()).flatMap((client) => client.peers).filter((peer) => peer.protocol === 'amneziawg3').map((peer) => peer.id));
+  const present = new Set((await step('amnezia-api не отдал список клиентов после восстановления (GET /clients)', () => amnezia.listClients())).flatMap((client) => client.peers).filter((peer) => peer.protocol === 'amneziawg3').map((peer) => peer.id));
   const restored = expected.filter((key) => present.has(key)).length;
   out(`Ключи сервера VPN восстановлены: действующих ${restored} из ${expected.length}${paused ? `, на паузе ${paused}` : ''}, всего в бэкапе ${peers.length}`);
   const keys = new Set(peers.map((peer) => peer.key));

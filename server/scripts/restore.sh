@@ -76,7 +76,7 @@ compose() {
   FAILED="docker compose $*"
   # контейнер не запустился — состояние и последние строки журналов, пока сервер ещё есть:
   # диспетчер при неудаче удаляет новый сервер, и причина уходила бы вместе с ним
-  if [ "${1:-}" = up ]; then
+  if [[ "${1:-}" =~ ^(up|run|exec)$ ]]; then
     printf '    Контейнеры:\n' >&2
     (cd "$APP" && docker compose --ansi never ps -a --format '{{.Service}}: {{.Status}}' 2>&1 | sed 's/^/      /' >&2) || true
     for service in amnezia-api portal; do
@@ -88,6 +88,22 @@ compose() {
 }
 PORTAL_CLI=(node --disable-warning=ExperimentalWarning src/cli.js)
 cli() { compose exec -T portal "${PORTAL_CLI[@]}" "$@"; }
+# Ключи сервера VPN из бэкапа — разовым контейнером портала, пока сам портал не запущен: иначе он
+# сразу после запуска сам обращается к amnezia-api (учёт трафика), и восстановление с ним
+# сталкивалось — amnezia-api отвечал «Непредвиденная ошибка» (переезд 25.11.2026). Восстановление
+# можно повторять: те же ключи записываются заново. Три попытки с паузой.
+restore_vpn() {
+  local attempt
+  for attempt in 1 2 3; do
+    if compose run --rm --no-deps -T portal "${PORTAL_CLI[@]}" restore-vpn < "$WORK/amnezia.json"; then
+      FAILED=""
+      return 0
+    fi
+    [ "$attempt" -lt 3 ] || return 1
+    warn "Ключи не восстановились (попытка $attempt из 3) — жду 20 с и повторяю"
+    sleep 20
+  done
+}
 
 DRILL=0
 YES=0
@@ -261,7 +277,7 @@ if [ "$PREPARE" -eq 1 ]; then
   # сервере. Ключи — через разовый контейнер портала, сам портал не запускается.
   compose up -d amnezia-api
   step "6/7 Прежние ключи сервера VPN (подготовка)"
-  compose run --rm --no-deps -T portal "${PORTAL_CLI[@]}" restore-vpn < "$WORK/amnezia.json"
+  restore_vpn
   docker restart "$AWG" >/dev/null
   ACTUAL_KEY=""
   for _ in $(seq 1 15); do
@@ -282,16 +298,10 @@ compose run --rm --no-deps -T -u root --entrypoint sh -v "$WORK:/restore:ro" por
   'cp /restore/portal.sqlite /data/portal.sqlite && rm -f /data/portal.sqlite-wal /data/portal.sqlite-shm && chown node:node /data/portal.sqlite && chmod 600 /data/portal.sqlite'
 # забыть состояние старого сервера: сторож не тронет DuckDNS до шага 7, бэкап подождёт ключей
 compose run --rm --no-deps -T portal "${PORTAL_CLI[@]}" restored
-# Caddy — только после переноса имён: иначе Let's Encrypt откажет и временно заблокирует выпуск
-compose up -d amnezia-api portal
-ok "Портал запущен"
-# служба перезагрузки по команде из бота и админки — том данных уже есть
-bash "$APP/scripts/install-reboot.sh"
-# доступ диспетчера в РФ к бэкапу, если он есть в .env (dispatcher/README.md)
-bash "$APP/scripts/install-dispatcher-key.sh"
+compose up -d amnezia-api
 
 step "6/7 Прежние ключи сервера VPN"
-cli restore-vpn < "$WORK/amnezia.json"
+restore_vpn
 # start.sh поднимает интерфейс заново: прежний закрытый ключ, подсеть и правила NAT
 docker restart "$AWG" >/dev/null
 ACTUAL_KEY=""
@@ -307,6 +317,14 @@ PEERS=$(docker exec "$AWG" awg show awg0 peers | grep -c . || true)
 [ "$PEERS" -ge "$CLIENTS" ] \
   || die "В AmneziaWG ключей клиентов $PEERS, а в бэкапе $CLIENTS — смотрите docker logs $AWG"
 ok "Ключ сервера прежний, клиентов в AmneziaWG: $PEERS из $CLIENTS"
+# портал — с прежними ключами; Caddy — только после переноса имён: иначе Let's Encrypt откажет и
+# временно заблокирует выпуск
+compose up -d portal
+ok "Портал запущен"
+# служба перезагрузки по команде из бота и админки — том данных уже есть
+bash "$APP/scripts/install-reboot.sh"
+# доступ диспетчера в РФ к бэкапу, если он есть в .env (dispatcher/README.md)
+bash "$APP/scripts/install-dispatcher-key.sh"
 
 if [ "$DRILL" -eq 1 ]; then
   printf '\n%s\n' "${BOLD}${GREEN}Учения пройдены.${R} Бэкап расшифрован, AmneziaWG поднят с прежним ключом сервера,"
