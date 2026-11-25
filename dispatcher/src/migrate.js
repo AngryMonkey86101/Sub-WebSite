@@ -131,8 +131,19 @@ function createMigration({ config, keys, state, clouds = {}, backups, monitor, o
   async function root(server, script, what, options) {
     const res = await rootSshRetry(server, script, options);
     if (res.code !== 0) {
-      const tail = `${res.stdout}\n${res.stderr}`.trim().split('\n').filter(Boolean).slice(-6).join('\n');
-      throw new MigrationError(`${what}: ${res.timedOut ? 'не уложилось во время' : `код ${res.code}`}${tail ? `\n${tail}` : ''}`);
+      const lines = `${res.stdout}\n${res.stderr}`.split('\n').map((l) => l.trimEnd()).filter(Boolean);
+      // Весь вывод — в файл на диспетчере: новый сервер при откате удаляется, а с ним и причина.
+      // В сообщение — последние строки без отступа в 4 пробела: так restore.sh печатает состояние
+      // контейнеров и их журналы, а сама ошибка docker и «✗ Остановка…» — без отступа.
+      const file = join(dir, 'last-failure.log');
+      try {
+        writeFileSync(file, `${new Date(now()).toISOString()} ${what} на ${server.ip}: код ${res.code}${res.timedOut ? ' (не уложилось во время)' : ''}\n${lines.join('\n')}\n`, { mode: 0o600 });
+      } catch {
+        // не записалось — останется хотя бы сообщение
+      }
+      const tail = lines.filter((l) => !/^ {4}/.test(l)).slice(-6).join('\n');
+      const more = lines.some((l) => /^ {4}/.test(l)) ? `\nСостояние контейнеров и журналы — в ${file} на диспетчере` : '';
+      throw new MigrationError(`${what}: ${res.timedOut ? 'не уложилось во время' : `код ${res.code}`}${tail ? `\n${tail}` : ''}${more}`);
     }
     return res.stdout.toString();
   }

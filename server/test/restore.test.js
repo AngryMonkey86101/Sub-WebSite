@@ -177,6 +177,8 @@ case "$*" in
   "compose --ansi never run --rm --no-deps -T -u root"*)
     # база из бэкапа: что именно увидит контейнер в /restore
     while [ $# -gt 0 ]; do [ "$1" = "-v" ] && cp "\${2%%:*}/portal.sqlite" "$OUT/restored.sqlite"; shift; done ;;
+  "compose --ansi never ps -a --format {{.Service}}: {{.Status}}") echo "amnezia-api: Up 5 minutes"; echo "portal: Created" ;;
+  "compose --ansi never logs --no-color --no-log-prefix --tail 15 portal") echo "Error: EACCES: permission denied, open '/data/portal.sqlite'" ;;
 esac`);
 
   const sock = join(root, 'docker.sock');
@@ -332,6 +334,13 @@ test('restore.sh: без buildx — ставит его сам; сбой ком�
   assert.equal(existsSync(failed.work), false);
   res = failed.run(`${failed.secret}\nn\n`);
   assert.equal(res.status, 0, res.stderr);
+
+  // контейнеры не запустились: до сообщения об остановке — их состояние и журналы (сервер потом удалят)
+  const up = prepare('up-fails');
+  res = up.run(`${up.secret}\n`, [], { FAIL_ON: 'compose --ansi never up -d amnezia-api portal' });
+  assert.notEqual(res.status, 0);
+  assert.match(res.stderr, /сбой: compose --ansi never up -d amnezia-api portal\n    Контейнеры:\n      amnezia-api: Up 5 minutes\n      portal: Created\n/);
+  assert.match(res.stderr, /    Журнал portal:\n      Error: EACCES: permission denied, open '\/data\/portal\.sqlite'\n[\s\S]*✗ Остановка на шаге «5\/7 Портал с прежними настройками и базой»: не выполнилась команда «docker compose up -d amnezia-api portal»/);
 
   // своя проверка скрипта (die) — без второго, общего сообщения
   const own = prepare('own-message');

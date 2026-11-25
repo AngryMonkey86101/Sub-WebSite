@@ -71,7 +71,21 @@ trap on_exit EXIT
 
 # --ansi never: без перерисовки экрана — иначе индикатор docker compose стирает строки с ошибками.
 # Команды портала — через node напрямую: npm run -s прячет собственные ошибки npm.
-compose() { (cd "$APP" && docker compose --ansi never "$@") || { FAILED="docker compose $*"; return 1; }; }
+compose() {
+  (cd "$APP" && docker compose --ansi never "$@") && return 0
+  FAILED="docker compose $*"
+  # контейнер не запустился — состояние и последние строки журналов, пока сервер ещё есть:
+  # диспетчер при неудаче удаляет новый сервер, и причина уходила бы вместе с ним
+  if [ "${1:-}" = up ]; then
+    printf '    Контейнеры:\n' >&2
+    (cd "$APP" && docker compose --ansi never ps -a --format '{{.Service}}: {{.Status}}' 2>&1 | sed 's/^/      /' >&2) || true
+    for service in amnezia-api portal; do
+      printf '    Журнал %s:\n' "$service" >&2
+      (cd "$APP" && docker compose --ansi never logs --no-color --no-log-prefix --tail 15 "$service" 2>&1 | sed 's/^/      /' >&2) || true
+    done
+  fi
+  return 1
+}
 PORTAL_CLI=(node --disable-warning=ExperimentalWarning src/cli.js)
 cli() { compose exec -T portal "${PORTAL_CLI[@]}" "$@"; }
 

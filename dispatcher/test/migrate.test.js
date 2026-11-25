@@ -98,6 +98,21 @@ async function world(name, { oldOurs = false, probe = 'up', freeze = 'direct', f
       return { code: 0, stdout: Buffer.from('▶ 1/7 Программы\n  ✓ Docker version 27\nСервер подготовлен.\n'), stderr: '' };
     }
     if (/restore\.sh --finish/.test(script)) {
+      if (failAt === 'finish5') {
+        return {
+          code: 1,
+          stdout: Buffer.from('▶ 5/7 Портал с прежними настройками и базой\n'),
+          stderr: [
+            'Error response from daemon: failed to set up container networking: network family-vpn_default not found',
+            '    Контейнеры:',
+            '      amnezia-api: Up 5 minutes',
+            '    Журнал portal:',
+            ...Array.from({ length: 15 }, (_, i) => `      строка журнала ${i + 1}`),
+            '✗ Остановка на шаге «5/7 Портал с прежними настройками и базой»: не выполнилась команда «docker compose up -d amnezia-api portal» (код 1).',
+            '  Причина — в сообщениях выше. Скрипт можно запустить снова с тем же файлом бэкапа.'
+          ].join('\n')
+        };
+      }
       if (failAt === 'finish6') return { code: 1, stdout: Buffer.alloc(0), stderr: '✗ Остановка на шаге «6/7 Прежние ключи сервера VPN»' };
       namesMoved = true;
       if (failAt === 'finish7') return { code: 1, stdout: Buffer.alloc(0), stderr: '✗ Остановка на шаге «7/7 Имена DuckDNS и HTTPS»: Bind for 0.0.0.0:443 failed' };
@@ -257,6 +272,20 @@ test('переезд: сбой до переноса имён — старый �
   assert.deepEqual(w.log.unfreezes, [{}], 'разморожен тем же путём, что заморожен');
   assert.deepEqual(w.log.removed, ['7300001']);
   assert.match(w.log.notes.at(-1), /Старый сервер снова работает/);
+});
+
+test('переезд: контейнеры на новом не запустились — ошибка docker в сообщении, весь вывод — в файле на диспетчере', { skip: !HAS_TOOLS && 'нет age' }, async () => {
+  const w = await world('fail-finish5', { failAt: 'finish5' });
+  const err = await w.migration.migrate().then(() => null, (e) => e);
+  assert.ok(err);
+  assert.match(err.message, /restore\.sh --finish: код 1\n▶ 5\/7 Портал с прежними настройками и базой\nError response from daemon: failed to set up container networking: network family-vpn_default not found\n✗ Остановка на шаге «5\/7/, 'ошибка docker не вытеснена журналами');
+  assert.doesNotMatch(err.message, /строка журнала/);
+  const file = join(w.dataDir, 'migration', 'last-failure.log');
+  assert.match(err.message, new RegExp(`журналы — в ${file.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&')} на диспетчере`));
+  const saved = readFileSync(file, 'utf8');
+  assert.match(saved, /restore\.sh --finish на 203\.0\.113\.9: код 1/);
+  assert.match(saved, /строка журнала 15/);
+  assert.deepEqual(w.log.removed, ['7300001'], 'откат как раньше');
 });
 
 test('переезд: сбой на шаге с именами — не откатывать (иначе два бота), громкое сообщение', { skip: !HAS_TOOLS && 'нет age' }, async () => {
