@@ -165,8 +165,11 @@ case "$*" in
   "compose version") echo "Docker Compose version v2.30.0" ;;
   "--version") echo "Docker version 27.3.1" ;;
   "version --format {{.Server.APIVersion}}") echo "1.47" ;;
-  "compose --ansi never exec -T portal node --disable-warning=ExperimentalWarning src/cli.js restore-vpn") cat > "$OUT/restore-input.json"; echo "Ключи сервера VPN восстановлены: клиентов 2 из 2 в бэкапе" ;;
-  "compose --ansi never run --rm --no-deps -T portal node --disable-warning=ExperimentalWarning src/cli.js restore-vpn") cat > "$OUT/prepare-input.json"; echo "Ключи сервера VPN восстановлены: клиентов 2 из 2 в бэкапе" ;;
+  "compose --ansi never run --rm --no-deps -T portal node --disable-warning=ExperimentalWarning src/cli.js restore-vpn")
+    # RESTORE_FAILS — сколько первых попыток amnezia-api отвечает ошибкой (25.11.2026)
+    n=$(cat "$OUT/restore-tries" 2>/dev/null || echo 0); echo $((n + 1)) > "$OUT/restore-tries"
+    if [ "$n" -lt "\${RESTORE_FAILS:-0}" ]; then echo "Ошибка: Непредвиденная ошибка" >&2; exit 1; fi
+    cat > "$OUT/restore-input.json"; echo "Ключи сервера VPN восстановлены: клиентов 2 из 2 в бэкапе" ;;
   "compose --ansi never run --rm --no-deps -T -u root --entrypoint sh -v "*" caddy -c "*)
     # сертификаты Caddy: что увидит контейнер в /restore
     while [ $# -gt 0 ]; do [ "$1" = "-v" ] && cp "\${2%%:*}/caddy.tar.gz" "$OUT/caddy.tar.gz"; shift; done ;;
@@ -177,6 +180,8 @@ case "$*" in
   "compose --ansi never run --rm --no-deps -T -u root"*)
     # база из бэкапа: что именно увидит контейнер в /restore
     while [ $# -gt 0 ]; do [ "$1" = "-v" ] && cp "\${2%%:*}/portal.sqlite" "$OUT/restored.sqlite"; shift; done ;;
+  "compose --ansi never ps -a --format {{.Service}}: {{.Status}}") echo "amnezia-api: Up 5 minutes"; echo "portal: Created" ;;
+  "compose --ansi never logs --no-color --no-log-prefix --tail 15 portal") echo "Error: EACCES: permission denied, open '/data/portal.sqlite'" ;;
 esac`);
 
   const sock = join(root, 'docker.sock');
@@ -254,20 +259,22 @@ test('restore.sh: бэкап расшифрован, AmneziaWG с прежним
   // служба перезагрузки из бота поставлена на том портала
   assert.ok(existsSync(join(t.root, 'systemd', 'family-vpn-reboot.path')));
   assert.ok(existsSync(join(t.out, 'volume', 'reboot-enabled')));
-  assert.ok(indexOf(calls, /^systemctl enable --now family-vpn-reboot\.path$/) > indexOf(calls, /up -d amnezia-api portal/));
+  assert.ok(indexOf(calls, /^systemctl enable --now family-vpn-reboot\.path$/) > indexOf(calls, /up -d portal$/));
 
   // база и ключи сервера — те, что в бэкапе
   assert.deepEqual(readFileSync(join(t.out, 'restored.sqlite')), t.sqlite);
   assert.deepEqual(JSON.parse(readFileSync(join(t.out, 'restore-input.json'), 'utf8')), AMNEZIA_JSON);
   assert.match(res.stdout, /Ключ сервера прежний, клиентов в AmneziaWG: 4 из 4/);
 
-  // порядок: база → «забыть старый сервер» → запуск → ключи → перезапуск AWG → DuckDNS → Caddy
+  // порядок: база → «забыть старый сервер» → amnezia-api → ключи разовым контейнером, пока портал не
+  // запущен → перезапуск AWG → портал → DuckDNS → Caddy
   const order = [
     /^docker compose --ansi never run --rm --no-deps -T -u root/,
     /^docker compose --ansi never run --rm --no-deps -T portal node --disable-warning=ExperimentalWarning src\/cli\.js restored$/,
-    /^docker compose --ansi never up -d amnezia-api portal$/,
-    /src\/cli\.js restore-vpn$/,
+    /^docker compose --ansi never up -d amnezia-api$/,
+    /^docker compose --ansi never run --rm --no-deps -T portal node --disable-warning=ExperimentalWarning src\/cli\.js restore-vpn$/,
     /^docker restart amnezia-awg2$/,
+    /^docker compose --ansi never up -d portal$/,
     /src\/cli\.js duckdns --takeover$/,
     /^docker compose --ansi never up -d caddy$/
   ].map((pattern) => indexOf(calls, pattern));
@@ -333,6 +340,26 @@ test('restore.sh: без buildx — ставит его сам; сбой ком�
   res = failed.run(`${failed.secret}\nn\n`);
   assert.equal(res.status, 0, res.stderr);
 
+  // контейнеры не запустились: до сообщения об остановке — их состояние и журналы (сервер потом удалят)
+  const up = prepare('up-fails');
+  res = up.run(`${up.secret}\n`, [], { FAIL_ON: 'compose --ansi never up -d portal' });
+  assert.notEqual(res.status, 0);
+  assert.match(res.stderr, /сбой: compose --ansi never up -d portal\n    Контейнеры:\n      amnezia-api: Up 5 minutes\n      portal: Created\n/);
+  assert.match(res.stderr, /    Журнал portal:\n      Error: EACCES: permission denied, open '\/data\/portal\.sqlite'\n[\s\S]*✗ Остановка на шаге «6\/7 Прежние ключи сервера VPN»: не выполнилась команда «docker compose up -d portal»/);
+
+  // amnezia-api дважды ответил «Непредвиденная ошибка» — третья попытка проходит; три — остановка
+  const flaky = prepare('restore-flaky');
+  res = flaky.run(`${flaky.secret}\nn\n`, [], { RESTORE_FAILS: '2' });
+  assert.equal(res.status, 0, res.stderr);
+  assert.equal(res.calls.filter((c) => /cli\.js restore-vpn$/.test(c)).length, 3);
+  assert.match(res.stdout, /⚠ Ключи не восстановились \(попытка 1 из 3\) — жду 20 с и повторяю[\s\S]*попытка 2 из 3/);
+  assert.doesNotMatch(res.stderr, /Остановка/);
+  const broken = prepare('restore-broken');
+  res = broken.run(`${broken.secret}\n`, [], { RESTORE_FAILS: '3' });
+  assert.notEqual(res.status, 0);
+  assert.match(res.stderr, /✗ Остановка на шаге «6\/7 Прежние ключи сервера VPN»: не выполнилась команда «docker compose run --rm --no-deps -T portal node --disable-warning=ExperimentalWarning src\/cli\.js restore-vpn»/);
+  assert.equal(indexOf(res.calls, /up -d portal$/), -1, 'без ключей портал не запускается');
+
   // своя проверка скрипта (die) — без второго, общего сообщения
   const own = prepare('own-message');
   res = own.run('не ключ\n');
@@ -391,8 +418,8 @@ test('restore.sh --prepare / --finish: плановая смена — зара�
   assert.ok(calls.includes('install.sh awg --port 51234 --subnet 10.8.1.0 --cidr 24'));
   assert.ok(calls.includes('docker compose --ansi never up -d amnezia-api'));
   assert.ok(calls.some((c) => /run --rm --no-deps -T portal node .*restore-vpn$/.test(c)), 'ключи VPN — разовым контейнером');
-  assert.deepEqual(JSON.parse(readFileSync(join(t.out, 'prepare-input.json'), 'utf8')), AMNEZIA_JSON);
-  for (const forbidden of [/up -d amnezia-api portal/, /duckdns/, /up -d caddy/, /cli\.js restored$/, /run --rm --no-deps -T -u root/]) {
+  assert.deepEqual(JSON.parse(readFileSync(join(t.out, 'restore-input.json'), 'utf8')), AMNEZIA_JSON);
+  for (const forbidden of [/up -d portal$/, /duckdns/, /up -d caddy/, /cli\.js restored$/, /run --rm --no-deps -T -u root/]) {
     assert.equal(indexOf(calls, forbidden), -1, `на подготовке нет ${forbidden}`);
   }
   assert.ok(existsSync(join(t.app, '.prepared')));
@@ -412,7 +439,7 @@ test('restore.sh --prepare / --finish: плановая смена — зара�
   assert.equal(indexOf(calls, /^apt-get update/), -1, 'программы уже стоят');
   assert.deepEqual(readFileSync(join(t.out, 'restored.sqlite')), t.sqlite, 'база — из финального бэкапа');
   assert.deepEqual(readFileSync(join(t.out, 'caddy.tar.gz')), caddyTar, 'сертификаты Caddy — со старого сервера');
-  const order = [/up -d amnezia-api portal$/, /restore-vpn$/, /duckdns --takeover$/, /caddy -c tar -xzf/, /up -d caddy$/].map((p) => indexOf(calls, p));
+  const order = [/restore-vpn$/, /up -d portal$/, /duckdns --takeover$/, /caddy -c tar -xzf/, /up -d caddy$/].map((p) => indexOf(calls, p));
   assert.ok(order.every((i) => i >= 0), JSON.stringify(order));
   assert.deepEqual([...order].sort((a, b) => a - b), order, 'сертификаты — до запуска Caddy, Caddy — после имён');
   assert.equal(existsSync(join(t.app, '.prepared')), false, 'отметка подготовки снята');

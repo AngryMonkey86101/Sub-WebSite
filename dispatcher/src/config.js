@@ -112,6 +112,14 @@ function loadConfig(env = process.env) {
       afterMin: number('EMERGENCY_AFTER_MIN', 30, { min: 10, max: 1440 }),
       retryHours: number('EMERGENCY_RETRY_H', 6, { min: 1, max: 72 })
     },
+    // зависание (hang.js): цикл службы дольше HANG_CYCLE_MIN — служба перезапускается; переезд
+    // без движения (замок не обновлялся) дольше HANG_MIGRATION_MIN, пока сервер только заказан и
+    // собирается, — прерывается; на шагах со старым сервером — только сообщение через HANG_NOTIFY_MIN
+    hang: {
+      cycleMin: number('HANG_CYCLE_MIN', 20, { min: 5, max: 240 }),
+      migrationMin: number('HANG_MIGRATION_MIN', 30, { min: 10, max: 480 }),
+      notifyMin: number('HANG_NOTIFY_MIN', 90, { min: 30, max: 480 })
+    },
     dataDir: env.DATA_DIR?.trim() || '/data',
     telegram: token ? { token, chatId } : null,
     ssh: { user: sshUser, port: number('SSH_PORT', 22, { min: 1, max: 65535 }) },

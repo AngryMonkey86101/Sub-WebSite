@@ -37,7 +37,8 @@ const open = (keyText, data) => {
 };
 
 // ssh(script) — подмена ответа ssh на новом сервере (вернуть undefined — обычный ответ)
-async function world(name, { oldOurs = false, probe = 'up', freeze = 'direct', failAt = null, ssh = null } = {}) {
+// soldout — тарифы, которые нельзя заказать (у облака появляются tariffs и check)
+async function world(name, { oldOurs = false, probe = 'up', freeze = 'direct', failAt = null, ssh = null, soldout = null } = {}) {
   const dataDir = join(dir, name);
   const config = loadConfig({ PORTAL_HOST: 'proxyizi.duckdns.org', DATA_DIR: dataDir, ZOMRO_USER: 'u@example.com', ZOMRO_PASSWORD: 'p' });
   const keys = await ensureKeys(dataDir);
@@ -55,14 +56,15 @@ async function world(name, { oldOurs = false, probe = 'up', freeze = 'direct', f
   writeFileSync(join(dataDir, 'final.age'), seal(keys.recipient, plainFinal));
   writeFileSync(join(dataDir, 'caddy.age'), seal(keys.recipient, Buffer.from('CADDY-CERTS')));
 
-  const log = { notes: [], root: [], removed: [], freezes: [], unfreezes: [], trusted: 0, out: [] };
+  const log = { orders: [], notes: [], root: [], removed: [], freezes: [], unfreezes: [], trusted: 0, out: [] };
   let namesMoved = false;
   const oldServer = { id: '7269056', name: oldOurs ? 'family-vpn-20261111-0100' : 'vless-2', ip: OLD_IP, status: 'active', ours: oldOurs };
   let ordered = null;
   const cloud = {
     servers: async () => [oldServer, ...(ordered ? [{ id: '7300001', name: ordered.name, ip: NEW_IP, status: 'active', ours: true }] : [])],
     balance: async () => ({ amount: 3.2, currency: 'EUR' }),
-    order: async () => {
+    order: async (options = {}) => {
+      log.orders.push(options);
       ordered = { name: 'family-vpn-20261114-0900', password: 'RootPassw0rdFromOrder123' };
       return ordered;
     },
@@ -72,6 +74,11 @@ async function world(name, { oldOurs = false, probe = 'up', freeze = 'direct', f
     },
     removeWhenReady: async (id) => { log.removed.push(id); return true; }
   };
+  if (soldout) {
+    const T = (pricelist, perDay) => ({ provider: 'zomro', datacenter: config.zomro.datacenter, datacenterName: 'Netherlands-3', pricelist, name: `T${pricelist}`, price: `${perDay} EUR за день`, perDay });
+    cloud.tariffs = async () => [T(config.zomro.pricelist, 0.36), T('8100', 0.4), T('7920', 0.31)];
+    cloud.check = async ({ list }) => list.map((t) => (soldout.includes(t.pricelist) ? { ...t, can: false, reason: 'распродан' } : { ...t, can: true, os: { id: `os-${t.pricelist}` } }));
+  }
   const backups = {
     latest: () => ({ file: latestFile, size: 1 }),
     freeze: async (options) => {
@@ -98,6 +105,21 @@ async function world(name, { oldOurs = false, probe = 'up', freeze = 'direct', f
       return { code: 0, stdout: Buffer.from('▶ 1/7 Программы\n  ✓ Docker version 27\nСервер подготовлен.\n'), stderr: '' };
     }
     if (/restore\.sh --finish/.test(script)) {
+      if (failAt === 'finish5') {
+        return {
+          code: 1,
+          stdout: Buffer.from('▶ 5/7 Портал с прежними настройками и базой\n'),
+          stderr: [
+            'Error response from daemon: failed to set up container networking: network family-vpn_default not found',
+            '    Контейнеры:',
+            '      amnezia-api: Up 5 minutes',
+            '    Журнал portal:',
+            ...Array.from({ length: 15 }, (_, i) => `      строка журнала ${i + 1}`),
+            '✗ Остановка на шаге «5/7 Портал с прежними настройками и базой»: не выполнилась команда «docker compose up -d amnezia-api portal» (код 1).',
+            '  Причина — в сообщениях выше. Скрипт можно запустить снова с тем же файлом бэкапа.'
+          ].join('\n')
+        };
+      }
       if (failAt === 'finish6') return { code: 1, stdout: Buffer.alloc(0), stderr: '✗ Остановка на шаге «6/7 Прежние ключи сервера VPN»' };
       namesMoved = true;
       if (failAt === 'finish7') return { code: 1, stdout: Buffer.alloc(0), stderr: '✗ Остановка на шаге «7/7 Имена DuckDNS и HTTPS»: Bind for 0.0.0.0:443 failed' };
@@ -155,6 +177,24 @@ test('переезд: плановый — заказ, подготовка, з�
   // прежний сервер создан не диспетчером — не удаляется, только сообщение
   assert.deepEqual(w.log.removed, []);
   assert.match(w.log.notes.at(-1), /✅ Переезд по команде закончен[\s\S]*proxyizi\.duckdns\.org → 203\.0\.113\.9[\s\S]*vless-2 \(id 7269056\) создан не диспетчером — удалите его сами[\s\S]*remove 7269056 --yes --foreign/);
+});
+
+test('переезд: выбранный тариф распродан — заказ следующего по цене в том же дата-центре; распродано всё — заказа нет', { skip: !HAS_TOOLS && 'нет age' }, async () => {
+  let w = await world('tariff-ok', { soldout: [] });
+  await w.migration.migrate();
+  assert.deepEqual(Object.keys(w.log.orders[0]), ['name'], 'выбранный можно — заказ как раньше');
+
+  w = await world('tariff-next', { soldout: [w.config.zomro.pricelist] });
+  const r = await w.migration.migrate();
+  assert.equal(r.ok, true, w.log.out.join('\n'));
+  assert.equal(w.log.orders[0].pricelist, '8100');
+  assert.equal(w.log.orders[0].os, 'os-8100');
+  assert.ok(w.log.out.some((l) => /Выбранный тариф у Zomro сейчас заказать нельзя \(T\d+ \(0\.36 EUR за день\) — распродан\) — заказываю T8100 \(0\.4 EUR за день\)/.test(l)), w.log.out.join('\n'));
+  assert.ok(w.log.notes.some((n) => /ℹ️ Тариф у Zomro сейчас заказать нельзя[\s\S]*беру T8100, 0\.4 EUR за день/.test(n)));
+
+  w = await world('tariff-none', { soldout: [w.config.zomro.pricelist, '8100', '7920'] });
+  await assert.rejects(w.migration.migrate(), /ни один хостер не дал сервер — Zomro: в дата-центре Netherlands-3 сейчас нельзя заказать ни один тариф/);
+  assert.equal(w.log.orders.length, 0, 'ничего не заказано — деньги и 90 минут не потрачены');
 });
 
 test('переезд: старый сервер свой — удаляется через MIGRATE_KEEP_OLD_H часов', { skip: !HAS_TOOLS && 'нет age' }, async () => {
@@ -257,6 +297,20 @@ test('переезд: сбой до переноса имён — старый �
   assert.deepEqual(w.log.unfreezes, [{}], 'разморожен тем же путём, что заморожен');
   assert.deepEqual(w.log.removed, ['7300001']);
   assert.match(w.log.notes.at(-1), /Старый сервер снова работает/);
+});
+
+test('переезд: контейнеры на новом не запустились — ошибка docker в сообщении, весь вывод — в файле на диспетчере', { skip: !HAS_TOOLS && 'нет age' }, async () => {
+  const w = await world('fail-finish5', { failAt: 'finish5' });
+  const err = await w.migration.migrate().then(() => null, (e) => e);
+  assert.ok(err);
+  assert.match(err.message, /restore\.sh --finish: код 1\n▶ 5\/7 Портал с прежними настройками и базой\nError response from daemon: failed to set up container networking: network family-vpn_default not found\n✗ Остановка на шаге «5\/7/, 'ошибка docker не вытеснена журналами');
+  assert.doesNotMatch(err.message, /строка журнала/);
+  const file = join(w.dataDir, 'migration', 'last-failure.log');
+  assert.match(err.message, new RegExp(`журналы — в ${file.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&')} на диспетчере`));
+  const saved = readFileSync(file, 'utf8');
+  assert.match(saved, /restore\.sh --finish на 203\.0\.113\.9: код 1/);
+  assert.match(saved, /строка журнала 15/);
+  assert.deepEqual(w.log.removed, ['7300001'], 'откат как раньше');
 });
 
 test('переезд: сбой на шаге с именами — не откатывать (иначе два бота), громкое сообщение', { skip: !HAS_TOOLS && 'нет age' }, async () => {

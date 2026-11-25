@@ -4,6 +4,7 @@ import { setTimeout as sleep } from 'node:timers/promises';
 import { tcpOpen } from './zomroTest.js';
 import { serverName } from './cloud.js';
 import { stopper, CancelledError } from './cancel.js';
+import { chooseTariff } from './tariffPick.js';
 
 // Переезд на новый сервер (docs/PLAN.md, раздел 15, этапы 5–7). Один и тот же порядок и для
 // переезда по команде, и для плановой смены, и для аварии:
@@ -131,8 +132,19 @@ function createMigration({ config, keys, state, clouds = {}, backups, monitor, o
   async function root(server, script, what, options) {
     const res = await rootSshRetry(server, script, options);
     if (res.code !== 0) {
-      const tail = `${res.stdout}\n${res.stderr}`.trim().split('\n').filter(Boolean).slice(-6).join('\n');
-      throw new MigrationError(`${what}: ${res.timedOut ? 'не уложилось во время' : `код ${res.code}`}${tail ? `\n${tail}` : ''}`);
+      const lines = `${res.stdout}\n${res.stderr}`.split('\n').map((l) => l.trimEnd()).filter(Boolean);
+      // Весь вывод — в файл на диспетчере: новый сервер при откате удаляется, а с ним и причина.
+      // В сообщение — последние строки без отступа в 4 пробела: так restore.sh печатает состояние
+      // контейнеров и их журналы, а сама ошибка docker и «✗ Остановка…» — без отступа.
+      const file = join(dir, 'last-failure.log');
+      try {
+        writeFileSync(file, `${new Date(now()).toISOString()} ${what} на ${server.ip}: код ${res.code}${res.timedOut ? ' (не уложилось во время)' : ''}\n${lines.join('\n')}\n`, { mode: 0o600 });
+      } catch {
+        // не записалось — останется хотя бы сообщение
+      }
+      const tail = lines.filter((l) => !/^ {4}/.test(l)).slice(-6).join('\n');
+      const more = lines.some((l) => /^ {4}/.test(l)) ? `\nСостояние контейнеров и журналы — в ${file} на диспетчере` : '';
+      throw new MigrationError(`${what}: ${res.timedOut ? 'не уложилось во время' : `код ${res.code}`}${tail ? `\n${tail}` : ''}${more}`);
     }
     return res.stdout.toString();
   }
@@ -218,7 +230,19 @@ function createMigration({ config, keys, state, clouds = {}, backups, monitor, o
         // имя — уникальное: заказ у прежнего хостера мог остаться в учёте с тем же временем
         let wanted = serverName(now());
         if (orders.list().some((e) => e.name === wanted)) wanted = `${wanted}-${name}`;
-        ordered = await cloud.order({ name: wanted });
+        // выбранный тариф сейчас заказать нельзя — следующий по цене в том же дата-центре
+        let extra = {};
+        if (typeof cloud.tariffs === 'function' && typeof cloud.check === 'function') {
+          const pick = await chooseTariff({ provider: name, cloud, settings });
+          if (pick.warning) say(`  ⚠ ${NAMES[name]}: ${pick.warning}`);
+          if (pick.changed) {
+            const t = pick.tariff;
+            extra = { [name === 'aeza' ? 'product' : 'pricelist']: t.pricelist, ...(pick.os ? { os: pick.os } : {}) };
+            say(`  Выбранный тариф у ${NAMES[name]} сейчас заказать нельзя (${pick.skipped.join('; ')}) — заказываю ${t.name} (${t.price}) в том же дата-центре`);
+            await notify(`ℹ️ Тариф у ${NAMES[name]} сейчас заказать нельзя (${pick.skipped[0]}) — для переезда беру ${t.name}, ${t.price}. Выбранный тариф в настройках не меняю.`);
+          }
+        }
+        ordered = await cloud.order({ name: wanted, ...extra });
         orders.track(ordered.name, { until: now() + settings.buildTimeout + settings.sshTimeout + 2 * HOUR, purpose: 'migration', provider: name });
         phase('building', { server: ordered.name, provider: name });
         say(`Заказан ${ordered.name} у ${NAMES[name]}, жду сборку до ${Math.round(settings.buildTimeout / MIN)} мин (отменить ожидание — меню, «Переезд сейчас»)`);
@@ -238,6 +262,7 @@ function createMigration({ config, keys, state, clouds = {}, backups, monitor, o
         while (!(await tcp(server.ip, 22))) {
           if (now() >= sshDeadline) throw new MigrationError(`на новом сервере ${server.ip} не открылся SSH за ${Math.round(settings.sshTimeout / MIN)} мин`);
           stop();
+          touch();
           await wait(10000);
         }
         await settle(server, Math.max(sshDeadline, now() + 10 * MIN));
