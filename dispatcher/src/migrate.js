@@ -262,6 +262,7 @@ function createMigration({ config, keys, state, clouds = {}, backups, monitor, o
         while (!(await tcp(server.ip, 22))) {
           if (now() >= sshDeadline) throw new MigrationError(`на новом сервере ${server.ip} не открылся SSH за ${Math.round(settings.sshTimeout / MIN)} мин`);
           stop();
+          touch();
           await wait(10000);
         }
         await settle(server, Math.max(sshDeadline, now() + 10 * MIN));

@@ -10,6 +10,16 @@ services:
     volumes:
       - data:/data
     restart: unless-stopped
+    # служба — не PID 1: её может убить health.js, когда она встала целиком (src/hang.js)
+    init: true
+    # Docker сам «нездоровый» контейнер не перезапускает: health.js убивает службу, и контейнер
+    # перезапускается по restart
+    healthcheck:
+      test: ["CMD", "node", "src/health.js"]
+      interval: 1m
+      timeout: 20s
+      retries: 1
+      start_period: 5m
     logging:
       driver: local
       options:

@@ -2,7 +2,8 @@ import { loadConfig, ConfigError } from './config.js';
 import { createDispatcher, keysHelp } from './app.js';
 import { zomroTest } from './zomroTest.js';
 import { schedule, msk, span, ago, lastMove } from './schedule.js';
-import { readFileSync, readdirSync, existsSync, rmSync } from 'node:fs';
+import { readFileSync, readdirSync, existsSync } from 'node:fs';
+import { abandonMigration } from './hang.js';
 import { join } from 'node:path';
 
 // Команды диспетчера: docker compose exec dispatcher node src/cli.js <команда>
@@ -492,13 +493,10 @@ async function main(argv, { env = process.env, out = console.log, deps = {} } = 
         out('Прерванного переезда нет');
         return 0;
       }
-      rmSync(lockFile, { force: true });
-      const m = d.state.get('migration') ?? {};
-      const was = m.phase;
-      d.state.set('migration', { ...m, phase: 'failed', error: m.error ?? 'прерван: диспетчер перезапущен', updatedAt: Date.now() });
+      const r = abandonMigration({ config, state: d.state }, 'прерван: диспетчер перезапущен');
       out('✓ Замок переезда снят, переезд записан как «не удался»');
-      if (m.server) out(`  Заказанный сервер ${m.server} — в учёте заказов: служба удалит его сама`);
-      if (['freeze', 'finish'].includes(was)) {
+      if (r.server) out(`  Заказанный сервер ${r.server} — в учёте заказов: служба удалит его сама`);
+      if (r.frozenRisk) {
         out('⚠️ Переезд прервался после заморозки старого сервера: бот и сайт там могут стоять.');
         out('   Проверьте: node src/cli.js server; frozen — разморозьте: node src/cli.js unfreeze');
       }
