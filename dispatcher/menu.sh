@@ -610,8 +610,11 @@ screen_portal_update() {
 }
 
 main_menu() {
+  local last
   while true; do
     header 'главное меню'
+    # сколько прошло с последнего переезда; диспетчер не ответил — строки нет, меню работает
+    last=$(cli last-move 2>/dev/null) && [ -n "$last" ] && printf '%s\n\n' "$last"
     printf '  %s1%s — Состояние сервера\n' "$B" "$R"
     printf '  %s2%s — Время до переезда\n' "$B" "$R"
     printf '  %s3%s — Пинг до сервера за рубежом\n' "$B" "$R"

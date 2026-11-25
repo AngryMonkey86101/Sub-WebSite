@@ -4,7 +4,7 @@ import { spawnSync } from 'node:child_process';
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync, copyFileSync, chmodSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { nextRotation, msk, span } from '../src/schedule.js';
+import { nextRotation, msk, span, lastMove } from '../src/schedule.js';
 
 // Расписание смены и menu.sh: настоящий bash, вместо docker — заглушка с готовыми ответами CLI.
 
@@ -30,6 +30,23 @@ test('расписание: каждые 3 дня в 04:00 МСК; диспет�
   assert.equal(span(26 * H + 5 * 60000), '1 д 2 ч 5 мин');
   assert.equal(span(30 * 60000), '30 мин');
   assert.equal(span(-1), 'сейчас');
+});
+
+test('последний переезд: сколько прошло, неудачная попытка позже, идёт сейчас', () => {
+  const H = 3600000;
+  const state = (data) => ({ get: (k) => data[k] ?? null });
+  const now = Date.UTC(2026, 10, 25, 6, 17);
+  const done = Date.UTC(2026, 10, 23, 1, 12); // 23.11 04:12 МСК
+  assert.equal(lastMove({ state: state({}), now }), 'Последний переезд: ещё не было');
+  const rotation = { lastAt: done, server: { ip: '45.91.201.98' } };
+  assert.equal(lastMove({ state: state({ rotation }), now }), 'Последний переезд: 2 д 5 ч 5 мин назад (23.11 04:12 МСК, 45.91.201.98)');
+  assert.equal(lastMove({ state: state({ rotation }), now: done + 20000 }), 'Последний переезд: только что (23.11 04:12 МСК, 45.91.201.98)');
+  // неудачная попытка после удачного переезда — видна; до него — уже неважна
+  const failed = { phase: 'failed', startedAt: done + 24 * H };
+  assert.match(lastMove({ state: state({ rotation, migration: failed }), now }), /назад \(23\.11 04:12 МСК, 45\.91\.201\.98\) · попытка 24\.11 04:12 МСК не удалась$/);
+  assert.equal(lastMove({ state: state({ migration: failed }), now }), 'Последний переезд: ещё не было · попытка 24.11 04:12 МСК не удалась');
+  assert.doesNotMatch(lastMove({ state: state({ rotation, migration: { phase: 'failed', startedAt: done - H } }), now }), /попытка/);
+  assert.match(lastMove({ state: state({ rotation, migration: failed }), migrating: true, now }), /· сейчас идёт переезд$/);
 });
 
 function setup(name) {
@@ -69,6 +86,7 @@ case "$*" in
   *" src/cli.js tariff --provider "*) echo "Тариф: из .env ($*)" ;;
   *" src/cli.js tariffs --provider "*) echo "Тарифы ($*)" ;;
   *" src/cli.js migrate-status") echo "Переездов ещё не было" ;;
+  *" src/cli.js last-move") [ -z "\${NO_LAST:-}" ] && echo "Последний переезд: 2 д 5 ч назад (23.11 04:12 МСК, 45.91.201.98)" ;;
   *" src/cli.js portal-version") echo "Версия портала на m2pr7x.duckdns.org: abc1234 Портал: прежняя" ;;
   *"tail -n 40 -F /data/portal-update.log") echo "✓ Портал обновлён: abc1234 → def5678" ;;
   *"test -f /data/migration.lock") [ -n "\${RUNNING:-}" ] ;;
@@ -91,6 +109,11 @@ test('menu.sh: главное меню, экраны и возврат по Ente
   assert.match(res.out, /Следующая смена: 16\.11 04:00 МСК/);
   assert.match(res.err, /Нужна цифра/, 'буквы — не ответ');
   assert.equal(res.out.match(/VPN — главное меню ══/g).length, 4, 'после каждого экрана — снова главное меню');
+  assert.match(res.out, /главное меню ══\n\nПоследний переезд: 2 д 5 ч назад \(23\.11 04:12 МСК, 45\.91\.201\.98\)\n\n {2}1 — Состояние сервера/);
+  // диспетчер ничего не ответил — строки нет, меню то же
+  const quiet = t.run('0\n', { NO_LAST: '1' });
+  assert.equal(quiet.status, 0, quiet.err);
+  assert.match(quiet.out, /главное меню ══\n\n {2}1 — Состояние сервера/);
 });
 
 test('menu.sh: смена тарифа — дата-центр, тариф по цене, проверка образа ОС, запись в .env', () => {
