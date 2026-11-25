@@ -52,4 +52,19 @@ function span(ms) {
   return [d && `${d} д`, h && `${h} ч`, (m || (!d && !h)) && `${m} мин`].filter(Boolean).join(' ');
 }
 
-export { nextRotation, schedule, msk, span };
+// «2 д 5 ч назад», меньше минуты — «только что»
+const ago = (ms) => (ms < 60000 ? 'только что' : `${span(ms)} назад`);
+
+// Сколько прошло с последнего переезда — строка для главного меню и status. Время переезда
+// пишет migrate.js в state.rotation.lastAt, когда переезд закончен; неудачная попытка его не
+// меняет, поэтому о ней — отдельно, если она была позже удачного переезда.
+function lastMove({ state, migrating = false, now = Date.now() }) {
+  const r = state.get('rotation') ?? {};
+  const m = state.get('migration') ?? {};
+  let line = `Последний переезд: ${r.lastAt ? `${ago(now - r.lastAt)} (${msk(r.lastAt)}${r.server?.ip ? `, ${r.server.ip}` : ''})` : 'ещё не было'}`;
+  if (migrating) line += ' · сейчас идёт переезд';
+  else if (m.phase === 'failed' && m.startedAt && (!r.lastAt || m.startedAt > r.lastAt)) line += ` · попытка ${msk(m.startedAt)} не удалась`;
+  return line;
+}
+
+export { nextRotation, schedule, msk, span, ago, lastMove };

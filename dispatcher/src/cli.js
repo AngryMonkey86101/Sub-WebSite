@@ -1,7 +1,7 @@
 import { loadConfig, ConfigError } from './config.js';
 import { createDispatcher, keysHelp } from './app.js';
 import { zomroTest } from './zomroTest.js';
-import { schedule, msk, span } from './schedule.js';
+import { schedule, msk, span, ago, lastMove } from './schedule.js';
 import { readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 
@@ -40,6 +40,7 @@ const HELP = `Команды:
   available [ДАТАЦЕНТР] [--tsv]  какие тарифы можно заказать прямо сейчас: проверка формы заказа
               у каждого тарифа (только чтение, у Zomro — около минуты)
   schedule    расписание плановой смены сервера: когда следующая и сколько осталось
+  last-move   сколько прошло с последнего переезда (одна строка — для главного меню)
   migrate --yes [--provider aeza]  переехать на новый сервер сейчас (--provider — только у этого
               хостера, иначе по очереди CLOUD_ORDER, включая хостеров «по запросу») (заказ, сборка, перенос) — часы; запускать
               в фоне (меню, пункт «Переезд сейчас»)
@@ -160,9 +161,13 @@ async function main(argv, { env = process.env, out = console.log, deps = {} } = 
       if (m.selfOfflineAt) out(`⚠️ ${fmt(m.selfOfflineAt)} у самого диспетчера не было интернета (REFERENCE_URLS не открывались) — сервер тогда не проверялся`);
       out(`Последний бэкап: ${b.latest ? `${b.latest.file.split('/').at(-1)}, ${Math.max(1, Math.round(b.latest.size / 1024))} КБ` : 'нет'}`);
       if (b.error && (!b.lastAt || b.failedAt > b.lastAt)) out(`Последняя попытка бэкапа не удалась (${fmt(b.failedAt)}): ${b.error}`);
+      out(lastMove({ state: d.state, migrating: d.emergency.migrating() }));
       out(d.emergency.describe(m));
       return 0;
     }
+    case 'last-move':
+      out(lastMove({ state: d.state, migrating: d.emergency.migrating() }));
+      return 0;
     case 'check': {
       const r = await d.monitor.tick();
       if (r.status === 'self-offline') out('Свой интернет недоступен (REFERENCE_URLS не открываются) — сервер не проверял');
@@ -323,13 +328,13 @@ async function main(argv, { env = process.env, out = console.log, deps = {} } = 
       const manual = config.providers.filter((n) => config.modes[n] === 'manual').map((n) => NAMES[n]);
       if (!s.enabled) {
         out('Плановая смена: ВЫКЛЮЧЕНА — сервер работает, пока его не заблокируют. Переезд — по вашей команде (меню, «Переезд сейчас»)');
-        out(`Последняя смена: ${s.lastAt ? msk(s.lastAt) : 'ещё не было'}`);
+        out(`Последняя смена: ${s.lastAt ? `${msk(s.lastAt)} — ${ago(Date.now() - s.lastAt)}` : 'ещё не было'}`);
         out(`Хостеры для автоматического переезда (авария): ${auto}${manual.length ? `; только по запросу: ${manual.join(', ')}` : ''}`);
         return 0;
       }
       out(`Плановая смена: каждые ${s.everyDays} дн. в ${s.at} МСК, новый сервер заказывается за ${s.overlapHours} ч`);
       out(`Хостеры для смены: ${auto}${manual.length ? `; только по запросу: ${manual.join(', ')}` : ''}`);
-      out(`Последняя смена: ${s.lastAt ? msk(s.lastAt) : 'ещё не было'}`);
+      out(`Последняя смена: ${s.lastAt ? `${msk(s.lastAt)} — ${ago(Date.now() - s.lastAt)}` : 'ещё не было'}`);
       out(`Следующая смена: ${msk(s.next)} — через ${span(s.left)}`);
       out(`Заказ нового сервера: ${msk(s.orderAt)}${s.orderAt <= Date.now() ? ' (время уже наступило)' : ` — через ${span(s.orderAt - Date.now())}`}`);
       out('⚠️ Автоматическая смена ещё не включена (этап 7): это расписание, по которому она будет работать');
