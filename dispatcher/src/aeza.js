@@ -228,14 +228,15 @@ function createAeza({ settings, fetch = globalThis.fetch, now = () => Date.now()
     });
   }
 
-  async function order({ name = serverName(now()), password = newPassword() } = {}) {
+  // product и os — другой тариф той же локации (переезд: выбранный нельзя заказать)
+  async function order({ name = serverName(now()), password = newPassword(), product = settings.product, os: wanted = null } = {}) {
     if (!NAME.test(name)) throw new AezaError(`Имя сервера должно начинаться с ${PREFIX}`);
-    if (!settings.product) throw new AezaError('Тариф Aeza не выбран: AEZA_PRODUCT (меню — «Изменить тариф»)');
-    const os = settings.os || (await pickOs()).id;
+    if (!product) throw new AezaError('Тариф Aeza не выбран: AEZA_PRODUCT (меню — «Изменить тариф»)');
+    const os = wanted || settings.os || (await pickOs()).id;
     const res = await call('POST', '/services/orders', {
       body: {
         method: 'balance',
-        orders: [{ productId: Number(settings.product), count: 1, name, term: settings.term ?? 'hour', termCount: 1, autoProlong: true, parameters: { os } }]
+        orders: [{ productId: Number(product), count: 1, name, term: settings.term ?? 'hour', termCount: 1, autoProlong: true, parameters: { os } }]
       }
     });
     pending.set(name, password);

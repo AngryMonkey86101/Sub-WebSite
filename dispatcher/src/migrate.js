@@ -4,6 +4,7 @@ import { setTimeout as sleep } from 'node:timers/promises';
 import { tcpOpen } from './zomroTest.js';
 import { serverName } from './cloud.js';
 import { stopper, CancelledError } from './cancel.js';
+import { chooseTariff } from './tariffPick.js';
 
 // Переезд на новый сервер (docs/PLAN.md, раздел 15, этапы 5–7). Один и тот же порядок и для
 // переезда по команде, и для плановой смены, и для аварии:
@@ -229,7 +230,19 @@ function createMigration({ config, keys, state, clouds = {}, backups, monitor, o
         // имя — уникальное: заказ у прежнего хостера мог остаться в учёте с тем же временем
         let wanted = serverName(now());
         if (orders.list().some((e) => e.name === wanted)) wanted = `${wanted}-${name}`;
-        ordered = await cloud.order({ name: wanted });
+        // выбранный тариф сейчас заказать нельзя — следующий по цене в том же дата-центре
+        let extra = {};
+        if (typeof cloud.tariffs === 'function' && typeof cloud.check === 'function') {
+          const pick = await chooseTariff({ provider: name, cloud, settings });
+          if (pick.warning) say(`  ⚠ ${NAMES[name]}: ${pick.warning}`);
+          if (pick.changed) {
+            const t = pick.tariff;
+            extra = { [name === 'aeza' ? 'product' : 'pricelist']: t.pricelist, ...(pick.os ? { os: pick.os } : {}) };
+            say(`  Выбранный тариф у ${NAMES[name]} сейчас заказать нельзя (${pick.skipped.join('; ')}) — заказываю ${t.name} (${t.price}) в том же дата-центре`);
+            await notify(`ℹ️ Тариф у ${NAMES[name]} сейчас заказать нельзя (${pick.skipped[0]}) — для переезда беру ${t.name}, ${t.price}. Выбранный тариф в настройках не меняю.`);
+          }
+        }
+        ordered = await cloud.order({ name: wanted, ...extra });
         orders.track(ordered.name, { until: now() + settings.buildTimeout + settings.sshTimeout + 2 * HOUR, purpose: 'migration', provider: name });
         phase('building', { server: ordered.name, provider: name });
         say(`Заказан ${ordered.name} у ${NAMES[name]}, жду сборку до ${Math.round(settings.buildTimeout / MIN)} мин (отменить ожидание — меню, «Переезд сейчас»)`);

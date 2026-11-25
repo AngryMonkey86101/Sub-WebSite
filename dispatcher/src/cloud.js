@@ -111,15 +111,16 @@ function createCloud({ settings, fetch = globalThis.fetch, now = () => Date.now(
 
   // Заказ посуточного сервера. Возвращает имя и пароль root — сервер появится в списке через
   // несколько минут (waitFor). Деньги списываются с лицевого счёта.
-  async function order({ name = serverName(now()), password = newPassword() } = {}) {
+  // pricelist и os — другой тариф того же дата-центра (переезд: выбранный нельзя заказать)
+  async function order({ name = serverName(now()), password = newPassword(), pricelist = settings.pricelist, os = settings.os } = {}) {
     if (!NAME.test(name)) throw new ZomroError(`Имя сервера должно начинаться с ${PREFIX}`);
     if (!strongPassword(password)) throw new ZomroError('Пароль root не подходит Zomro: нужно от 12 символов, строчные, заглавные, цифры и спецсимволы');
     const doc = await zomro.call('instances.order.param', {
-      pricelist: settings.pricelist,
+      pricelist,
       datacenter: settings.datacenter,
       period: '-50',
       autoprolong: '-50',
-      instances_os: settings.os,
+      instances_os: os,
       servername: name,
       password,
       use_ssh_key: 'off',
@@ -335,7 +336,7 @@ function createCloud({ settings, fetch = globalThis.fetch, now = () => Date.now(
         const os = await pickOs({ pricelist: t.pricelist, datacenter: t.datacenter, known });
         out.push({ ...t, can: true, os });
       } catch (err) {
-        out.push({ ...t, can: false, reason: err.noImage ? `форма открыта, номер образа ОС неизвестен — order-form ${t.pricelist} ${t.datacenter}` : err.message });
+        out.push({ ...t, can: false, noImage: Boolean(err.noImage), reason: err.noImage ? `форма открыта, номер образа ОС неизвестен — order-form ${t.pricelist} ${t.datacenter}` : err.message });
       }
     }
     return out;
