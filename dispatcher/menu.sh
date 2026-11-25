@@ -609,6 +609,34 @@ screen_portal_update() {
   pause
 }
 
+# Перезапуск контейнера диспетчера: помогает, если он завис (например, переезд не пишет итог).
+# Идущий переезд при этом обрывается — его замок снимается, иначе новый 8 часов не начнётся.
+screen_restart() {
+  header 'Перезапустить диспетчер'
+  printf 'Контейнер диспетчера перезапустится — секунд 10–30. Ключи, бэкапы, настройки и учёт заказов\n'
+  printf 'лежат в томе данных и не теряются. Код не обновляется (обновление — dispatcher/README.md).\n'
+  local running=0
+  if migration_running; then
+    running=1
+    printf '\n%sИдёт переезд — перезапуск его прервёт:%s\n' "$Y" "$R"
+    cli migrate-status
+    printf '\nЗаказанный сервер останется в учёте заказов — служба удалит его сама.\n'
+    printf 'Если аварийный переезд включён и сервер недоступен из РФ, он начнётся заново сам (выключить — пункт 13).\n'
+  fi
+  printf '\n  %s1%s — перезапустить\n  %s0%s — назад\n' "$B" "$R" "$B" "$R"
+  [ "$(ask)" = 1 ] || return
+  compose restart dispatcher || { printf '%sНе перезапустился — посмотрите: docker compose logs --tail 40 dispatcher%s\n' "$RD" "$R"; pause; return; }
+  local up=0
+  for _ in $(seq 1 30); do
+    if compose exec -T dispatcher true >/dev/null 2>&1; then up=1; break; fi
+    sleep 1
+  done
+  if [ "$up" -ne 1 ]; then printf '%sДиспетчер не поднялся за 30 с — посмотрите: docker compose logs --tail 40 dispatcher%s\n' "$RD" "$R"; pause; return; fi
+  [ "$running" -eq 0 ] || cli migrate-abandon
+  printf '%s✓ Диспетчер перезапущен%s\n' "$G" "$R"
+  pause
+}
+
 main_menu() {
   local last
   while true; do
@@ -629,6 +657,7 @@ main_menu() {
     printf '  %s12%s — Плановая смена: включить или выключить\n' "$B" "$R"
     printf '  %s13%s — Аварийный переезд: включить, выключить, через сколько минут\n' "$B" "$R"
     printf '  %s14%s — Обновить портал на сервере VPN\n' "$B" "$R"
+    printf '  %s15%s — Перезапустить диспетчер\n' "$B" "$R"
     printf '  %s0%s — Выход\n' "$B" "$R"
     case "$(ask)" in
       1) screen_status ;;
@@ -645,6 +674,7 @@ main_menu() {
       12) screen_rotation ;;
       13) screen_emergency ;;
       14) screen_portal_update ;;
+      15) screen_restart ;;
       0) clear 2>/dev/null || true; exit 0 ;;
       *) ;;
     esac

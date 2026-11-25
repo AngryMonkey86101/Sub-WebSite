@@ -92,6 +92,8 @@ case "$*" in
   *"test -f /data/migration.lock") [ -n "\${RUNNING:-}" ] ;;
   *"tail -n 40 -F /data/migrate.log") echo "[09:00 UTC] Заказан family-vpn-20261114-0900" ;;
   "compose --ansi never up -d") ;;
+  "compose --ansi never restart dispatcher") ;;
+  *" src/cli.js migrate-abandon") echo "✓ Замок переезда снят, переезд записан как «не удался»" ;;
 esac`);
   const run = (input, extra = {}) => {
     const res = spawnSync('bash', [join(app, 'menu.sh')], { input, env: { PATH: `${bin}:${process.env.PATH}`, CALLS: calls, LANG: 'C.UTF-8', ...extra } });
@@ -290,6 +292,26 @@ test('menu.sh: обновить портал — версия, подтверж�
   res = t.run('14\n\n0\n', { RUNNING: '1' });
   assert.match(res.out, /Идёт переезд — обновить можно после него/);
   assert.equal(res.calls.filter((c) => /portal-update --yes/.test(c)).length, started, 'во время переезда не запущено');
+});
+
+test('menu.sh: перезапуск диспетчера — подтверждение; идёт переезд — предупреждение и снятие замока', () => {
+  const t = setup('restart');
+  let res = t.run('15\n0\n0\n');
+  assert.equal(res.status, 0, res.err);
+  assert.match(res.out, /15 — Перезапустить диспетчер/);
+  assert.ok(!res.calls.includes('compose --ansi never restart dispatcher'), 'передумали — не перезапущен');
+
+  res = t.run('15\n1\n\n0\n');
+  assert.ok(res.calls.includes('compose --ansi never restart dispatcher'), res.calls.join('\n'));
+  assert.match(res.out, /✓ Диспетчер перезапущен/);
+  assert.ok(!res.calls.some((c) => /migrate-abandon/.test(c)), 'переезда нет — замок не трогаем');
+
+  res = t.run('15\n1\n\n0\n', { RUNNING: '1' });
+  assert.match(res.out, /Идёт переезд — перезапуск его прервёт[\s\S]*Переездов ещё не было/);
+  const restart = res.calls.lastIndexOf('compose --ansi never restart dispatcher');
+  const abandon = res.calls.findIndex((c) => /src\/cli\.js migrate-abandon/.test(c));
+  assert.ok(restart >= 0 && abandon > restart, 'замок снимается после перезапуска: старый процесс его уже не перепишет');
+  assert.match(res.out, /✓ Замок переезда снят[\s\S]*✓ Диспетчер перезапущен/);
 });
 
 test('menu.sh: shellcheck без замечаний', { skip: spawnSync('shellcheck', ['--version']).status !== 0 && 'нет shellcheck' }, () => {

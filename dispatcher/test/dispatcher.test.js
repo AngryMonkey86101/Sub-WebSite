@@ -11,6 +11,8 @@ import { tarNames, sshReason } from '../src/backups.js';
 import { run as realRun } from '../src/run.js';
 import { main } from '../src/cli.js';
 import { createTar } from '../../server/src/tar.js';
+import { createState } from '../src/state.js';
+import { existsSync, mkdirSync } from 'node:fs';
 
 // Диспетчер, этапы 1–3: настройки, ключи, сообщения, проверка из РФ, бэкап по SSH.
 // Сеть не нужна: Telegram, сайты и DNS — поддельные, вместо ssh — подмена с настоящим бэкапом age.
@@ -422,4 +424,38 @@ test('обновление портала: версия, обновление, �
   w.net.portalOld = false;
   writeFileSync(join(dataDir, 'migration.lock'), '{}');
   await assert.rejects(cli('portal-update', '--yes'), /Идёт переезд/);
+});
+
+test('migrate-abandon: после перезапуска — замок снят, переезд «не удался»; после заморозки — напомнить про unfreeze', { skip: !HAS_TOOLS && 'нет age или ssh-keygen' }, async () => {
+  const dataDir = join(dir, 'abandon');
+  mkdirSync(dataDir, { recursive: true });
+  const w = world({ dataDir });
+  const env = baseEnv({ DATA_DIR: dataDir });
+  const deps = { fetch: w.fetch, run: w.run, lookup: w.lookup };
+  const lock = join(dataDir, 'migration.lock');
+  const lines = [];
+  const out = (l) => lines.push(l);
+
+  assert.equal(await main(['migrate-abandon'], { env, out, deps }), 0);
+  assert.match(lines.join('\n'), /Прерванного переезда нет/);
+
+  // завис во время сборки
+  createState(dataDir).set('migration', { phase: 'building', server: 'family-vpn-20261125-1406', reason: 'аварийный', startedAt: 1, updatedAt: 1 });
+  writeFileSync(lock, '{}');
+  lines.length = 0;
+  assert.equal(await main(['migrate-abandon'], { env, out, deps }), 0);
+  assert.equal(existsSync(lock), false, 'замок снят');
+  const m = createState(dataDir).get('migration');
+  assert.equal(m.phase, 'failed');
+  assert.equal(m.error, 'прерван: диспетчер перезапущен');
+  assert.equal(m.server, 'family-vpn-20261125-1406');
+  assert.match(lines.join('\n'), /✓ Замок переезда снят[\s\S]*family-vpn-20261125-1406 — в учёте заказов/);
+  assert.doesNotMatch(lines.join('\n'), /unfreeze/);
+
+  // прервался после заморозки старого
+  createState(dataDir).set('migration', { phase: 'finish', server: 'family-vpn-20261125-1406', updatedAt: 1 });
+  writeFileSync(lock, '{}');
+  lines.length = 0;
+  await main(['migrate-abandon'], { env, out, deps });
+  assert.match(lines.join('\n'), /после заморозки старого сервера[\s\S]*node src\/cli\.js unfreeze/);
 });
