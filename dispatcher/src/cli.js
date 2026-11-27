@@ -513,7 +513,7 @@ async function main(argv, { env = process.env, out = console.log, deps = {} } = 
       if (r.server) out(`  Заказанный сервер ${r.server} — в учёте заказов.`);
       if (r.frozenRisk) {
         out('⚠️ Переезд прервался после заморозки старого сервера: бот и сайт там могут стоять.');
-        out('   Проверьте оба VPS и DNS. Если имена остались на старом сервере, разморозьте его через unfreeze.');
+        out('   Проверьте оба VPS и DNS. Если имена остались на старом сервере, выполните node src/cli.js unfreeze.');
       }
       return 0;
     }
