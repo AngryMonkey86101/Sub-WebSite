@@ -1,7 +1,7 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync, utimesSync, existsSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync, utimesSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { loadConfig } from '../src/config.js';
@@ -79,6 +79,44 @@ test('переезд: процесса нет или контейнер пере
   assert.equal((await fresh.migration()).action, 'abandoned');
   assert.match(w.notes.at(-1), /Старый сервер мог остаться замороженным/);
   assert.deepEqual(w.killed, []);
+});
+
+test('выкладка: замок блокирует переезд, переживает запуск диспетчера и снимается только владельцем или по сроку', async () => {
+  const w = world('deploy');
+  const script = readFileSync(new URL('../scripts/deploy-lock.mjs', import.meta.url));
+  const owner = 'cb17fa7f-c947-41a2-83c9-ce1fdcc408b9';
+  const other = '8e8b5caa-6233-4e21-a5bd-aed21e37a4b7';
+  const guard = (action, id = owner) => spawnSync(process.execPath, ['--input-type=module', '-', action, id], {
+    env: { ...process.env, DATA_DIR: w.config.dataDir }, input: script
+  }).status;
+
+  w.state.set('migration', { phase: 'done' });
+  w.lock(4242, 1);
+  assert.equal(guard('check'), 75);
+  assert.equal(guard('acquire'), 75);
+  assert.equal(guard('release'), 0);
+  assert.ok(existsSync(w.lockFile), 'выкладка не снимает замок переезда');
+  rmSync(w.lockFile);
+
+  assert.equal(guard('acquire'), 0);
+  assert.equal(guard('acquire', other), 75);
+  assert.equal(guard('release', other), 0);
+  const created = w.now() / 1000;
+  utimesSync(w.lockFile, created, created);
+  w.tick(MIN);
+  const afterRestart = w.make(w.now());
+  assert.equal((await afterRestart.migration()).action, 'none');
+  assert.equal(guard('check'), 75);
+  assert.equal(guard('release'), 0);
+  assert.equal(guard('check'), 0);
+
+  assert.equal(guard('acquire'), 0);
+  utimesSync(w.lockFile, created, created);
+  w.tick(10 * MIN);
+  assert.equal((await afterRestart.migration()).action, 'deployment-unlocked');
+  assert.equal(existsSync(w.lockFile), false);
+  assert.deepEqual(w.state.get('migration'), { phase: 'done' });
+  assert.deepEqual(w.notes, []);
 });
 
 test('переезд: сервер собирается, замок не обновлялся HANG_MIGRATION_MIN — процесс остановлен', async () => {

@@ -51,6 +51,51 @@ git -C ~/sub-website pull && cd ~/sub-website/dispatcher && docker compose up -d
 
 Ключи, бэкапы и состояние — в томе `dispatcher_data`, при обновлении не теряются.
 
+#### Автоматическое обновление через GitHub Actions
+
+Workflow **Dispatcher** запускает тесты после каждого пуша в `main`. После успешных тестов он устанавливает на VPS проверенный SHA. Если идёт переезд, задание повторяет попытку раз в минуту до 90 попыток. Итог и SHA выкладки видны в сводке запуска. Подключение настраивается один раз.
+
+1. На своём компьютере создайте отдельную пару SSH-ключей для выкладки. Для этой пары оставьте парольную фразу пустой, чтобы runner мог подключиться автоматически.
+
+   ```bash
+   ssh-keygen -t ed25519 -C nomad-dispatcher-ci -f ~/.ssh/nomad-dispatcher-ci
+   ```
+
+2. На **VPS диспетчера** под `root` обновите checkout и установите команду выкладки. Имя и путь контейнера берутся из существующего проекта в `/root/sub-website/dispatcher`.
+
+   ```bash
+   git -C /root/sub-website pull --ff-only origin main
+   install -o root -g root -m 0755 \
+     /root/sub-website/dispatcher/scripts/deploy-dispatcher.sh \
+     /usr/local/sbin/nomad-deploy-dispatcher
+   command -v sudo >/dev/null || apt-get install -y sudo
+   id -u nomad-deploy >/dev/null 2>&1 || useradd --create-home --shell /bin/bash nomad-deploy
+   install -d -m 0700 -o nomad-deploy -g nomad-deploy /home/nomad-deploy/.ssh
+   ```
+
+3. Добавьте в `/home/nomad-deploy/.ssh/authorized_keys` одну строку. Вместо условной части вставьте открытый ключ из `nomad-dispatcher-ci.pub` целиком.
+
+   ```text
+   restrict,command="/usr/local/sbin/nomad-deploy-dispatcher --ssh" ssh-ed25519 AAAA… nomad-dispatcher-ci
+   ```
+
+   Установите владельца `nomad-deploy:nomad-deploy` и режим `600` для файла `authorized_keys`. Через `visudo -f /etc/sudoers.d/nomad-deploy` добавьте строку ниже. Команда принимает только полный SHA с рабочего `main` проекта. Учётной записи достаточно этого правила.
+
+   ```text
+   nomad-deploy ALL=(root) NOPASSWD: /usr/local/sbin/nomad-deploy-dispatcher *
+   ```
+
+4. В GitHub откройте **Settings → Secrets and variables → Actions** и добавьте секреты. Хост должен быть доступен по SSH с GitHub-hosted runner. Для нестандартного порта добавьте переменную `DISPATCHER_SSH_PORT` на вкладке **Variables**.
+
+   | Имя | Значение |
+   |---|---|
+   | `DISPATCHER_SSH_HOST` | IP или DNS-имя диспетчера без порта |
+   | `DISPATCHER_SSH_USER` | `nomad-deploy` |
+   | `DISPATCHER_SSH_KEY` | Закрытая часть отдельного ключа `nomad-dispatcher-ci` |
+   | `DISPATCHER_KNOWN_HOSTS` | Строка `хост ssh-ed25519 …` с открытым ключом SSH-сервера из проверенной консоли VPS. Для нестандартного порта первый столбец — `[хост]:порт` |
+
+5. Запустите **Actions → Dispatcher → Run workflow** на ветке `main`. После проверки здоровья контейнера в сводке будет SHA. Состояние и бэкапы сохраняются в прежнем томе. Если проверка контейнера не прошла, смотрите журнал задания и `docker compose logs dispatcher` на VPS.
+
 ### Команды диспетчера
 
 Запускаются из папки диспетчера:

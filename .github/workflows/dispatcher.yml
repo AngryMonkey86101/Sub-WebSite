@@ -1,10 +1,9 @@
-# Диспетчер в РФ (dispatcher/): тесты на каждый пуш и пул-реквест с изменениями в dispatcher/.
+# Диспетчер в РФ: тесты и выкладка на VPS после пуша в main.
 name: Dispatcher
 
 on:
   push:
     branches: [main]
-    paths: ['dispatcher/**', '.github/workflows/dispatcher.yml']
   pull_request:
     paths: ['dispatcher/**', '.github/workflows/dispatcher.yml']
   workflow_dispatch:
@@ -32,3 +31,58 @@ jobs:
       - name: Проверка образа
         run: |
           docker run --rm --entrypoint sh family-vpn-dispatcher -c 'age --version && ssh -V && sshpass -V | head -1 && node src/cli.js help | head -1'
+
+  deploy:
+    needs: test
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    permissions: {}
+    runs-on: ubuntu-latest
+    timeout-minutes: 105
+    concurrency:
+      group: dispatcher-vps
+      cancel-in-progress: false
+    env:
+      DEPLOY_HOST: ${{ secrets.DISPATCHER_SSH_HOST }}
+    steps:
+      - name: Выкладка пропущена
+        if: env.DEPLOY_HOST == ''
+        run: echo 'Выкладка диспетчера не настроена (DISPATCHER_SSH_HOST).' >> "$GITHUB_STEP_SUMMARY"
+      - name: Обновить диспетчер на VPS
+        if: env.DEPLOY_HOST != ''
+        env:
+          DEPLOY_USER: ${{ secrets.DISPATCHER_SSH_USER }}
+          DEPLOY_KEY: ${{ secrets.DISPATCHER_SSH_KEY }}
+          KNOWN_HOSTS: ${{ secrets.DISPATCHER_KNOWN_HOSTS }}
+          DEPLOY_PORT: ${{ vars.DISPATCHER_SSH_PORT || '22' }}
+          DEPLOY_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          if [[ -z "$DEPLOY_USER" || -z "$DEPLOY_KEY" || -z "$KNOWN_HOSTS" ]]; then
+            echo 'Для выкладки нужны DISPATCHER_SSH_USER, DISPATCHER_SSH_KEY и DISPATCHER_KNOWN_HOSTS.' >&2
+            exit 1
+          fi
+          umask 077
+          ssh_dir=$(mktemp -d "$RUNNER_TEMP/dispatcher-ssh.XXXXXX")
+          trap 'rm -rf -- "$ssh_dir"' EXIT
+          printf '%s\n' "$DEPLOY_KEY" > "$ssh_dir/key"
+          printf '%s\n' "$KNOWN_HOSTS" > "$ssh_dir/known_hosts"
+          for ((attempt = 1; attempt <= 90; attempt++)); do
+            if ssh -n -i "$ssh_dir/key" -p "$DEPLOY_PORT" \
+              -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes \
+              -o UserKnownHostsFile="$ssh_dir/known_hosts" -o ConnectTimeout=15 \
+              -o ServerAliveInterval=15 -o ServerAliveCountMax=3 \
+              -- "$DEPLOY_USER@$DEPLOY_HOST" "deploy-dispatcher $DEPLOY_SHA"; then
+              printf 'Диспетчер развёрнут, SHA `%s`.\n' "$DEPLOY_SHA" >> "$GITHUB_STEP_SUMMARY"
+              exit 0
+            else
+              code=$?
+              if [[ "$code" == 78 ]]; then
+                echo 'Выкладка пропущена: в main уже другой коммит.' >> "$GITHUB_STEP_SUMMARY"
+                exit 0
+              fi
+              if [[ "$code" != 75 ]]; then exit "$code"; fi
+            fi
+            if (( attempt < 90 )); then sleep 60; fi
+          done
+          echo 'Диспетчер занят. Повторите workflow после завершения операции.' >&2
+          exit 1

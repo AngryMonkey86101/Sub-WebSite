@@ -109,6 +109,18 @@ function createHangWatch({ config, state, notify, now = () => Date.now(), bootAt
     } catch {
       info = {};
     }
+    if (info?.kind === 'deploy') {
+      // Выкладка переживает пересоздание контейнера. Старый замок после
+      // обрыва SSH снимается отдельно от журнала переездов.
+      if (now() - st.mtimeMs >= 10 * MIN) {
+        const current = JSON.parse(readFileSync(lock, 'utf8'));
+        if (current?.kind === 'deploy' && current.owner === info.owner) {
+          rmSync(lock, { force: true });
+          return { action: 'deployment-unlocked' };
+        }
+      }
+      return { action: 'none' };
+    }
     const m = state.get('migration') ?? {};
     const phase = m.phase ?? 'start';
     const where = PHASES[phase] ?? phase;
