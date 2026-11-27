@@ -64,6 +64,24 @@ const quiet = () => {
   return { lines, log: (...a) => lines.push(a.join(' ')), error: (...a) => lines.push(a.join(' ')) };
 };
 
+test('CLI DuckDNS: отказ переключения возвращает ошибку вызывающему скрипту', async () => {
+  const saved = { ...process.env };
+  Object.assign(process.env, {
+    PUBLIC_URL: `https://${PORTAL}`, VPN_HOST: VPN, AMNEZIA_API_KEY: 'test',
+    KEY_ENCRYPTION_KEY: randomBytes(32).toString('base64'), DB_PATH: ':memory:', DUCKDNS_TOKEN: TOKEN
+  });
+  delete process.env.TELEGRAM_BOT_TOKEN;
+  try {
+    const net = fakeNet(NEW);
+    net.state.dns = { [VPN]: [OLD], [PORTAL]: [OLD] };
+    net.state.duckdns = 'KO';
+    await assert.rejects(main(['duckdns', '--takeover'], { out: () => {}, fetch: net.fetch, dns: net.dns }), /DuckDNS отклонил обновление/);
+    assert.equal(net.state.updates.length, 1);
+  } finally {
+    process.env = saved;
+  }
+});
+
 function setup({ ip = OLD, names = [VPN, PORTAL], token = TOKEN, db = openDatabase(':memory:') } = {}) {
   const net = fakeNet(ip);
   const notes = [];

@@ -20,10 +20,10 @@ function nextRotation({ anchor, now, everyDays, at }) {
   return when;
 }
 
-function schedule({ config, state, now = Date.now() }) {
+function schedule({ config, state, now = Date.now(), after = now }) {
   const rotation = state.get('rotation') ?? {};
   const anchor = rotation.lastAt ?? state.get('startedAt') ?? now;
-  const next = nextRotation({ anchor, now, everyDays: config.rotation.everyDays, at: config.rotation.at });
+  const next = nextRotation({ anchor, now: Math.max(now, after), everyDays: config.rotation.everyDays, at: config.rotation.at });
   return {
     enabled: config.rotation.enabled,
     everyDays: config.rotation.everyDays,

@@ -1,7 +1,7 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync } from 'node:fs';
 import { gzipSync } from 'node:zlib';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -10,6 +10,7 @@ import { createState } from '../src/state.js';
 import { ensureKeys } from '../src/keys.js';
 import { createOrders } from '../src/orders.js';
 import { createMigration } from '../src/migrate.js';
+import { rotationKey } from '../src/plannedRotation.js';
 import { run as realRun } from '../src/run.js';
 import { createTar } from '../../server/src/tar.js';
 
@@ -38,11 +39,13 @@ const open = (keyText, data) => {
 
 // ssh(script) — подмена ответа ssh на новом сервере (вернуть undefined — обычный ответ)
 // soldout — тарифы, которые нельзя заказать (у облака появляются tariffs и check)
-async function world(name, { oldOurs = false, probe = 'up', freeze = 'direct', failAt = null, ssh = null, soldout = null } = {}) {
+async function world(name, { oldOurs = false, probe = 'up', freeze = 'direct', failAt = null, ssh = null, soldout = null, fakeAge = false, vpnSynced = true } = {}) {
   const dataDir = join(dir, name);
   const config = loadConfig({ PORTAL_HOST: 'proxyizi.duckdns.org', DATA_DIR: dataDir, ZOMRO_USER: 'u@example.com', ZOMRO_PASSWORD: 'p' });
-  const keys = await ensureKeys(dataDir);
+  mkdirSync(dataDir);
+  const keys = fakeAge ? { ageFile: 'fixture', sshFile: 'fixture', sshPublic: 'ssh-ed25519 fixture' } : await ensureKeys(dataDir);
   const state = createState(dataDir);
+  const plannedState = createState(dataDir, 'planned-rotation.json');
   let clock = Date.UTC(2026, 10, 14, 9, 0);
   const now = () => clock;
   const wait = async (ms) => { clock += ms; };
@@ -52,9 +55,10 @@ async function world(name, { oldOurs = false, probe = 'up', freeze = 'direct', f
   const plainLatest = gzipSync(createTar([{ name: 'env', data: 'PORTAL_HOST=proxyizi.duckdns.org\n' }, { name: 'amnezia.json', data: '{}' }, { name: 'portal.sqlite', data: 'latest' }]));
   const plainFinal = gzipSync(createTar([{ name: 'env', data: 'X=1\n' }, { name: 'amnezia.json', data: '{}' }, { name: 'portal.sqlite', data: 'final' }]));
   const latestFile = join(dataDir, 'latest.age');
-  writeFileSync(latestFile, seal(keys.recipient, plainLatest));
-  writeFileSync(join(dataDir, 'final.age'), seal(keys.recipient, plainFinal));
-  writeFileSync(join(dataDir, 'caddy.age'), seal(keys.recipient, Buffer.from('CADDY-CERTS')));
+  const archive = (data) => fakeAge ? data : seal(keys.recipient, data);
+  writeFileSync(latestFile, archive(plainLatest));
+  writeFileSync(join(dataDir, 'final.age'), archive(plainFinal));
+  writeFileSync(join(dataDir, 'caddy.age'), archive(Buffer.from('CADDY-CERTS')));
 
   const log = { orders: [], notes: [], root: [], removed: [], freezes: [], unfreezes: [], trusted: 0, out: [] };
   let namesMoved = false;
@@ -66,6 +70,7 @@ async function world(name, { oldOurs = false, probe = 'up', freeze = 'direct', f
     order: async (options = {}) => {
       log.orders.push(options);
       ordered = { name: 'family-vpn-20261114-0900', password: 'RootPassw0rdFromOrder123' };
+      if (failAt === 'order') throw new Error('ответ хостера потерян');
       return ordered;
     },
     waitFor: async (n) => {
@@ -95,6 +100,8 @@ async function world(name, { oldOurs = false, probe = 'up', freeze = 'direct', f
     probeServer: async () => (namesMoved ? { ok: true, ip: NEW_IP } : probe === 'up' ? { ok: true, ip: OLD_IP } : { ok: false, ip: OLD_IP, reason: 'портал не отвечает (ETIMEDOUT)' })
   };
   const run = async (command, args, options = {}) => {
+    if (fakeAge && command === 'age-keygen') return { code: 0, stdout: Buffer.from(args.length ? 'age1fixture' : 'AGE-SECRET-KEY-1FIXTURE'), stderr: '' };
+    if (fakeAge && command === 'age') return { code: 0, stdout: options.input, stderr: '' };
     if (command !== 'sshpass') return realRun(command, args, options);
     const script = args.at(-1);
     log.root.push({ args, script, input: options.input ? Buffer.from(options.input) : null, password: options.env?.SSHPASS });
@@ -123,17 +130,98 @@ async function world(name, { oldOurs = false, probe = 'up', freeze = 'direct', f
       if (failAt === 'finish6') return { code: 1, stdout: Buffer.alloc(0), stderr: '✗ Остановка на шаге «6/7 Прежние ключи сервера VPN»' };
       namesMoved = true;
       if (failAt === 'finish7') return { code: 1, stdout: Buffer.alloc(0), stderr: '✗ Остановка на шаге «7/7 Имена DuckDNS и HTTPS»: Bind for 0.0.0.0:443 failed' };
-      return { code: 0, stdout: Buffer.from('▶ 7/7 Имена DuckDNS и HTTPS\n  ✓ Имена ведут сюда\n'), stderr: '' };
+      return { code: 0, stdout: Buffer.from('▶ 7/7 Имена DuckDNS и HTTPS\nDNS_NAMES proxyizi.duckdns.org vpn-fixture.duckdns.org\n  ✓ Имена ведут сюда\n'), stderr: '' };
     }
     return { code: 0, stdout: Buffer.from(/git -C/.test(script) ? 'abc1234 последний коммит\n' : ''), stderr: '' };
   };
-  const lookup = async () => ({ address: namesMoved ? NEW_IP : OLD_IP });
-  const migration = createMigration({ config, keys, state, clouds: { zomro: cloud }, backups, monitor, orders, notify: async (t) => log.notes.push(t), run, lookup, now, wait, tcp: async () => true, out: (l) => log.out.push(l) });
-  return { config, keys, state, orders, log, migration, dataDir, plainLatest, plainFinal, now };
+  const lookup = async (host) => ({ address: namesMoved && (host === config.portalHost || vpnSynced) ? NEW_IP : OLD_IP });
+  const createWorker = () => createMigration({ config, keys, state, plannedState, clouds: { zomro: cloud }, backups, monitor, orders, notify: async (t) => log.notes.push(t), run, lookup, now, wait, tcp: async () => true, out: (l) => log.out.push(l) });
+  return { config, keys, state, plannedState, orders, log, migration: createWorker(), createWorker, dataDir, plainLatest, plainFinal, now, wait };
 }
 
 // загрузки на новый сервер по порядку: имя файла → содержимое
 const uploads = (log) => log.root.filter((c) => /cat > \/root\/family-vpn-migrate\//.test(c.script)).map((c) => [c.script.match(/family-vpn-migrate\/([\w.]+) && chmod/)[1], c.input]);
+
+async function scheduled(name, options = {}) {
+  const w = await world(name, { ...options, fakeAge: true, oldOurs: true });
+  const at = w.now() + 20 * 3600000;
+  const anchor = w.now();
+  w.state.set('startedAt', anchor);
+  w.plannedState.set('job', { at, anchor, key: rotationKey(w.config, w.state), phase: 'preparing' });
+  const runStage = (stage) => w.createWorker().migrate({ automatic: true, reason: 'по расписанию', planned: { stage, at } });
+  await runStage('prepare');
+  const finish = async () => {
+    const prepared = w.plannedState.get('job');
+    await w.wait(at - w.now());
+    w.plannedState.set('job', { ...prepared, phase: 'finishing' });
+    return runStage('finish');
+  };
+  return { ...w, at, finish };
+}
+
+test('расписание: отдельная подготовка, затем перенос на тот же VPS после ожидания', async () => {
+  const w = await scheduled('scheduled-ready');
+  const job = w.plannedState.get('job');
+  assert.equal(job.phase, 'prepared');
+  assert.equal(job.server.id, '7300001');
+  assert.equal(job.server.password, undefined);
+  assert.equal(w.log.freezes.length, 0);
+  assert.equal(w.state.get('rotation'), null);
+  assert.equal(existsSync(join(w.dataDir, 'migration.lock')), false);
+  const result = await w.finish();
+  assert.equal(result.reachable, true);
+  assert.equal(w.log.orders.length, 1);
+  assert.equal(w.log.freezes.length, 1);
+  assert.equal(w.plannedState.get('job').phase, 'done');
+  assert.equal(w.state.get('rotation').server.id, '7300001');
+  assert.deepEqual(w.orders.list().map(({ id, purpose }) => [id, purpose]), [['7269056', 'old']]);
+});
+
+test('расписание: при потерянном ответе хостера запись заказа сохраняется для уборки', async () => {
+  const w = await world('scheduled-order-failure', { fakeAge: true, failAt: 'order' });
+  const at = w.now() + 20 * 3600000;
+  w.state.set('startedAt', w.now());
+  w.plannedState.set('job', { at, key: rotationKey(w.config, w.state), phase: 'preparing' });
+  await assert.rejects(w.createWorker().migrate({ automatic: true, planned: { stage: 'prepare', at } }), /итог заказа.*неизвестен/);
+  assert.equal(w.log.orders.length, 1);
+  assert.equal(w.log.freezes.length, 0);
+  assert.equal(w.orders.list()[0].name, w.log.orders[0].name);
+  assert.equal(w.plannedState.get('job').phase, 'failed');
+});
+
+test('расписание: сбой финального архива приводит к разморозке, переключение не запускается', async () => {
+  const w = await scheduled('scheduled-freeze-failure', { freeze: 'none' });
+  await assert.rejects(w.finish(), /не замораживается/);
+  assert.equal(w.log.freezes.length, 2);
+  assert.equal(w.log.unfreezes.length, 1);
+  assert.ok(!w.log.root.some(({ script }) => script.includes('restore.sh --finish')));
+  assert.deepEqual(w.log.removed, ['7300001']);
+  assert.equal(w.plannedState.get('job').phase, 'failed');
+});
+
+test('расписание: когда VPN-имя ещё на старом IP, оба VPS сохраняются', async () => {
+  const w = await scheduled('scheduled-dns-failure', { vpnSynced: false });
+  await assert.rejects(w.finish(), /портал и имя VPN не подтвердили переход/);
+  assert.equal(w.plannedState.get('job').phase, 'needs-check');
+  assert.equal(w.state.get('rotation'), null);
+  assert.deepEqual(w.orders.list(), []);
+  assert.deepEqual(w.log.removed, []);
+  assert.equal(w.log.unfreezes.length, 0);
+});
+
+test('расписание: подтверждённый сбой до DNS откатывается, неопределённый сбой сохраняет оба VPS', async () => {
+  const beforeDns = await scheduled('scheduled-finish6', { failAt: 'finish6' });
+  await assert.rejects(beforeDns.finish(), /6\/7/);
+  assert.equal(beforeDns.plannedState.get('job').phase, 'failed');
+  assert.equal(beforeDns.log.unfreezes.length, 1);
+  assert.deepEqual(beforeDns.log.removed, ['7300001']);
+
+  const duringDns = await scheduled('scheduled-finish7', { failAt: 'finish7' });
+  await assert.rejects(duringDns.finish(), /7\/7/);
+  assert.equal(duringDns.plannedState.get('job').phase, 'needs-check');
+  assert.deepEqual(duringDns.log.removed, []);
+  assert.equal(duringDns.log.unfreezes.length, 0);
+});
 
 test('переезд: плановый — заказ, подготовка, заморозка, перенос, проверка, старый — на удаление', { skip: !HAS_TOOLS && 'нет age' }, async () => {
   const w = await world('planned');

@@ -354,6 +354,7 @@ ask_value() {
 }
 
 apply_schedule() {
+  if migration_running; then printf '\n%sИдёт переезд — изменить расписание можно после него%s\n' "$Y" "$R"; return; fi
   set_env "$1" "$2"
   compose up -d >/dev/null 2>&1 || { printf '%sДиспетчер не перезапустился%s\n' "$RD" "$R"; return; }
   printf '\n%s✓ Сохранено.%s\n\n' "$G" "$R"
@@ -540,20 +541,22 @@ screen_delete() {
 screen_rotation() {
   header 'Плановая смена сервера'
   cli schedule
-  local on
+  local on next
   on=$(setting ROTATION_ENABLED)
   printf '\n'
-  if [ "$on" = 0 ] || [ "$on" = off ] || [ "$on" = no ]; then
-    printf '  %s1%s — включить плановую смену (раз в %s дн.)\n' "$B" "$R" "$(setting ROTATION_DAYS | grep . || echo 3)"
-  else
-    printf '  %s1%s — выключить плановую смену: сервер работает, пока его не заблокируют\n' "$B" "$R"
-  fi
+  case "${on,,}" in
+    0|off|no|false|нет)
+      next=1
+      printf '  %s1%s — включить плановую смену (раз в %s дн.)\n' "$B" "$R" "$(setting ROTATION_DAYS | grep . || echo 3)"
+      ;;
+    *)
+      next=0
+      printf '  %s1%s — выключить плановую смену: сервер работает, пока его не заблокируют\n' "$B" "$R"
+      ;;
+  esac
   printf '  %s0%s — назад\n' "$B" "$R"
   [ "$(ask)" = 1 ] || return
-  if [ "$on" = 0 ] || [ "$on" = off ] || [ "$on" = no ]; then set_env ROTATION_ENABLED 1; else set_env ROTATION_ENABLED 0; fi
-  compose up -d >/dev/null 2>&1 || { printf '%sДиспетчер не перезапустился%s\n' "$RD" "$R"; pause; return; }
-  printf '\n%s✓ Сохранено.%s\n\n' "$G" "$R"
-  cli schedule
+  apply_schedule ROTATION_ENABLED "$next"
   pause
 }
 

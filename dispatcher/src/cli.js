@@ -1,7 +1,7 @@
 import { loadConfig, ConfigError } from './config.js';
 import { createDispatcher, keysHelp } from './app.js';
 import { zomroTest } from './zomroTest.js';
-import { schedule, msk, span, ago, lastMove } from './schedule.js';
+import { msk, span, ago, lastMove } from './schedule.js';
 import { readFileSync, readdirSync, existsSync } from 'node:fs';
 import { abandonMigration } from './hang.js';
 import { join } from 'node:path';
@@ -328,7 +328,8 @@ async function main(argv, { env = process.env, out = console.log, deps = {} } = 
       return 0;
     }
     case 'schedule': {
-      const s = schedule({ config, state: d.state });
+      const s = d.planned.timetable();
+      const job = d.planned.status();
       const auto = config.autoProviders.map((n) => NAMES[n]).join(' → ') || 'нет';
       const manual = config.providers.filter((n) => config.modes[n] === 'manual').map((n) => NAMES[n]);
       if (!s.enabled) {
@@ -340,9 +341,17 @@ async function main(argv, { env = process.env, out = console.log, deps = {} } = 
       out(`Плановая смена: каждые ${s.everyDays} дн. в ${s.at} МСК, новый сервер заказывается за ${s.overlapHours} ч`);
       out(`Хостеры для смены: ${auto}${manual.length ? `; только по запросу: ${manual.join(', ')}` : ''}`);
       out(`Последняя смена: ${s.lastAt ? `${msk(s.lastAt)} — ${ago(Date.now() - s.lastAt)}` : 'ещё не было'}`);
+      if (job?.phase === 'preparing' || job?.phase === 'prepared' || job?.phase === 'finishing') {
+        const phases = { preparing: 'заказ и подготовка', prepared: 'новый VPS готов', finishing: 'переключение на новый VPS' };
+        out(`Плановая смена на ${msk(job.at)}: ${phases[job.phase]}`);
+        if (job.server) out(`Новый сервер: ${job.server.name}`);
+        return 0;
+      }
       out(`Следующая смена: ${msk(s.next)} — через ${span(s.left)}`);
       out(`Заказ нового сервера: ${msk(s.orderAt)}${s.orderAt <= Date.now() ? ' (время уже наступило)' : ` — через ${span(s.orderAt - Date.now())}`}`);
-      out('⚠️ Автоматическая смена ещё не включена (этап 7): это расписание, по которому она будет работать');
+      if (d.planned.needsAttention()) out(`⚠️ Плановая смена приостановлена: ${job.error}. Проверьте оба VPS и DNS.`);
+      else if (!config.autoProviders.length) out('⚠️ Плановая смена не запустится: нет хостеров в режиме auto.');
+      else if (job?.phase === 'failed') out(`⚠️ Плановая смена на ${msk(job.at)} не удалась: ${job.error}`);
       return 0;
     }
     case 'tariff': {
@@ -458,6 +467,12 @@ async function main(argv, { env = process.env, out = console.log, deps = {} } = 
         out('Переезд: новый сервер у Zomro, перенос портала, ключей и имён, старый — на удаление.\nZomro собирает сервер долго — переезд может занять часы. Если уверены: migrate --yes');
         return 2;
       }
+      const planned = argv.indexOf('--planned');
+      if (planned >= 0) {
+        const [stage, slot] = argv.slice(planned + 1);
+        const r = await d.migration({ out }).migrate({ reason: 'по расписанию', automatic: true, planned: { stage, at: Number(slot) } });
+        return r.ok ? 0 : 1;
+      }
       // --provider ИМЯ — только у этого хостера; иначе все по CLOUD_ORDER (и те, что «по запросу»)
       const i = argv.indexOf('--provider');
       const chosen = i >= 0 ? argv[i + 1] : null;
@@ -478,7 +493,7 @@ async function main(argv, { env = process.env, out = console.log, deps = {} } = 
         out('Переездов ещё не было');
         return 0;
       }
-      const phases = { start: 'начало', building: 'Zomro собирает сервер', ssh: 'жду SSH на новом сервере', prepare: 'подготовка нового сервера', freeze: 'заморозка старого', finish: 'перенос портала и имён', verify: 'проверка из РФ', done: '✓ закончен', failed: '✗ не удался' };
+      const phases = { start: 'начало', building: 'хостер собирает сервер', ssh: 'жду SSH на новом сервере', prepare: 'подготовка нового сервера', prepared: 'новый сервер готов, жду времени смены', freeze: 'заморозка старого', finish: 'перенос портала и имён', verify: 'проверка из РФ', done: '✓ закончен', failed: '✗ не удался' };
       out(`Переезд ${m.reason ?? ''}: ${phases[m.phase] ?? m.phase}`);
       out(`Начат: ${msk(m.startedAt)}${m.finishedAt ? `, закончен: ${msk(m.finishedAt)}` : `, обновлён: ${msk(m.updatedAt)}`}`);
       if (m.server) out(`Новый сервер: ${m.server}${m.ip ? `, IP ${m.ip}` : ''}`);
@@ -495,10 +510,10 @@ async function main(argv, { env = process.env, out = console.log, deps = {} } = 
       }
       const r = abandonMigration({ config, state: d.state }, 'прерван: диспетчер перезапущен');
       out('✓ Замок переезда снят, переезд записан как «не удался»');
-      if (r.server) out(`  Заказанный сервер ${r.server} — в учёте заказов: служба удалит его сама`);
+      if (r.server) out(`  Заказанный сервер ${r.server} — в учёте заказов.`);
       if (r.frozenRisk) {
         out('⚠️ Переезд прервался после заморозки старого сервера: бот и сайт там могут стоять.');
-        out('   Проверьте: node src/cli.js server; frozen — разморозьте: node src/cli.js unfreeze');
+        out('   Проверьте оба VPS и DNS. Если имена остались на старом сервере, разморозьте его через unfreeze.');
       }
       return 0;
     }

@@ -5,8 +5,8 @@ import { join } from 'node:path';
 // Служба (index.js) и команды (cli.js, в том числе долгий переезд) — разные процессы. Поэтому
 // каждое чтение берёт файл с диска, а запись — перечитывает его и меняет только свой ключ:
 // иначе один процесс затирал бы то, что записал другой.
-function createState(dataDir) {
-  const file = join(dataDir, 'state.json');
+function createState(dataDir, filename = 'state.json') {
+  const file = join(dataDir, filename);
   const load = () => {
     try {
       return JSON.parse(readFileSync(file, 'utf8'));

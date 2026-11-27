@@ -342,6 +342,7 @@ else
 fi
 if [[ "$ANSWER" =~ ^[yYдД] ]]; then
   cli duckdns --takeover
+  printf 'DNS_NAMES %s %s\n' "$PORTAL_HOST" "$VPN_HOST"
   if [ -f "$WORK/caddy.tar.gz" ]; then
     # прежние сертификаты: Let's Encrypt выпускает не больше 5 одинаковых в неделю
     compose run --rm --no-deps -T -u root --entrypoint sh -v "$WORK:/restore:ro" caddy -c 'tar -xzf /restore/caddy.tar.gz -C /data'

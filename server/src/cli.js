@@ -181,6 +181,7 @@ async function main(argv, {
       case 'duckdns': {
         if (!watchdog.configured) throw new PortalError(400, describeStatus(watchdog.status()).join('\n'));
         const status = values.takeover ? await watchdog.takeover() : await watchdog.tick();
+        if (values.takeover && status.state === 'error') throw new PortalError(502, status.message);
         for (const line of describeStatus(status)) out(line);
         return;
       }

@@ -50,17 +50,19 @@ async function cycle() {
   try {
     hang.cycle.step('проверка сервера из РФ');
     const result = await d.monitor.tick();
-    // долго недоступен из РФ — аварийный переезд (emergency.js)
-    hang.cycle.step('аварийный переезд');
-    await d.emergency.tick(result);
     if (result.status === 'up') {
       // накопленные сообщения — через сервер, пока он на связи (telegram.js)
       hang.cycle.step('отправка накопленных сообщений');
       await d.notify.flush();
       // бэкап — только когда сервер отвечает: с недоступного не забрать
       hang.cycle.step('бэкап с сервера');
-      await d.backups.tick();
+      if (d.planned.status()?.phase !== 'finishing') await d.backups.tick();
     }
+    hang.cycle.step('плановая смена');
+    await d.planned.tick(result);
+    // Если перенос мог прерваться после заморозки, сначала нужно определить рабочий VPS.
+    hang.cycle.step('аварийный переезд');
+    if (!d.planned.needsAttention()) await d.emergency.tick(result);
   } catch (err) {
     console.error('Ошибка цикла:', err?.message);
   }
@@ -69,7 +71,7 @@ async function cycle() {
     lastSweep = Date.now();
     try {
       hang.cycle.step('уборка заказов');
-      await d.orders.sweep({ clouds: d.clouds, notify: d.notify });
+      await d.orders.sweep({ clouds: d.clouds, notify: d.notify, protects: d.planned.protects });
     } catch (err) {
       console.error('Уборка заказов:', err?.message);
     }

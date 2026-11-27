@@ -5,6 +5,8 @@ import { tcpOpen } from './zomroTest.js';
 import { serverName } from './cloud.js';
 import { stopper, CancelledError } from './cancel.js';
 import { chooseTariff } from './tariffPick.js';
+import { rotationKey } from './plannedRotation.js';
+import { msk } from './schedule.js';
 
 // Переезд на новый сервер (docs/PLAN.md, раздел 15, этапы 5–7). Один и тот же порядок и для
 // переезда по команде, и для плановой смены, и для аварии:
@@ -38,7 +40,7 @@ class MigrationError extends Error {}
 
 const NAMES = { zomro: 'Zomro', aeza: 'Aeza' };
 
-function createMigration({ config, keys, state, clouds = {}, backups, monitor, orders, notify, run, lookup, now = () => Date.now(), wait = sleep, tcp = tcpOpen, out = console.log, cancel = null }) {
+function createMigration({ config, keys, state, plannedState, clouds = {}, backups, monitor, orders, notify, run, lookup, now = () => Date.now(), wait = sleep, tcp = tcpOpen, out = console.log, cancel = null }) {
   const dir = join(config.dataDir, 'migration');
   const lockFile = join(config.dataDir, 'migration.lock');
   const knownRoot = join(dir, 'known_hosts_root');
@@ -177,12 +179,14 @@ function createMigration({ config, keys, state, clouds = {}, backups, monitor, o
     await root(server, `install -d -m 700 ${WORK} && cat > ${WORK}/${name} && chmod 600 ${WORK}/${name}`, `передача ${name}`, { input: data, timeoutMs: 10 * MIN });
   }
 
-  async function restore(server, mode, sealed) {
+  async function restore(server, mode, sealed, beforeRun = () => {}) {
     for (const [name, data] of Object.entries(sealed.files)) await upload(server, name, data);
     await upload(server, 'key', Buffer.from(sealed.key));
     const caddy = sealed.files['caddy.tar.gz.age'] ? `--caddy ${WORK}/caddy.tar.gz.age ` : '';
+    beforeRun();
     const output = await root(server, `NO_COLOR=1 bash /root/sub-website/server/scripts/restore.sh ${mode} --key-file ${WORK}/key ${caddy}${WORK}/backup.tar.gz.age; code=$?; rm -rf ${WORK}; exit $code`, `restore.sh ${mode}`, { timeoutMs: 45 * MIN });
     for (const line of output.split('\n').filter((l) => /✓|⚠|✗|▶/.test(l)).slice(-12)) say(`  ${line.trim()}`);
+    return output;
   }
 
   async function bootstrap(server) {
@@ -203,12 +207,27 @@ function createMigration({ config, keys, state, clouds = {}, backups, monitor, o
     writeFileSync(join(servers, `${server.name}.json`), `${JSON.stringify({ id: server.id, name: server.name, ip: server.ip, password: server.password, createdAt: now() })}\n`, { mode: 0o600 });
   }
 
-  async function resolves() {
+  async function resolves(host = config.portalHost) {
     try {
-      return (await lookup(config.portalHost)).address;
+      return (await lookup(host)).address;
     } catch {
       return null;
     }
+  }
+
+  const identity = ({ id, name, ip, provider }) => ({ id, name, ip, provider });
+
+  async function preparedServer(expected) {
+    const cloud = clouds[expected.provider];
+    const server = (await cloud.servers()).find((candidate) => candidate.id === expected.id);
+    if (!server?.ours || server.ip !== expected.ip || server.name !== expected.name) {
+      throw new MigrationError('подготовленный VPS не найден у хостера или его адрес изменился');
+    }
+    const saved = JSON.parse(readFileSync(join(config.dataDir, 'servers', `${server.name}.json`), 'utf8'));
+    if (saved.id !== server.id || saved.ip !== server.ip || typeof saved.password !== 'string' || !saved.password) {
+      throw new MigrationError('настройки SSH подготовленного VPS не совпадают с данными хостера');
+    }
+    return { ...server, provider: expected.provider, password: saved.password };
   }
 
   // хостеры этого переезда: по команде — все (или один выбранный), автоматически — только auto
@@ -217,13 +236,14 @@ function createMigration({ config, keys, state, clouds = {}, backups, monitor, o
 
   // Заказ у хостеров по порядку CLOUD_ORDER: у одного сервер не собрался (или нет денег) —
   // заказ удаляется, и очередь следующего. Zomro, бывает, собирает часами — запасной хостер спасает.
-  async function orderServer() {
+  async function orderServer({ planned = false } = {}) {
     const errors = [];
     const list = providerList();
     for (const name of list) {
       const cloud = clouds[name];
       const settings = config[name];
       let ordered = null;
+      let submitted = null;
       try {
         const { amount, currency } = await cloud.balance();
         if (amount < 1) throw new MigrationError(`на балансе ${amount} ${currency} — пополните хотя бы до 2 EUR`);
@@ -242,8 +262,15 @@ function createMigration({ config, keys, state, clouds = {}, backups, monitor, o
             await notify(`ℹ️ Тариф у ${NAMES[name]} сейчас заказать нельзя (${pick.skipped[0]}) — для переезда беру ${t.name}, ${t.price}. Выбранный тариф в настройках не меняю.`);
           }
         }
+        const tracking = { until: now() + settings.buildTimeout + settings.sshTimeout + 2 * HOUR, purpose: 'migration', provider: name };
+        if (planned) {
+          // Запись переживёт обрыв сразу после принятия заказа хостером.
+          orders.track(wanted, tracking);
+          submitted = wanted;
+        }
         ordered = await cloud.order({ name: wanted, ...extra });
-        orders.track(ordered.name, { until: now() + settings.buildTimeout + settings.sshTimeout + 2 * HOUR, purpose: 'migration', provider: name });
+        orders.track(ordered.name, tracking);
+        if (submitted && submitted !== ordered.name) orders.done(submitted);
         phase('building', { server: ordered.name, provider: name });
         say(`Заказан ${ordered.name} у ${NAMES[name]}, жду сборку до ${Math.round(settings.buildTimeout / MIN)} мин (отменить ожидание — меню, «Переезд сейчас»)`);
         const stop = stopper(cancel, now());
@@ -270,6 +297,12 @@ function createMigration({ config, keys, state, clouds = {}, backups, monitor, o
       } catch (err) {
         errors.push(`${NAMES[name]}: ${err.message}`);
         say(`✗ ${NAMES[name]}: ${err.message}`);
+        if (submitted && !ordered) {
+          if (!(err.status >= 400 && err.status < 500 && err.status !== 408)) {
+            throw new MigrationError(`итог заказа ${submitted} у ${NAMES[name]} неизвестен: ${err.message}. Запись оставлена для уборки.`);
+          }
+          orders.done(submitted);
+        }
         if (err instanceof CancelledError && ordered) {
           // собирающийся сервер удалить нельзя — в очередь на удаление: служба удалит после сборки
           const r = await orders.abandon({ cloud, provider: name, name: ordered.name });
@@ -299,18 +332,34 @@ function createMigration({ config, keys, state, clouds = {}, backups, monitor, o
   // --- переезд ---
   // providers — хостеры по порядку для этого переезда (по умолчанию — все из CLOUD_ORDER);
   // automatic — переезд без вашей команды (смена по расписанию, авария): только хостеры в режиме auto
-  async function migrate({ reason = 'по команде', providers = null, automatic = false } = {}) {
+  async function migrate({ reason = 'по команде', providers = null, automatic = false, planned = null } = {}) {
     only = providers ?? (automatic ? config.autoProviders : null);
     if (automatic && !providerList().length) throw new MigrationError(`Для автоматического переезда нет хостера в режиме auto (сейчас: ${config.providers.map((n) => `${NAMES[n]} — ${config.modes[n]}`).join(', ') || 'ни одного'})`);
     if (!providerList().length) throw new MigrationError('Хостер не настроен: впишите в .env ZOMRO_USER и ZOMRO_PASSWORD или AEZA_API_KEY');
     lock();
     let server = null;
     let frozen = null;
+    const freezeAttempts = [];
     let namesMoved = false;
+    let job = null;
+    const finishPlanned = planned?.stage === 'finish';
+    const savePlan = (extra) => {
+      job = { ...job, ...extra };
+      plannedState.set('job', job);
+    };
     try {
-      state.set('migration', { phase: 'start', reason, startedAt: started, updatedAt: now(), error: null });
+      if (planned) {
+        const pending = plannedState?.get('job');
+        const expected = { prepare: 'preparing', finish: 'finishing' }[planned.stage];
+        if (!expected || !config.rotation.enabled || pending?.phase !== expected || pending.at !== planned.at ||
+            pending.key !== rotationKey(config, state) || (finishPlanned && (now() < pending.at || !providerList().includes(pending.server?.provider)))) {
+          throw new MigrationError('эта плановая смена уже не актуальна');
+        }
+        job = pending;
+      }
+      state.set('migration', { phase: 'start', reason, startedAt: started, updatedAt: now(), error: null, ...(job?.server ? { server: job.server.name, provider: job.server.provider, ip: job.server.ip } : {}) });
       const latest = backups.latest();
-      if (!latest) throw new MigrationError('На диспетчере нет ни одного бэкапа — переезжать не с чего');
+      if (!latest && !finishPlanned) throw new MigrationError('На диспетчере нет ни одного бэкапа — переезжать не с чего');
       const oldIp = await resolves();
       let oldServer = null;
       for (const name of providerList()) {
@@ -319,24 +368,42 @@ function createMigration({ config, keys, state, clouds = {}, backups, monitor, o
         if (found) oldServer = { ...found, provider: name };
       }
       const probe = await monitor.probeServer();
+      if (planned && (!oldIp || !probe.ok || probe.ip !== oldIp || (finishPlanned && job.oldIp !== oldIp))) {
+        throw new MigrationError('исходный сервер недоступен или его адрес изменился — плановая смена остановлена');
+      }
       say(`Переезд ${reason}. Сейчас: ${config.portalHost} → ${oldIp ?? '?'}${oldServer ? ` (${oldServer.name || oldServer.id}, ${NAMES[oldServer.provider]})` : ''}, из РФ ${probe.ok ? 'доступен' : `недоступен: ${probe.reason}`}. Хостеры по очереди: ${providerList().map((n) => NAMES[n]).join(' → ')}`);
-      await notify(`🚚 Переезд ${reason}: заказываю новый сервер (${providerList().map((n) => NAMES[n]).join(', затем ')}). Сообщу, когда он будет готов.`);
-
-      // 1. заказ и сборка — у первого хостера, который даст сервер
-      server = await orderServer();
-      say(`✓ Сервер готов: ${server.name} у ${NAMES[server.provider]}, IP ${server.ip} (через ${elapsed()})`);
-
-      // 2. подготовка заранее — старый сервер работает
-      phase('prepare');
-      await bootstrap(server);
-      say('Подготовка нового сервера (restore.sh --prepare)…');
-      await restore(server, '--prepare', await reseal({ 'backup.tar.gz.age': readFileSync(latest.file) }));
-      say('✓ Новый сервер подготовлен: AmneziaWG с прежними ключами');
+      if (finishPlanned) {
+        server = await preparedServer(job.server);
+        if (server.ip === oldIp) throw new MigrationError('подготовленный VPS уже отвечает за имя портала');
+        await root(server, 'test -s /home/deploy/family-vpn/.prepared', 'проверка подготовленного VPS', { timeoutMs: MIN });
+        await notify(`🚚 Плановая смена на ${msk(job.at)}: переключаю портал на подготовленный VPS ${server.name}.`);
+      } else {
+        await notify(`🚚 Переезд ${reason}: заказываю новый сервер (${providerList().map((n) => NAMES[n]).join(', затем ')}). Сообщу, когда он будет готов.`);
+        // 1–2. Заказ и подготовка, пока старый сервер работает.
+        server = await orderServer({ planned: Boolean(planned) });
+        say(`✓ Сервер готов: ${server.name} у ${NAMES[server.provider]}, IP ${server.ip} (через ${elapsed()})`);
+        phase('prepare');
+        await bootstrap(server);
+        say('Подготовка нового сервера (restore.sh --prepare)…');
+        await restore(server, '--prepare', await reseal({ 'backup.tar.gz.age': readFileSync(latest.file) }));
+        say('✓ Новый сервер подготовлен: AmneziaWG с прежними ключами');
+        if (planned) {
+          const expiresAt = Math.max(now(), job.at) + 2 * HOUR;
+          orders.track(server.name, { until: expiresAt, purpose: 'migration', provider: server.provider, id: server.id });
+          phase('prepared');
+          savePlan({ phase: 'prepared', server: identity(server), oldIp, expiresAt });
+          await notify(`✓ VPS ${server.name} подготовлен к плановой смене на ${msk(job.at)}. До переключения портал остаётся на старом VPS.`);
+          return { ok: true, prepared: true };
+        }
+      }
 
       // 3. заморозка старого — напрямую, иначе через новый сервер
+      if (finishPlanned && (await resolves()) !== oldIp) throw new MigrationError('адрес исходного портала изменился перед заморозкой');
       phase('freeze');
+      if (finishPlanned) savePlan({ freezeStarted: true });
       let final = null;
       for (const [how, options] of [['напрямую', {}], ['через новый сервер', { proxy: viaNew(server) }]]) {
+        if (finishPlanned) freezeAttempts.push(options);
         try {
           final = await backups.freeze(options);
           frozen = options;
@@ -351,7 +418,7 @@ function createMigration({ config, keys, state, clouds = {}, backups, monitor, o
         sealed = await reseal({ 'backup.tar.gz.age': readFileSync(final.backup), 'caddy.tar.gz.age': readFileSync(final.caddy) });
       } else {
         // старый сервер не отвечает ни из РФ, ни из-за рубежа — значит, он мёртв: с последнего бэкапа
-        if (probe.ok) throw new MigrationError('старый сервер доступен из РФ, но не замораживается — переезд остановлен, чтобы не было двух ботов. Обновите портал на старом сервере');
+        if (finishPlanned || probe.ok) throw new MigrationError('старый сервер доступен из РФ, но не замораживается — переезд остановлен, чтобы не было двух ботов. Обновите портал на старом сервере');
         say(`⚠️ Старый сервер не отвечает — переезжаю с последнего бэкапа (${latest.file.split('/').at(-1)})`);
         await notify(`⚠️ Старый сервер не отвечает ни из РФ, ни из-за рубежа — переезжаю с последнего бэкапа. Изменения после него (если были) потеряются.`);
         sealed = await reseal({ 'backup.tar.gz.age': readFileSync(latest.file) });
@@ -360,12 +427,20 @@ function createMigration({ config, keys, state, clouds = {}, backups, monitor, o
       // 4. портал, имена, Caddy — на новом
       phase('finish');
       say('Перенос портала и имён (restore.sh --finish)…');
+      let restored;
+      let restoreStarted = false;
       try {
-        await restore(server, '--finish', sealed);
+        restored = await restore(server, '--finish', sealed, () => { restoreStarted = true; });
       } catch (err) {
         // имена DuckDNS переносятся на шаге 7/7: упало там — они, может быть, уже на новом (DNS
         // ещё может отдавать старый IP). Тогда не откатывать: старый портал проснулся бы вторым ботом
-        namesMoved = /7\/7/.test(err.message) || (await resolves()) === server.ip;
+        if (finishPlanned) {
+          // При обрыве SSH удалённая команда могла продолжиться. Без подтверждённой
+          // остановки до шага смены имён сохраняем оба VPS для проверки.
+          namesMoved = restoreStarted && (!/код 1\b[\s\S]*Остановка на шаге «[1-6]\/7\b/.test(err.message) || (await resolves()) !== oldIp);
+        } else {
+          namesMoved = /7\/7/.test(err.message) || (await resolves()) === server.ip;
+        }
         throw err;
       }
       namesMoved = true;
@@ -374,55 +449,76 @@ function createMigration({ config, keys, state, clouds = {}, backups, monitor, o
 
       // 5. проверка из РФ
       phase('verify');
+      const names = /^DNS_NAMES ([\w.-]+) ([\w.-]+)\r?$/m.exec(restored);
+      if (finishPlanned && names?.[1] !== config.portalHost) throw new MigrationError('не удалось подтвердить имена портала и VPN после восстановления');
       const verifyDeadline = now() + 15 * MIN;
       let seen = null;
+      let reachable = false;
       for (;;) {
         seen = await monitor.probeServer();
-        if (seen.ok && seen.ip === server.ip) break;
-        if (now() >= verifyDeadline) break;
+        reachable = seen.ok && seen.ip === server.ip && (!finishPlanned || (await resolves(names[2])) === server.ip);
+        if (reachable || now() >= verifyDeadline) break;
         await wait(30000);
       }
-      const reachable = seen.ok && seen.ip === server.ip;
+      if (finishPlanned && !reachable) throw new MigrationError('портал и имя VPN не подтвердили переход на новый VPS из РФ');
       say(reachable ? `✓ Из РФ: ${config.portalHost} → ${server.ip}, портал отвечает` : `⚠️ Из РФ новый сервер пока не виден: ${seen.reason ?? `имя ведёт на ${seen.ip}`}`);
       await backups.trustHost();
       const pulled = await backups.pull();
+      if (finishPlanned && !pulled.ok) throw new MigrationError(`не получен бэкап с нового VPS: ${pulled.error}`);
       say(pulled.ok ? '✓ Бэкап с нового сервера получен' : `⚠️ Бэкап с нового сервера не получен: ${pulled.error}`);
       // ключ диспетчера у root больше не нужен
       await rootSshRetry(server, `sed -i '/${MARK}/d' /root/.ssh/authorized_keys`, { timeoutMs: MIN });
 
       // 6. старый сервер — на удаление после переподключения семьи
       let oldNote = '';
-      if (oldServer && oldServer.id !== server.id) {
+      if (oldServer && (oldServer.provider !== server.provider || oldServer.id !== server.id)) {
         if (oldServer.ours) {
-          orders.track(oldServer.name, { until: now() + config.migration.keepOldHours * HOUR, purpose: 'old', provider: oldServer.provider });
+          orders.track(oldServer.name, { until: now() + config.migration.keepOldHours * HOUR, purpose: 'old', provider: oldServer.provider, id: oldServer.id });
           oldNote = `Старый сервер ${oldServer.name} удалю через ${config.migration.keepOldHours} ч.`;
         } else {
           oldNote = `Старый сервер ${oldServer.name || oldServer.id} (id ${oldServer.id}) создан не диспетчером — удалите его сами: в кабинете Zomro или командой remove ${oldServer.id} --yes --foreign.`;
         }
       }
-      state.set('rotation', { lastAt: now(), server: { id: server.id, name: server.name, ip: server.ip, provider: server.provider }, previous: oldServer ? { id: oldServer.id, name: oldServer.name, ip: oldServer.ip, provider: oldServer.provider } : null });
+      state.set('rotation', { lastAt: now(), server: identity(server), previous: oldServer ? identity(oldServer) : null });
       phase('done', { finishedAt: now() });
+      if (finishPlanned) savePlan({ phase: 'done' });
       say(`✓ Переезд закончен за ${elapsed()}. ${oldNote}`);
       await notify(`✅ Переезд ${reason} закончен за ${elapsed()}: ${config.portalHost} → ${server.ip} (${server.name}).${reachable ? '' : ' ⚠️ Из РФ новый сервер пока не виден — проверьте через 15 минут.'} Семье: выключить и включить VPN. ${oldNote}`);
       return { ok: true, server, reachable };
     } catch (err) {
+      if (planned && !job) throw err;
       const message = err.message;
       say(`✗ ${message}`);
       state.set('migration', { ...(state.get('migration') ?? {}), phase: 'failed', error: message, updatedAt: now() });
       if (namesMoved) {
         if (server) orders.done(server.name);
-        await notify(`⚠️ Переезд: имена уже на новом сервере ${server?.ip}, но не всё прошло гладко: ${message}. Откатывать нечего — проверьте портал и бота.`);
+        if (finishPlanned) savePlan({ phase: 'needs-check', error: message });
+        await notify(finishPlanned
+          ? `⚠️ Плановая смена требует проверки DNS и работы портала: ${message}. Оба VPS сохранены.`
+          : `⚠️ Переезд: имена уже на новом сервере ${server?.ip}, но не всё прошло гладко: ${message}. Откатывать нечего — проверьте портал и бота.`);
         throw err;
       }
       // откат: старый — разморозить, новый — удалить
-      if (frozen) {
+      let restoredOld = false;
+      let unfreezeError = null;
+      for (const route of frozen ? [frozen] : freezeAttempts) {
         try {
-          await backups.unfreeze(frozen);
+          await backups.unfreeze(route);
           say('↩ Старый сервер разморожен');
+          restoredOld = true;
+          break;
         } catch (e) {
+          unfreezeError = e;
           say(`✗ Старый сервер не разморозился: ${e.message}`);
-          await notify(`⚠️ Переезд не удался, и старый сервер не разморозился: ${e.message}. Бот и сайт остановлены — выполните unfreeze.`);
         }
+      }
+      if (unfreezeError && !restoredOld) {
+        if (finishPlanned) {
+          savePlan({ phase: 'needs-check', error: `не подтверждена разморозка: ${unfreezeError.message}` });
+          await notify(`⚠️ Плановая смена остановлена. Проверьте старый портал и выполните unfreeze при необходимости. Оба VPS сохранены.`);
+          throw err;
+        }
+        await notify(`⚠️ Переезд не удался, и старый сервер не разморозился: ${unfreezeError.message}. Бот и сайт остановлены — выполните unfreeze.`);
       }
       // неудачные заказы orderServer убрал сам; здесь — готовый новый сервер
       const target = server;
@@ -435,7 +531,8 @@ function createMigration({ config, keys, state, clouds = {}, backups, monitor, o
           say(`  новый сервер удалю позже (учёт заказов): ${e.message}`);
         }
       }
-      await notify(`⚠️ Переезд ${reason} не удался: ${message}. ${frozen ? 'Старый сервер снова работает.' : 'Старый сервер не трогали.'}`);
+      if (planned) savePlan({ phase: 'failed', error: message });
+      await notify(`⚠️ Переезд ${reason} не удался: ${message}. ${restoredOld ? 'Старый сервер снова работает.' : unfreezeError ? 'Старый сервер требует проверки.' : 'Старый сервер не трогали.'}`);
       throw err;
     } finally {
       unlock();

@@ -36,8 +36,8 @@ function createOrders(dataDir, { now = () => Date.now() } = {}) {
   }
 
   // заказ диспетчера; provider — у какого хостера (zomro, aeza): удалять — там же
-  function track(name, { until, purpose = 'test', provider = 'zomro' }) {
-    write({ name, purpose, provider, orderedAt: now(), until });
+  function track(name, { until, purpose = 'test', provider = 'zomro', id = null }) {
+    write({ name, purpose, provider, ...(id ? { id: String(id) } : {}), orderedAt: now(), until });
   }
 
   // в очередь на удаление — выбранный вами сервер (номер у хостера)
@@ -77,7 +77,7 @@ function createOrders(dataDir, { now = () => Date.now() } = {}) {
   // заказ диспетчера не нашёлся — ждать ещё сутки (мог застрять у хостера), потом забыть;
   // из очереди сервер исчез — значит, удалён (вами или хостером).
   // clouds — хостеры по имени ({ zomro, aeza }); cloud — один (прежний вызов, Zomro)
-  async function sweep({ cloud = null, clouds = null, notify, log = console }) {
+  async function sweep({ cloud = null, clouds = null, notify, log = console, protects = () => false }) {
     const due = list().filter((entry) => entry.until <= now());
     if (!due.length) return { removed: [], forgotten: [], waiting: [] };
     const byName = clouds ?? { zomro: cloud };
@@ -98,7 +98,8 @@ function createOrders(dataDir, { now = () => Date.now() } = {}) {
       }
       const manual = entry.purpose === 'manual';
       const label = manual ? `${entry.name || entry.id} (id ${entry.id})` : entry.name;
-      const server = lists[provider].find((s) => (manual ? s.id === entry.id : s.name === entry.name));
+      const server = lists[provider].find((s) => (entry.id ? s.id === entry.id : s.name === entry.name));
+      if (server && protects(provider, server)) continue;
       const status = server?.status ?? null;
       if (server && (server.ours || (manual && entry.foreign)) && !/delet/i.test(status ?? '')) {
         try {

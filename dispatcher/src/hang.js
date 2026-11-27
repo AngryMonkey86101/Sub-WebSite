@@ -32,7 +32,7 @@ function abandonMigration({ config, state, now = () => Date.now() }, reason) {
   const m = state.get('migration') ?? {};
   rmSync(lockPath(config), { force: true });
   state.set('migration', { ...m, phase: 'failed', error: reason, updatedAt: now() });
-  return { was: m.phase ?? null, server: m.server ?? null, frozenRisk: ['freeze', 'finish'].includes(m.phase) };
+  return { was: m.phase ?? null, server: m.server ?? null, frozenRisk: ['freeze', 'finish', 'verify'].includes(m.phase) };
 }
 
 function alive(pid) {
@@ -118,7 +118,7 @@ function createHangWatch({ config, state, notify, now = () => Date.now(), bootAt
     // замок старше запуска службы — процесс переезда погиб вместе с контейнером; или процесса нет
     if (st.mtimeMs < bootAt || (pidOk && !isAlive(pid))) {
       const r = abandonMigration({ config, state, now }, `прерван: процесс переезда остановился на шаге «${where}» без итога`);
-      await notify(`♻️ Переезд прервался на шаге «${where}» и не записал итог — замок снят, можно переезжать снова.${r.server ? ` Заказанный сервер ${r.server} — в учёте, удалится сам.` : ''}${r.frozenRisk ? ' ⚠️ Старый сервер мог остаться замороженным: проверьте (server) и разморозьте (unfreeze).' : ''}`);
+      await notify(`♻️ Переезд прервался на шаге «${where}» и не записал итог — замок снят.${r.server ? ` Заказанный сервер ${r.server} — в учёте.` : ''}${r.frozenRisk ? ' ⚠️ Старый сервер мог остаться замороженным. Проверьте оба VPS и DNS перед разморозкой (unfreeze) или повторным переездом.' : ' Можно переезжать снова.'}`);
       return { action: 'abandoned', phase };
     }
     if (!pidOk) return { action: 'none' };

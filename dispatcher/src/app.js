@@ -11,6 +11,7 @@ import { createOrders } from './orders.js';
 import { createMigration } from './migrate.js';
 import { createCancel } from './cancel.js';
 import { createEmergency } from './emergency.js';
+import { createPlannedRotation } from './plannedRotation.js';
 import { createBalanceWatch } from './balance.js';
 import { spawn } from 'node:child_process';
 import { openSync, closeSync } from 'node:fs';
@@ -19,9 +20,10 @@ import { fileURLToPath } from 'node:url';
 import { lookup as dnsLookup } from 'node:dns/promises';
 
 // Сборка диспетчера из частей — общая для службы (index.js) и команд (cli.js)
-async function createDispatcher({ config, fetch = globalThis.fetch, run = defaultRun, lookup, now = () => Date.now(), log = console, startEmergency = null }) {
+async function createDispatcher({ config, fetch = globalThis.fetch, run = defaultRun, lookup, now = () => Date.now(), log = console, startEmergency = null, startPlanned = null }) {
   mkdirSync(config.dataDir, { recursive: true, mode: 0o700 });
   const state = createState(config.dataDir);
+  const plannedState = createState(config.dataDir, 'planned-rotation.json');
   if (!state.get('startedAt')) state.set('startedAt', now());
   // сообщения: напрямую, иначе через сервер VPN, иначе в очередь (telegram.js). Сервер и монитор
   // создаются ниже — сюда они попадают к моменту первой отправки
@@ -47,22 +49,30 @@ async function createDispatcher({ config, fetch = globalThis.fetch, run = defaul
   const resolve = lookup ?? ((host) => dnsLookup(host, { family: 4 }));
   const cancel = createCancel(config.dataDir, { now });
   // переезд — по запросу: out (вывод хода) у команды свой
-  const migration = (options = {}) => createMigration({ config, keys, state, clouds, backups, monitor, orders, notify, run, lookup: resolve, now, cancel, ...options });
+  const migration = (options = {}) => createMigration({ config, keys, state, plannedState, clouds, backups, monitor, orders, notify, run, lookup: resolve, now, cancel, ...options });
   // аварийный переезд — отдельным процессом (как «Переезд сейчас» из меню): служба продолжает
   // проверять сервер, ход переезда — в /data/migrate.log
-  const emergency = createEmergency({ config, state, notify, start: startEmergency ?? ((info) => spawnMigration(config, info, log)), now, log });
+  const emergency = createEmergency({ config, state, notify, start: startEmergency ?? (({ minutes }) => {
+    spawnMigration(config, ['--emergency', String(minutes)]).catch((err) => log.error?.(`Аварийный переезд: ${err.message}`));
+  }), now, log });
+  const planned = createPlannedRotation({
+    config, state, storage: plannedState, orders, notify, now, log, currentIp: () => monitor.status().ip,
+    start: startPlanned ?? (({ stage, at }) => spawnMigration(config, ['--planned', stage, String(at)]))
+  });
   // баланс Zomro меньше порога — напоминания админу, пока не пополнят (balance.js)
   const balance = createBalanceWatch({ config, state, cloud: clouds.zomro ?? null, notify, now, log });
-  return { config, state, notify, keys, monitor, backups, cloud, clouds, orders, migration, cancel, emergency, balance, run };
+  return { config, state, notify, keys, monitor, backups, cloud, clouds, orders, migration, cancel, emergency, planned, balance, run };
 }
 
-function spawnMigration(config, { minutes }, log = console) {
+function spawnMigration(config, args) {
   const fd = openSync(join(config.dataDir, 'migrate.log'), 'w', 0o600);
   try {
     const cli = fileURLToPath(new URL('./cli.js', import.meta.url));
-    const child = spawn(process.execPath, [cli, 'migrate', '--yes', '--emergency', String(minutes)], { stdio: ['ignore', fd, fd] });
-    child.on('error', (err) => log.error?.(`Аварийный переезд: ${err.message}`));
-    child.on('exit', (code) => log.log?.(`Аварийный переезд закончился, код ${code}`));
+    const child = spawn(process.execPath, [cli, 'migrate', '--yes', ...args], { stdio: ['ignore', fd, fd] });
+    return new Promise((resolve, reject) => {
+      child.once('error', reject);
+      child.once('exit', (code, signal) => code === 0 ? resolve() : reject(new Error(`процесс завершился (${signal ?? code}), подробности в migrate.log`)));
+    });
   } finally {
     closeSync(fd);
   }
